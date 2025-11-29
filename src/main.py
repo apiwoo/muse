@@ -8,74 +8,128 @@ import cv2
 import time
 import numpy as np
 
-# 현재 파일(main.py)의 상위 폴더(MUSE_Project)를 파이썬 검색 경로에 추가
+# 경로 설정
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.utils.config import Config
 from src.utils.logger import get_logger
 from src.core.camera import Camera
 from src.core.virtual_cam import VirtualCamera
-from src.ai.tracker import FaceTracker  # [NEW] AI 트래커 추가
+from src.ai.tracker import FaceTracker
+from src.graphics.renderer import Renderer
+
+# [NEW] 데이터 수집 모듈 import
+from src.data_collection.recorder import DataRecorder
+from src.data_collection.guide_ui import GuideUI
+from src.data_collection.validator import DataValidator
 
 def main():
     logger = get_logger("Main")
-    logger.info("🚀 Project MUSE (Phase 2: AI Tracking) 시작...")
+    logger.info("🚀 Project MUSE (v7.1 High-End Integrated) 시작...")
 
     # 1. 모듈 초기화
     cam = Camera()
     vcam = VirtualCamera()
-    tracker = FaceTracker() # [NEW] AI 엔진 로드
+    tracker = FaceTracker()
+    
+    # 렌더러 초기화
+    try:
+        renderer = Renderer()
+    except Exception as e:
+        logger.error(f"렌더러 초기화 실패: {e}")
+        return
+
+    # [NEW] 레코더 및 가이드 초기화
+    recorder = DataRecorder()
+    guide = GuideUI()
 
     # 2. 장치 시작
     if not cam.start():
-        logger.error("프로그램을 종료합니다 (카메라 오류).")
         return
-
     if not vcam.start():
-        logger.error("프로그램을 종료합니다 (가상 카메라 오류).")
         cam.stop()
         return
 
-    logger.info("✅ 시스템 준비 완료! (Ctrl+C로 종료)")
-    logger.info("👉 OBS에서 얼굴에 '그물망(Mesh)'이 씌워지는지 확인하세요.")
+    logger.info("✅ 시스템 준비 완료!")
+    logger.info("⌨️ [R]: 녹화 시작/중지 | [V]: 데이터 검수 모드 | [Q]: 종료")
 
-    # FPS 계산용 변수
     prev_time = 0
 
-    # 3. 메인 루프
     try:
         while True:
-            # (1) 입력: 웹캠
+            # (1) 입력
             frame = cam.read()
             if frame is None:
                 continue
 
-            # (2) 처리: AI 얼굴 추적 [NEW]
+            # (2) 처리 (Face Mesh)
             results = tracker.process(frame)
 
-            # (3) 시각화: 디버그용 그리기 (얼굴 위에 선 그리기) [NEW]
-            # 나중에는 이 부분이 OpenGL 렌더링으로 대체됩니다.
-            if results and results.multi_face_landmarks:
-                tracker.draw_debug(frame, results)
+            # [NEW] 녹화 중이면 프레임 저장
+            if recorder.is_recording:
+                # 랜드마크 데이터도 함께 저장 (나중에 학습용)
+                # results 객체 전체를 넘기기보다 필요한 값만 추출해서 넘기는 것이 좋음 (여기선 간략화)
+                recorder.add_frame(frame, results)
+
+            # (3) 렌더링
+            output_frame = renderer.render(frame, results)
+            if output_frame is None:
+                output_frame = frame
+            else:
+                output_frame = output_frame.copy()
+
+            # [NEW] 가이드 UI (녹화 중일 때만 표시)
+            if guide.is_active:
+                guide.draw(output_frame)
 
             # FPS 표시
             curr_time = time.time()
             fps = 1 / (curr_time - prev_time) if prev_time > 0 else 0
             prev_time = curr_time
-            cv2.putText(frame, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            status_text = "REC" if recorder.is_recording else "LIVE"
+            status_color = (0, 0, 255) if recorder.is_recording else (0, 255, 0)
+            
+            cv2.putText(output_frame, f"FPS: {int(fps)} | {status_text}", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
-            # (4) 출력: 가상 카메라 전송
-            vcam.send(frame)
-
-            # (옵션) 로컬 미리보기
-            cv2.imshow("MUSE Preview", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # (4) 출력
+            vcam.send(output_frame)
+            cv2.imshow("MUSE Preview", output_frame)
+            
+            # (5) 키 입력 처리
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('q'):
                 break
+            
+            elif key == ord('r'): # [R]ecord
+                if recorder.is_recording:
+                    recorder.stop_recording()
+                    guide.is_active = False # 가이드 끄기
+                else:
+                    recorder.start_recording(Config.WIDTH, Config.HEIGHT)
+                    guide.start() # 가이드 시작
+                    
+            elif key == ord('v'): # [V]alidate
+                if recorder.is_recording:
+                    logger.warning("녹화 중에는 검수 모드를 켤 수 없습니다.")
+                else:
+                    logger.info("🔍 검수 모드 진입 (Main Loop 일시 정지)...")
+                    # 카메라 잠깐 멈추고 검수기 실행 (블로킹 방식)
+                    # 실제 앱에서는 별도 프로세스나 윈도우로 띄우는 게 좋음
+                    cv2.destroyWindow("MUSE Preview") # 충돌 방지
+                    validator = DataValidator()
+                    validator.start_review()
+                    logger.info("검수 완료. 라이브 모드 복귀.")
 
     except KeyboardInterrupt:
         logger.info("사용자 중단 요청.")
     
     finally:
+        if recorder.is_recording:
+            recorder.stop_recording()
+        
         logger.info("시스템 종료 중...")
         cam.stop()
         vcam.stop()

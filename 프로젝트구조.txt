@@ -1,53 +1,68 @@
-Project MUSE - File Structure (v4.0 Optimized)
+Project MUSE - File Structure (v7.1 High-End Integrated)
 
 MUSE_Project/
 ├── assets/                     # [리소스]
-│   ├── data/                   # [NEW] 렌더링용 핵심 데이터
-│   │   └── triangulation.npy   # 얼굴 메쉬 삼각형 인덱스 정보 (필수)
-│   ├── textures/               # [NEW] 화장용 마스크 이미지
-│   │   ├── lip_mask.png        # 입술 영역 마스크
-│   │   └── blush_mask.png      # 볼터치 텍스처
-│   ├── shaders/                # OpenGL 쉐이더 (.glsl)
-│   │   ├── beauty.vert         # 버텍스 쉐이더 (성형)
-│   │   └── beauty.frag         # 프래그먼트 쉐이더 (화장/필터)
-│   ├── images/                 # UI 아이콘
-│   └── presets/                # 사용자 프리셋 (.json)
+│   ├── data/
+│   │   └── triangulation.npy   # 얼굴 메쉬 인덱스
+│   ├── models/                 # [AI 모델 저장소]
+│   │   ├── base/               # 기본 범용 모델
+│   │   └── custom/             # [핵심] 사용자 개인 맞춤 모델 (.pyd)
+│   ├── textures/
+│   │   ├── lip_mask.png
+│   │   └── blush_mask.png
+│   ├── shaders/                # [OpenGL 쉐이더]
+│   │   ├── face.vert           # [Face] 3D 메쉬 성형
+│   │   ├── face.frag           # [Face] 렌더링
+│   │   ├── body_grid.vert      # [Body] 픽셀 유동화 (Grid Warping)
+│   │   └── body_grid.frag      # [Body] 렌더링
+│   └── presets/
 │
 ├── src/                        # [소스 코드]
-│   ├── main.py                 # 진입점
+│   ├── main.py                 # 메인 엔트리 (통합 제어)
 │   │
-│   ├── ai/                     # [AI]
-│   │   ├── __init__.py
-│   │   └── tracker.py          # MediaPipe Face Mesh (478 points)
+│   ├── data_collection/        # [Data Pipeline] (Phase 2 핵심)
+│   │   ├── init.py
+│   │   ├── recorder.py         # 고화질 녹화 및 골든 데이터 추출
+│   │   ├── validator.py        # 스마트 데이터 검수 UI
+│   │   └── guide_ui.py         # 촬영 가이드 오버레이
 │   │
-│   ├── graphics/               # [Graphics]
-│   │   ├── __init__.py
-│   │   ├── renderer.py         # ModernGL 컨텍스트 및 렌더링 루프
-│   │   ├── warper.py           # 3D 메쉬 변형 로직
-│   │   └── blender.py          # [NEW] 화장 텍스처 합성 및 필터링
+│   ├── ai/                     # [AI Engine]
+│   │   ├── init.py
+│   │   ├── tracker.py          # Face Mesh (범용)
+│   │   ├── pose_tracker.py     # Body Pose (High-Accuracy)
+│   │   ├── personalizer.py     # 개인 모델 로딩 및 암호화 해제
+│   │   └── trainer.py          # PyTorch 학습 로직 (Fine-tuning)
+│   │
+│   ├── graphics/               # [Graphics Engine]
+│   │   ├── init.py
+│   │   ├── renderer.py         # 메인 렌더러 (Scene 관리)
+│   │   ├── face_renderer.py    # 얼굴 3D 렌더링
+│   │   └── grid_renderer.py    # 몸매 격자 워핑
 │   │
 │   ├── core/                   # [System]
-│   │   ├── __init__.py
-│   │   ├── video_thread.py     # 영상 처리 스레드
-│   │   ├── camera.py           # 웹캠 입력
-│   │   └── virtual_cam.py      # 가상 카메라 출력
+│   │   ├── init.py
+│   │   ├── camera.py           # 고성능 카메라 제어 (DirectShow)
+│   │   ├── virtual_cam.py      # OBS 송출
+│   │   └── video_thread.py
+
 │   │
 │   ├── ui/                     # [UI]
-│   │   ├── __init__.py
+│   │   ├── init.py
 │   │   ├── main_window.py
-│   │   ├── login_window.py
-│   │   ├── widgets.py
-│   │   └── style.qss
+│   │   ├── body_panel.py       # 몸매 제어 패널
+│   │   ├── recorder_window.py  # 녹화/검수 전용 윈도우
+│   │   └── widgets.py
 │   │
 │   ├── auth/                   # [Security]
-│   │   ├── __init__.py
+│   │   ├── init.py
 │   │   ├── login_manager.py
-│   │   └── license.py          # (추후 Cython 컴파일 대상)
+│   │   └── license.py
 │   │
-│   └── utils/                  # [Utils]
-│       ├── __init__.py
+│   └── utils/
+│       ├── init.py
 │       ├── config.py
-│       └── logger.py
+│       ├── logger.py
+│       └── create_assets.py
 │
 ├── tests/
 ├── requirements.txt

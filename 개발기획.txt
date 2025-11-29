@@ -1,66 +1,85 @@
-[Project MUSE] 차세대 PC 방송용 AI 뷰티 솔루션 개발 기획서 (v4.0 Final)
+[Project MUSE] 개인 맞춤형 AI 뷰티 & 바디 솔루션 개발 기획서 (v7.1 Performance First)
 
-1. 프로젝트 개요
+프로젝트 개요
 
-프로젝트명: MUSE (PC Live Beauty Cam)
-목표: 기존 'YY' 프로그램을 대체하는 국산 고성능 PC 뷰티 캠.
-핵심 가치: "설치 없이 가볍게(No Torch), 흔들림 없이 완벽하게(Jitter Free)."
+프로젝트명: MUSE (High-End Personalized AI Solution)
 
-2. 시스템 아키텍처 (System Architecture)
+목표: 타협 없는 성능의 전문가용 PC 뷰티/바디 솔루션.
 
-2.1 데이터 처리 흐름 (Pipeline)
-Input: 웹캠(C920) 1080p MJPG 수신 (자동 노출 OFF).
-AI Core: Google MediaPipe Face Mesh (478개 랜드마크).
-Rendering: ModernGL (OpenGL) 기반 3D 워핑 & 텍스처 블렌딩.
-Output: 가상 카메라(pyvirtualcam) -> OBS/XSplit 송출.
+핵심 가치: "Performance First."
+(저사양 호환성을 포기하더라도, 장비를 갖춘 사용자에게는 압도적인 퀄리티 제공)
 
-2.2 렌더링 핵심 전략 [NEW]
-(1) Pre-calculated Triangulation (사전 계산된 삼각형 메쉬):
-   - 문제: MediaPipe는 점(Point)만 제공하므로 면(Face)을 그릴 수 없음.
-   - 해결: 'Canonical Face Model'의 삼각형 인덱스(UV Map)를 'assets/data/indices.npy'로 미리 저장.
-   - 런타임: 매 프레임마다 점을 잇는 계산을 하지 않고, 미리 저장된 인덱스를 참조하여 GPU 부하 최소화 (60fps 보장).
+시스템 요구사항 (System Requirements) [UPDATED]
 
-(2) Multi-Layer Makeup (화장 레이어):
-   - Geometry Layer: 턱 깎기, 눈 키우기 (Mesh Warping).
-   - Texture Layer: 입술(LipTint), 볼터치(Blush), 아이라인.
-   - 방식: 얼굴 메쉬 위에 반투명 PNG(Alpha Texture)를 UV 매핑으로 덧씌우는 방식 적용.
+OS: Windows 10/11 (64bit).
 
-3. 주요 기능 명세 (Feature Specs)
+GPU: NVIDIA RTX 2060 이상 (CUDA 가속 필수).
 
-3.1 AI 뷰티 성형 (Geometry)
-- 얼굴형: 턱 라인 축소, 광대 축소, 이마 조정.
-- 이목구비: 눈 크기, 눈동자(Iris) 위치 보정, 코 너비, 입꼬리.
-- 안정화: MediaPipe 내장 Jitter Filtering + Low-Pass Filter 이중 적용.
+Webcam: Logitech C922 / Brio / DSLR (60fps 지원 장비 필수).
 
-3.2 디지털 메이크업 (Texture) [NEW]
-- 입술: 텍스처 오버레이(Overlay) 방식으로 자연스러운 발색 구현.
-- 피부: GPU Bilateral Filter로 잡티 제거 및 톤 보정.
-- 룩북(Lookbook): 프리셋에 따른 화장 스타일 변경 지원.
+Storage: 여유 공간 10GB 이상 (PyTorch 및 학습 데이터 공간).
 
-3.3 사용자 편의성
-- Zero-Config: PyTorch 제거로 다운로드 용량 최소화.
-- Preset Sharing: JSON 파일 공유.
+핵심 프로세스 (The "My Model" Pipeline)
 
-3.4 상용화 및 보안 [NEW]
-- 인증: 로그인 및 구독 만료 시 기능 잠금.
-- 코드 보호: 
-  1) 핵심 로직(AI, Auth)은 Cython(.pyx)으로 컴파일하여 .pyd(바이너리) 형태로 배포.
-  2) PyInstaller 패키징 시 Entry Point 난독화.
-  - 파이썬 스크립트 노출을 원천 차단하여 크랙 방지.
+3.1 데이터 수집 (High-Fidelity Recorder)
 
-4. UI/UX 디자인 가이드
-- 컨셉: YY 사용자 경험을 그대로 이식 (Dark Mode, Slider).
-- 레이아웃: 좌측 Preview, 우측 Control Tab (Face / Eyes / Skin / Makeup).
+60fps 무손실(Lossless) 급으로 10분 영상 녹화 (약 36,000 프레임).
 
-5. 기술 스택 (Updated)
-- Language: Python 3.10+
-- AI: MediaPipe (TFLite 내장) *PyTorch 삭제됨
-- Graphics: ModernGL (OpenGL), OpenCV
-- UI: PyQt6
-- Security: Cython, PyInstaller
+조명, 각도, 해상도 등 입력 소스의 품질을 엄격하게 체크(Pre-check).
 
-6. 개발 로드맵
-Phase 1: 환경 최적화 (완료) - PyTorch 제거 및 setup.py 경량화.
-Phase 2: 렌더링 기초 (진행 중) - cm.py 구조 생성 및 삼각형 인덱스 데이터 확보.
-Phase 3: 쉐이더 구현 - Vertex Shader(성형) & Fragment Shader(화장/톤업).
-Phase 4: UI 및 보안 적용 - Cython 빌드 및 라이선스 서버 연동.
+3.2 스마트 데이터 검수 (Validator)
+
+AI가 1차 선별한 'Golden Data' 3,000장을 사용자가 최종 컨펌.
+
+"Garbage In, Garbage Out" 원칙에 따라, 퀄리티가 낮은 프레임은 과감히 폐기.
+
+3.3 고성능 개인화 학습 (Full-Scale Trainer) [UPDATED]
+
+엔진: PyTorch (GPU Ver.) 전체 라이브러리 탑재.
+
+방식: 단순 전이 학습(Transfer Learning)을 넘어선 Full Fine-tuning.
+
+성능: 사용자 GPU 자원을 최대로 활용하여, 기존 상용 앱이 흉내 낼 수 없는 정밀도(Precision) 달성.
+
+시스템 아키텍처
+
+Input: 고성능 웹캠 (MJPG/YUY2, 60fps).
+AI Core (Dual Engine):
+
+[Face]: Personal Deep Engine (PyTorch 기반 커스텀 모델).
+
+[Body]: High-Accuracy Pose Engine (MediaPipe Heavy Model).
+Rendering: ModernGL (OpenGL 4.5+)
+
+고해상도 텍스처 매핑 및 정밀 메쉬 워핑.
+Output: Virtual Camera -> OBS (1080p 60fps 송출 보장).
+
+기능 명세
+
+5.1 AI 뷰티 (Deep Face)
+
+개인 모델: 사용자 고유의 미세한 표정 주름, 비대칭까지 완벽하게 추적.
+
+기능: 물리 기반 렌더링(PBR)을 적용한 3D 메이크업 및 성형.
+
+5.2 AI 바디 (Grid Body)
+
+방식: 고해상도 Grid Warping (세밀한 격자 조정을 통해 왜곡 최소화).
+
+기능: 직각 어깨, 허리 라인, 비율 보정 등 자연스러운 체형 교정.
+
+5.3 Data Suite
+
+전문가용 데이터 관리 툴 제공 (녹화, 프레임 단위 검수, 학습 모니터링).
+
+개발 로드맵 [UPDATED]
+
+Phase 1: 고성능 렌더링 엔진 구축 (완료).
+
+Phase 2: [Face] 데이터 수집 및 PyTorch 학습 파이프라인 구축 (최우선).
+
+trainer.py에 PyTorch 학습 로직 구현.
+
+Phase 3: [Body] 고정밀 Pose AI 연동 및 Grid Warping.
+
+Phase 4: 전체 파이프라인 최적화 (Latency 최소화).
