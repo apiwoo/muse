@@ -16,15 +16,20 @@ except ImportError:
 # 모듈 경로 추가
 sys.path.append('src')
 
+# [CRITICAL FIX] CUDA/cuDNN DLL 경로 강제 주입
+# 이 코드가 없으면 onnxruntime-gpu가 설치되어 있어도 DLL을 못 찾아서 CPU로 돕니다.
+from utils.cuda_helper import setup_cuda_environment
+setup_cuda_environment()
+
 from core.input_manager import InputManager
 from core.virtual_cam import VirtualCamera
 from ai.tracking.facemesh import FaceMesh
 
 def main():
     print("========================================")
-    print("   Project MUSE - Engine Start (v1.8)")
+    print("   Project MUSE - Engine Start (v1.9)")
     print("   Target: RTX 3060 / Mode A")
-    print("   Feature: Index Debugging (Snapshot)")
+    print("   Feature: CUDA Fix + Index Debugging")
     print("========================================")
 
     # 1. 설정
