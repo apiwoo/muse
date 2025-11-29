@@ -4,6 +4,7 @@
 
 import time
 import sys
+import cv2
 
 # High-Performance GPU Library
 try:
@@ -11,20 +12,23 @@ try:
 except ImportError:
     cp = None
 
-# 모듈 경로 추가 (src 폴더 인식용)
+# 모듈 경로 추가
 sys.path.append('src')
 
 from core.input_manager import InputManager
 from core.virtual_cam import VirtualCamera
 
+# [수정] cm.py 구조에 맞게 임포트 경로 변경
+from ai.tracking.facemesh import FaceMesh
+
 def main():
     print("========================================")
-    print("   Project MUSE - Engine Start (v1.2)")
+    print("   Project MUSE - Engine Start (v1.5)")
     print("   Target: RTX 3060 / Mode A")
-    print("   Device: Logitech C920 (FPS Fix Applied)")
+    print("   Feature: Face Tracking + Preview Window")
     print("========================================")
 
-    # 1. 설정 (Configuration)
+    # 1. 설정
     DEVICE_ID = 1  
     WIDTH = 1920 
     HEIGHT = 1080
@@ -32,8 +36,13 @@ def main():
 
     # 2. 모듈 초기화
     try:
+        # Input/Output
         input_mgr = InputManager(device_id=DEVICE_ID, width=WIDTH, height=HEIGHT, fps=FPS)
         virtual_cam = VirtualCamera(width=WIDTH, height=HEIGHT, fps=FPS)
+        
+        # AI Engine (Face)
+        # assets/models 경로 지정
+        tracker = FaceMesh(root_dir="assets")
         
     except Exception as e:
         print(f"❌ 초기화 중 치명적 오류 발생: {e}")
@@ -41,7 +50,7 @@ def main():
         traceback.print_exc()
         return
 
-    print("\n🚀 파이프라인 가동 시작... (Press Ctrl+C to Stop)")
+    print("\n🚀 파이프라인 가동 시작... (Press 'q' to Stop)")
     
     prev_time = time.time()
     frame_count = 0
@@ -52,33 +61,60 @@ def main():
             frame_gpu, ret = input_mgr.read()
             
             if not ret:
-                print("⚠️ 프레임 드랍 발생 (Camera Read Fail)")
                 time.sleep(0.01)
                 continue
 
-            # [Step 2] AI Processing (Passthrough)
-            # (테스트용) 작동 확인용 붉은 박스
-            # if frame_gpu is not None:
-            #     frame_gpu[0:50, 0:50, :] = cp.array([255, 0, 0], dtype=cp.uint8)
+            # ==========================================
+            # [Step 2] AI Processing
+            # ==========================================
+            
+            # InsightFace는 CPU(Numpy) 입력을 받으므로 변환
+            # (추후 렌더링 단계에서는 GPU 데이터를 그대로 쓸 것임)
+            if cp and hasattr(frame_gpu, 'get'):
+                frame_cpu = frame_gpu.get()
+            else:
+                frame_cpu = frame_gpu
 
-            # [Step 3] Output
-            virtual_cam.send(frame_gpu)
+            # 얼굴 분석
+            faces = tracker.process(frame_cpu)
+            
+            # [Debug] 시각화 (얼굴에 점 찍기)
+            # 원본 이미지에 그림 (화면 송출용 + 미리보기용)
+            tracker.draw_debug(frame_cpu, faces)
+            
+            # 출력용 프레임 설정
+            output_frame = frame_cpu
 
-            # [Step 4] FPS Calculation
+            # ==========================================
+
+            # [Step 3] Output (Dual)
+            
+            # 1. OBS 가상 카메라 송출
+            virtual_cam.send(output_frame)
+            
+            # 2. [NEW] PC 화면 미리보기 창 표시
+            cv2.imshow("MUSE Preview", output_frame)
+
+            # [Step 4] FPS Calculation & Key Control
             frame_count += 1
             curr_time = time.time()
             elapsed = curr_time - prev_time
             
             if elapsed >= 1.0:
                 fps_val = frame_count / elapsed
-                print(f"⚡ Pipeline FPS: {fps_val:.2f} (Target: {FPS})")
+                face_count = len(faces)
+                print(f"⚡ Pipeline FPS: {fps_val:.2f} (Faces: {face_count})")
                 
-                # 조명이 너무 어두우면 경고 메시지 출력 (C920 특성 안내)
                 if fps_val < 20:
-                    print("   ⚠️ FPS가 낮습니다! 방의 조명을 더 밝게 하거나, input_manager.py의 노출(Exposure) 값을 조절하세요.")
+                    print("   ⚠️ Low FPS detected. Check lighting or GPU load.")
 
                 frame_count = 0
                 prev_time = curr_time
+            
+            # 'q' 키를 누르면 종료
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("🛑 종료 키(q) 입력됨.")
+                break
 
     except KeyboardInterrupt:
         print("\n🛑 사용자 중단 요청 (KeyboardInterrupt)")
@@ -87,6 +123,7 @@ def main():
         print("🧹 리소스 정리 중...")
         if 'input_mgr' in locals(): input_mgr.release()
         if 'virtual_cam' in locals(): virtual_cam.close()
+        cv2.destroyAllWindows() # 윈도우 닫기
         print("👋 MUSE Engine 종료.")
 
 if __name__ == "__main__":
