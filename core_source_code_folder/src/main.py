@@ -5,6 +5,7 @@
 import time
 import sys
 import cv2
+import os # 파일 저장을 위해 추가
 
 # High-Performance GPU Library
 try:
@@ -17,15 +18,13 @@ sys.path.append('src')
 
 from core.input_manager import InputManager
 from core.virtual_cam import VirtualCamera
-
-# [수정] cm.py 구조에 맞게 임포트 경로 변경
 from ai.tracking.facemesh import FaceMesh
 
 def main():
     print("========================================")
-    print("   Project MUSE - Engine Start (v1.5)")
+    print("   Project MUSE - Engine Start (v1.8)")
     print("   Target: RTX 3060 / Mode A")
-    print("   Feature: Face Tracking + Preview Window")
+    print("   Feature: Index Debugging (Snapshot)")
     print("========================================")
 
     # 1. 설정
@@ -36,40 +35,30 @@ def main():
 
     # 2. 모듈 초기화
     try:
-        # Input/Output
         input_mgr = InputManager(device_id=DEVICE_ID, width=WIDTH, height=HEIGHT, fps=FPS)
         virtual_cam = VirtualCamera(width=WIDTH, height=HEIGHT, fps=FPS)
-        
-        # AI Engine (Face)
-        # assets/models 경로 지정
         tracker = FaceMesh(root_dir="assets")
         
     except Exception as e:
         print(f"❌ 초기화 중 치명적 오류 발생: {e}")
-        import traceback
-        traceback.print_exc()
         return
 
     print("\n🚀 파이프라인 가동 시작... (Press 'q' to Stop)")
+    print("📸 [Info] 얼굴이 감지되면 'debug_snapshot.jpg'를 자동 저장합니다.")
     
     prev_time = time.time()
     frame_count = 0
+    snapshot_taken = False # 스냅샷 찍었는지 여부
     
     try:
         while True:
             # [Step 1] Input
             frame_gpu, ret = input_mgr.read()
-            
             if not ret:
                 time.sleep(0.01)
                 continue
 
-            # ==========================================
             # [Step 2] AI Processing
-            # ==========================================
-            
-            # InsightFace는 CPU(Numpy) 입력을 받으므로 변환
-            # (추후 렌더링 단계에서는 GPU 데이터를 그대로 쓸 것임)
             if cp and hasattr(frame_gpu, 'get'):
                 frame_cpu = frame_gpu.get()
             else:
@@ -78,52 +67,53 @@ def main():
             # 얼굴 분석
             faces = tracker.process(frame_cpu)
             
-            # [Debug] 시각화 (얼굴에 점 찍기)
-            # 원본 이미지에 그림 (화면 송출용 + 미리보기용)
-            tracker.draw_debug(frame_cpu, faces)
+            # [Debug] 인덱스 번호 시각화 & 스냅샷 저장
+            # 얼굴이 있고, 아직 스냅샷을 안 찍었다면
+            if faces and not snapshot_taken:
+                # 1. 인덱스 그리기 (이 프레임은 무거워도 상관없음)
+                debug_frame = frame_cpu.copy()
+                tracker.draw_indices_debug(debug_frame, faces)
+                
+                # 2. 파일로 저장
+                cv2.imwrite("debug_snapshot.jpg", debug_frame)
+                print("✅ [Snapshot] 'debug_snapshot.jpg' 저장 완료! 확인해보세요.")
+                snapshot_taken = True
             
-            # 출력용 프레임 설정
+            # 평소에는 가벼운 Mesh만 그리기 (FPS 확보)
+            if snapshot_taken:
+                tracker.draw_mesh_debug(frame_cpu, faces)
+            else:
+                # 스냅샷 찍기 전까진 인덱스 보여주기
+                tracker.draw_indices_debug(frame_cpu, faces)
+            
             output_frame = frame_cpu
 
-            # ==========================================
-
-            # [Step 3] Output (Dual)
-            
-            # 1. OBS 가상 카메라 송출
+            # [Step 3] Output
             virtual_cam.send(output_frame)
-            
-            # 2. [NEW] PC 화면 미리보기 창 표시
             cv2.imshow("MUSE Preview", output_frame)
 
-            # [Step 4] FPS Calculation & Key Control
+            # [Step 4] FPS Calculation
             frame_count += 1
             curr_time = time.time()
             elapsed = curr_time - prev_time
             
             if elapsed >= 1.0:
                 fps_val = frame_count / elapsed
-                face_count = len(faces)
-                print(f"⚡ Pipeline FPS: {fps_val:.2f} (Faces: {face_count})")
-                
-                if fps_val < 20:
-                    print("   ⚠️ Low FPS detected. Check lighting or GPU load.")
-
+                print(f"⚡ Pipeline FPS: {fps_val:.2f} (Faces: {len(faces)})")
                 frame_count = 0
                 prev_time = curr_time
             
-            # 'q' 키를 누르면 종료
             if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("🛑 종료 키(q) 입력됨.")
                 break
 
     except KeyboardInterrupt:
-        print("\n🛑 사용자 중단 요청 (KeyboardInterrupt)")
+        print("\n🛑 사용자 중단 요청")
     
     finally:
         print("🧹 리소스 정리 중...")
         if 'input_mgr' in locals(): input_mgr.release()
         if 'virtual_cam' in locals(): virtual_cam.close()
-        cv2.destroyAllWindows() # 윈도우 닫기
+        cv2.destroyAllWindows()
         print("👋 MUSE Engine 종료.")
 
 if __name__ == "__main__":

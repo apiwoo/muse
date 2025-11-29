@@ -9,7 +9,7 @@ import glob
 def setup_cuda_environment():
     """
     [핵심] Windows 환경에서 pip로 설치된 NVIDIA 라이브러리(DLL)들을
-    시스템 경로(PATH)에 강제로 주입합니다. (Final Version)
+    시스템 경로(PATH)에 강제로 주입합니다.
     """
     if platform.system() != "Windows":
         return
@@ -28,7 +28,6 @@ def setup_cuda_environment():
             continue
             
         # nvidia 폴더 하위의 모든 디렉토리 검사 (cudnn, cublas 등)
-        # cuDNN 9.x는 보통 'nvidia/cudnn/bin' 또는 'nvidia/cudnn/lib'에 DLL이 있음
         for root, dirs, files in os.walk(nvidia_path):
             # 'bin' 또는 'lib' 폴더가 있으면 후보
             if os.path.basename(root) in ['bin', 'lib']:
