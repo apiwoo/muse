@@ -1,0 +1,54 @@
+Project MUSE - File Structure (v4.0 Optimized)
+
+MUSE_Project/
+├── assets/                     # [리소스]
+│   ├── data/                   # [NEW] 렌더링용 핵심 데이터
+│   │   └── triangulation.npy   # 얼굴 메쉬 삼각형 인덱스 정보 (필수)
+│   ├── textures/               # [NEW] 화장용 마스크 이미지
+│   │   ├── lip_mask.png        # 입술 영역 마스크
+│   │   └── blush_mask.png      # 볼터치 텍스처
+│   ├── shaders/                # OpenGL 쉐이더 (.glsl)
+│   │   ├── beauty.vert         # 버텍스 쉐이더 (성형)
+│   │   └── beauty.frag         # 프래그먼트 쉐이더 (화장/필터)
+│   ├── images/                 # UI 아이콘
+│   └── presets/                # 사용자 프리셋 (.json)
+│
+├── src/                        # [소스 코드]
+│   ├── main.py                 # 진입점
+│   │
+│   ├── ai/                     # [AI]
+│   │   ├── __init__.py
+│   │   └── tracker.py          # MediaPipe Face Mesh (478 points)
+│   │
+│   ├── graphics/               # [Graphics]
+│   │   ├── __init__.py
+│   │   ├── renderer.py         # ModernGL 컨텍스트 및 렌더링 루프
+│   │   ├── warper.py           # 3D 메쉬 변형 로직
+│   │   └── blender.py          # [NEW] 화장 텍스처 합성 및 필터링
+│   │
+│   ├── core/                   # [System]
+│   │   ├── __init__.py
+│   │   ├── video_thread.py     # 영상 처리 스레드
+│   │   ├── camera.py           # 웹캠 입력
+│   │   └── virtual_cam.py      # 가상 카메라 출력
+│   │
+│   ├── ui/                     # [UI]
+│   │   ├── __init__.py
+│   │   ├── main_window.py
+│   │   ├── login_window.py
+│   │   ├── widgets.py
+│   │   └── style.qss
+│   │
+│   ├── auth/                   # [Security]
+│   │   ├── __init__.py
+│   │   ├── login_manager.py
+│   │   └── license.py          # (추후 Cython 컴파일 대상)
+│   │
+│   └── utils/                  # [Utils]
+│       ├── __init__.py
+│       ├── config.py
+│       └── logger.py
+│
+├── tests/
+├── requirements.txt
+└── .env

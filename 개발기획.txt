@@ -1,0 +1,66 @@
+[Project MUSE] 차세대 PC 방송용 AI 뷰티 솔루션 개발 기획서 (v4.0 Final)
+
+1. 프로젝트 개요
+
+프로젝트명: MUSE (PC Live Beauty Cam)
+목표: 기존 'YY' 프로그램을 대체하는 국산 고성능 PC 뷰티 캠.
+핵심 가치: "설치 없이 가볍게(No Torch), 흔들림 없이 완벽하게(Jitter Free)."
+
+2. 시스템 아키텍처 (System Architecture)
+
+2.1 데이터 처리 흐름 (Pipeline)
+Input: 웹캠(C920) 1080p MJPG 수신 (자동 노출 OFF).
+AI Core: Google MediaPipe Face Mesh (478개 랜드마크).
+Rendering: ModernGL (OpenGL) 기반 3D 워핑 & 텍스처 블렌딩.
+Output: 가상 카메라(pyvirtualcam) -> OBS/XSplit 송출.
+
+2.2 렌더링 핵심 전략 [NEW]
+(1) Pre-calculated Triangulation (사전 계산된 삼각형 메쉬):
+   - 문제: MediaPipe는 점(Point)만 제공하므로 면(Face)을 그릴 수 없음.
+   - 해결: 'Canonical Face Model'의 삼각형 인덱스(UV Map)를 'assets/data/indices.npy'로 미리 저장.
+   - 런타임: 매 프레임마다 점을 잇는 계산을 하지 않고, 미리 저장된 인덱스를 참조하여 GPU 부하 최소화 (60fps 보장).
+
+(2) Multi-Layer Makeup (화장 레이어):
+   - Geometry Layer: 턱 깎기, 눈 키우기 (Mesh Warping).
+   - Texture Layer: 입술(LipTint), 볼터치(Blush), 아이라인.
+   - 방식: 얼굴 메쉬 위에 반투명 PNG(Alpha Texture)를 UV 매핑으로 덧씌우는 방식 적용.
+
+3. 주요 기능 명세 (Feature Specs)
+
+3.1 AI 뷰티 성형 (Geometry)
+- 얼굴형: 턱 라인 축소, 광대 축소, 이마 조정.
+- 이목구비: 눈 크기, 눈동자(Iris) 위치 보정, 코 너비, 입꼬리.
+- 안정화: MediaPipe 내장 Jitter Filtering + Low-Pass Filter 이중 적용.
+
+3.2 디지털 메이크업 (Texture) [NEW]
+- 입술: 텍스처 오버레이(Overlay) 방식으로 자연스러운 발색 구현.
+- 피부: GPU Bilateral Filter로 잡티 제거 및 톤 보정.
+- 룩북(Lookbook): 프리셋에 따른 화장 스타일 변경 지원.
+
+3.3 사용자 편의성
+- Zero-Config: PyTorch 제거로 다운로드 용량 최소화.
+- Preset Sharing: JSON 파일 공유.
+
+3.4 상용화 및 보안 [NEW]
+- 인증: 로그인 및 구독 만료 시 기능 잠금.
+- 코드 보호: 
+  1) 핵심 로직(AI, Auth)은 Cython(.pyx)으로 컴파일하여 .pyd(바이너리) 형태로 배포.
+  2) PyInstaller 패키징 시 Entry Point 난독화.
+  - 파이썬 스크립트 노출을 원천 차단하여 크랙 방지.
+
+4. UI/UX 디자인 가이드
+- 컨셉: YY 사용자 경험을 그대로 이식 (Dark Mode, Slider).
+- 레이아웃: 좌측 Preview, 우측 Control Tab (Face / Eyes / Skin / Makeup).
+
+5. 기술 스택 (Updated)
+- Language: Python 3.10+
+- AI: MediaPipe (TFLite 내장) *PyTorch 삭제됨
+- Graphics: ModernGL (OpenGL), OpenCV
+- UI: PyQt6
+- Security: Cython, PyInstaller
+
+6. 개발 로드맵
+Phase 1: 환경 최적화 (완료) - PyTorch 제거 및 setup.py 경량화.
+Phase 2: 렌더링 기초 (진행 중) - cm.py 구조 생성 및 삼각형 인덱스 데이터 확보.
+Phase 3: 쉐이더 구현 - Vertex Shader(성형) & Fragment Shader(화장/톤업).
+Phase 4: UI 및 보안 적용 - Cython 빌드 및 라이선스 서버 연동.
