@@ -1,140 +1,130 @@
-# Project MUSE - src/main.py
-# Created for AI Beauty Cam Project
+# Project MUSE - main.py
+# The Visual Singularity Engine Entry Point
 # (C) 2025 MUSE Corp. All rights reserved.
 
-import sys
-import os
-import cv2
 import time
-import numpy as np
+import sys
+import cv2
 
-# 경로 설정
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# High-Performance GPU Library
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 
-from src.utils.config import Config
-from src.utils.logger import get_logger
-from src.core.camera import Camera
-from src.core.virtual_cam import VirtualCamera
-from src.ai.tracker import FaceTracker
-from src.graphics.renderer import Renderer
+# 모듈 경로 추가
+sys.path.append('src')
 
-# [NEW] 데이터 수집 모듈 import
-from src.data_collection.recorder import DataRecorder
-from src.data_collection.guide_ui import GuideUI
-from src.data_collection.validator import DataValidator
+from core.input_manager import InputManager
+from core.virtual_cam import VirtualCamera
+
+# [수정] cm.py 구조에 맞게 임포트 경로 변경
+from ai.tracking.facemesh import FaceMesh
 
 def main():
-    logger = get_logger("Main")
-    logger.info("🚀 Project MUSE (v7.1 High-End Integrated) 시작...")
+    print("========================================")
+    print("   Project MUSE - Engine Start (v1.5)")
+    print("   Target: RTX 3060 / Mode A")
+    print("   Feature: Face Tracking + Preview Window")
+    print("========================================")
 
-    # 1. 모듈 초기화
-    cam = Camera()
-    vcam = VirtualCamera()
-    tracker = FaceTracker()
-    
-    # 렌더러 초기화
+    # 1. 설정
+    DEVICE_ID = 1  
+    WIDTH = 1920 
+    HEIGHT = 1080
+    FPS = 30       
+
+    # 2. 모듈 초기화
     try:
-        renderer = Renderer()
+        # Input/Output
+        input_mgr = InputManager(device_id=DEVICE_ID, width=WIDTH, height=HEIGHT, fps=FPS)
+        virtual_cam = VirtualCamera(width=WIDTH, height=HEIGHT, fps=FPS)
+        
+        # AI Engine (Face)
+        # assets/models 경로 지정
+        tracker = FaceMesh(root_dir="assets")
+        
     except Exception as e:
-        logger.error(f"렌더러 초기화 실패: {e}")
+        print(f"❌ 초기화 중 치명적 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
-    # [NEW] 레코더 및 가이드 초기화
-    recorder = DataRecorder()
-    guide = GuideUI()
-
-    # 2. 장치 시작
-    if not cam.start():
-        return
-    if not vcam.start():
-        cam.stop()
-        return
-
-    logger.info("✅ 시스템 준비 완료!")
-    logger.info("⌨️ [R]: 녹화 시작/중지 | [V]: 데이터 검수 모드 | [Q]: 종료")
-
-    prev_time = 0
-
+    print("\n🚀 파이프라인 가동 시작... (Press 'q' to Stop)")
+    
+    prev_time = time.time()
+    frame_count = 0
+    
     try:
         while True:
-            # (1) 입력
-            frame = cam.read()
-            if frame is None:
+            # [Step 1] Input
+            frame_gpu, ret = input_mgr.read()
+            
+            if not ret:
+                time.sleep(0.01)
                 continue
 
-            # (2) 처리 (Face Mesh)
-            results = tracker.process(frame)
-
-            # [NEW] 녹화 중이면 프레임 저장
-            if recorder.is_recording:
-                # 랜드마크 데이터도 함께 저장 (나중에 학습용)
-                # results 객체 전체를 넘기기보다 필요한 값만 추출해서 넘기는 것이 좋음 (여기선 간략화)
-                recorder.add_frame(frame, results)
-
-            # (3) 렌더링
-            output_frame = renderer.render(frame, results)
-            if output_frame is None:
-                output_frame = frame
+            # ==========================================
+            # [Step 2] AI Processing
+            # ==========================================
+            
+            # InsightFace는 CPU(Numpy) 입력을 받으므로 변환
+            # (추후 렌더링 단계에서는 GPU 데이터를 그대로 쓸 것임)
+            if cp and hasattr(frame_gpu, 'get'):
+                frame_cpu = frame_gpu.get()
             else:
-                output_frame = output_frame.copy()
+                frame_cpu = frame_gpu
 
-            # [NEW] 가이드 UI (녹화 중일 때만 표시)
-            if guide.is_active:
-                guide.draw(output_frame)
-
-            # FPS 표시
-            curr_time = time.time()
-            fps = 1 / (curr_time - prev_time) if prev_time > 0 else 0
-            prev_time = curr_time
+            # 얼굴 분석
+            faces = tracker.process(frame_cpu)
             
-            status_text = "REC" if recorder.is_recording else "LIVE"
-            status_color = (0, 0, 255) if recorder.is_recording else (0, 255, 0)
+            # [Debug] 시각화 (얼굴에 점 찍기)
+            # 원본 이미지에 그림 (화면 송출용 + 미리보기용)
+            tracker.draw_debug(frame_cpu, faces)
             
-            cv2.putText(output_frame, f"FPS: {int(fps)} | {status_text}", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+            # 출력용 프레임 설정
+            output_frame = frame_cpu
 
-            # (4) 출력
-            vcam.send(output_frame)
+            # ==========================================
+
+            # [Step 3] Output (Dual)
+            
+            # 1. OBS 가상 카메라 송출
+            virtual_cam.send(output_frame)
+            
+            # 2. [NEW] PC 화면 미리보기 창 표시
             cv2.imshow("MUSE Preview", output_frame)
+
+            # [Step 4] FPS Calculation & Key Control
+            frame_count += 1
+            curr_time = time.time()
+            elapsed = curr_time - prev_time
             
-            # (5) 키 입력 처리
-            key = cv2.waitKey(1) & 0xFF
+            if elapsed >= 1.0:
+                fps_val = frame_count / elapsed
+                face_count = len(faces)
+                print(f"⚡ Pipeline FPS: {fps_val:.2f} (Faces: {face_count})")
+                
+                if fps_val < 20:
+                    print("   ⚠️ Low FPS detected. Check lighting or GPU load.")
+
+                frame_count = 0
+                prev_time = curr_time
             
-            if key == ord('q'):
+            # 'q' 키를 누르면 종료
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("🛑 종료 키(q) 입력됨.")
                 break
-            
-            elif key == ord('r'): # [R]ecord
-                if recorder.is_recording:
-                    recorder.stop_recording()
-                    guide.is_active = False # 가이드 끄기
-                else:
-                    recorder.start_recording(Config.WIDTH, Config.HEIGHT)
-                    guide.start() # 가이드 시작
-                    
-            elif key == ord('v'): # [V]alidate
-                if recorder.is_recording:
-                    logger.warning("녹화 중에는 검수 모드를 켤 수 없습니다.")
-                else:
-                    logger.info("🔍 검수 모드 진입 (Main Loop 일시 정지)...")
-                    # 카메라 잠깐 멈추고 검수기 실행 (블로킹 방식)
-                    # 실제 앱에서는 별도 프로세스나 윈도우로 띄우는 게 좋음
-                    cv2.destroyWindow("MUSE Preview") # 충돌 방지
-                    validator = DataValidator()
-                    validator.start_review()
-                    logger.info("검수 완료. 라이브 모드 복귀.")
 
     except KeyboardInterrupt:
-        logger.info("사용자 중단 요청.")
+        print("\n🛑 사용자 중단 요청 (KeyboardInterrupt)")
     
     finally:
-        if recorder.is_recording:
-            recorder.stop_recording()
-        
-        logger.info("시스템 종료 중...")
-        cam.stop()
-        vcam.stop()
-        cv2.destroyAllWindows()
-        logger.info("Bye!")
+        print("🧹 리소스 정리 중...")
+        if 'input_mgr' in locals(): input_mgr.release()
+        if 'virtual_cam' in locals(): virtual_cam.close()
+        cv2.destroyAllWindows() # 윈도우 닫기
+        print("👋 MUSE Engine 종료.")
 
 if __name__ == "__main__":
     main()

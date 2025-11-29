@@ -1,8 +1,8 @@
-# Project MUSE - main_window.py
+# Project MUSE - shader_loader.py
 # Created for Mode A (Visual Supremacy)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-class MainWindow:
+class ShaderLoader:
     def __init__(self):
-        """Initialize MainWindow for RTX 3060+ Env."""
+        """Initialize ShaderLoader for RTX 3060+ Env."""
         pass

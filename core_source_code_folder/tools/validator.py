@@ -1,8 +1,8 @@
-# Project MUSE - main_window.py
+# Project MUSE - validator.py
 # Created for Mode A (Visual Supremacy)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-class MainWindow:
+class Validator:
     def __init__(self):
-        """Initialize MainWindow for RTX 3060+ Env."""
+        """Initialize Validator for RTX 3060+ Env."""
         pass

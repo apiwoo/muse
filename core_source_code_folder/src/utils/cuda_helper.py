@@ -1,8 +1,8 @@
-# Project MUSE - main_window.py
+# Project MUSE - cuda_helper.py
 # Created for Mode A (Visual Supremacy)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-class MainWindow:
+class CudaHelper:
     def __init__(self):
-        """Initialize MainWindow for RTX 3060+ Env."""
+        """Initialize CudaHelper for RTX 3060+ Env."""
         pass
