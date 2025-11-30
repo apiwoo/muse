@@ -52,3 +52,11 @@ class MainWindow(QMainWindow):
         self.beauty_panel.paramChanged.connect(worker.update_params)
         
         print("🔗 [MainWindow] UI와 Worker 스레드 연결 완료")
+
+    def closeEvent(self, event):
+        """
+        [Critical] 창 닫기(X버튼) 클릭 시 호출.
+        이 함수가 없으면 백그라운드 스레드가 돌고 있을 때 앱이 완전히 꺼지지 않을 수 있습니다.
+        """
+        print("❌ [MainWindow] 창 닫기 감지. 프로그램 종료 절차를 시작합니다.")
+        event.accept() # 이벤트를 수락하여 Qt에게 창을 닫으라고 알림

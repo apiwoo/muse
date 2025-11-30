@@ -1,107 +1,89 @@
 [Project MUSE] Master Plan: The Visual Singularity
 
-Version: 5.0 (Definitive Master Plan)
+Version: 6.0 (Integrated Master Plan)
 
-Target: Top 0.1% Streamers (Dual PC Setup / RTX 4090 Exclusive)
+Target:
 
-Core Philosophy: "Zero Compromise. Visual Supremacy."
+Training Environment: RTX 4090 (Offline / Night Time)
 
-1. 프로젝트 개요 (Executive Summary)
+Streaming Environment: RTX 3060 ~ 4060 Ti (Real-time Broadcasting)
+
+Core Philosophy: "Train Heavy, Run Light. Zero Distortion."
+
+프로젝트 개요 (Executive Summary)
 
 1.1 프로젝트 정의
-
-MUSE는 기존의 '보정 필터'나 '버튜버 툴'의 범주를 넘어선 High-End Virtual Broadcasting Station입니다.
-송출용 PC의 RTX 4090 자원을 100% 독점하여, 4K 해상도에서 실사(Beauty), 가상(VTuber), 생성형 AI(Avatar) 페르소나를 완벽한 시네마틱 퀄리티로 실시간 렌더링합니다.
+MUSE는 '범용적인 무거운 AI'를 사용하는 기존 방식에서 탈피하여, 사용자의 방(Background)과 신체(Body)에 완벽하게 과적합(Overfitting)된 '개인화 경량 모델'을 즉석에서 생성하는 차세대 방송 솔루션입니다.
+궁극적으로는 실사(Phase 1), 버튜버(Phase 2), AI 아바타(Phase 3)를 아우르는 통합 비주얼 플랫폼을 지향합니다.
 
 1.2 핵심 가치 (Core Values)
+Resource Dominance (자원 독점): 송출컴의 GPU는 오직 MUSE의 렌더링을 위해 존재합니다.
+Smart Optimization (지능형 최적화): '지식 증류(Knowledge Distillation)'를 통해 RTX 3060에서도 4K 60fps 방어를 실현합니다.
+Zero Distortion (배경 왜곡 제로): 인물과 배경을 완벽히 분리(Segmentation)한 뒤 빈 공간을 채우는(Inpainting) 방식으로 물리적 왜곡을 원천 차단합니다.
 
-Resource Dominance (자원 독점): 송출컴의 GPU는 오직 MUSE의 렌더링을 위해 존재합니다. 최적화를 위해 화질을 희생하지 않습니다.
+1.3 하드웨어 요구사항 (Dual Track)
+[Track A: Training Machine] (방송 송출용 PC와 같을 수도, 다를 수도 있음)
 
-Hyper-Realism (초실사주의): 물리 기반 렌더링(PBR)과 레이 트레이싱을 도입하여 '게임'이 아닌 '영화' 같은 비주얼을 송출합니다.
+GPU: RTX 4090 or 3090 (24GB VRAM 권장)
 
-One-Core Ecosystem (단일 코어 생태계): 단 하나의 트래킹 엔진으로 실사 보정부터 버튜버, AI 아바타까지 모든 모드를 통합 제어합니다.
+역할: SAM ViT-Huge + ViTPose 구동, 고속 학습(Training)
 
-1.3 하드웨어 요구사항 (Hardware Requirements)
+[Track B: Streaming Machine] (실제 방송 송출)
 
-Architecture: Dual PC Setup (Game PC + Streaming PC)
+GPU: RTX 3060 12GB 이상
 
-Streaming PC Spec:
+역할: 경량화된 Student Model 추론 (Inference), OBS 송출
 
-GPU: NVIDIA GeForce RTX 4090 (24GB VRAM) Essential
+핵심 파이프라인: Teacher-Student Distillation
 
-CPU: Intel i9 / Ryzen 9 (Latest Gen) for Data Pre-processing
+2.1 The Teachers (Offline / High-Spec)
+세상에서 가장 똑똑하지만 느린 모델들이 '정답지(Label)'를 만듭니다.
 
-RAM: 64GB DDR5 (데이터 캐싱 용도)
+Teacher A (Segmentation): SAM (ViT-Huge). 머리카락 한 올, 옷 주름까지 완벽하게 분리.
 
-Input Devices:
+Teacher B (Keypoints): ViTPose-Huge. 관절 위치를 픽셀 단위로 추적하여 SAM에게 힌트(Prompt) 제공.
 
-Camera: 4K Mirrorless via CamLink 4K (RAW/ProRes Input 권장)
+2.2 The Student (Online / Low-Latency)
+선생님들이 만든 정답지를 보고 '내 방'과 '내 모습'만 달달 외웁니다.
 
-Capture Card: 4K60 HDR Pass-through 지원 장비
+Model: MobileNetV3-UNet 또는 EfficientNet-Lite 기반.
 
-2. 통합 시스템 아키텍처 (The Trinity Engine Architecture)
+Performance: 4K 해상도에서 100fps 이상 처리 속도 확보.
 
-2.1 I/O Layer: Zero-Copy Pipeline
+Goal: "이 픽셀이 사람인가 배경인가?"를 0.005초 안에 판단.
 
-일반적인 OpenCV 파이프라인이 아닌, GPU 메모리 직행 구조를 사용합니다.
+단계별 상세 기능 명세 (Detailed Roadmap)
 
-Input Manager: 캡쳐보드 및 웹캠의 Raw Data(NV12/YUV)를 CPU 메모리를 거치지 않고 Direct DMA를 통해 GPU VRAM(CUDA Tensor)으로 직접 전송. (Latency < 1ms)
-
-Color Space Conversion: CUDA Kernel을 사용하여 YUV -> RGB 변환 및 색상 보정(Color Grading)을 실시간 수행.
-
-2.2 Core Layer: Ultra-Tracking Engine (Shared)
-
-모든 모드(A/B/C)가 공유하는 최상위 트래킹 엔진입니다.
-
-Body Tracking (ViTPose-Huge + TensorRT):
-
-MediaPipe 대비 10배 무거운 모델 사용.
-
-옷에 가려진 관절, 팔짱 낀 자세, 빠른 손동작까지 놓치지 않음.
-
-Face Tracking (FaceMesh High-Poly Custom):
-
-기존 468개 랜드마크를 넘어선 고밀도 메쉬 사용.
-
-Micro-Expression: 동공의 미세한 떨림, 혀의 움직임, 입가 근육의 미묘한 수축까지 벡터화.
-
-3. 단계별 상세 기능 명세 (Detailed Roadmap)
-
-[Phase 1] MUSE v1.0 : The Ultimate Beauty
-
+[Phase 1] MUSE v1.0 : Personalized Anti-Distortion (배경 왜곡 완전 해결)
 목표: "현존하는 그 어떤 툴보다 압도적으로 예쁘고 자연스러운 실사 화면 구현"
 
-3.1 Personal Model Pipeline (사용자 맞춤 학습)
+3.1 Data Acquisition (데이터 수집기)
 
-사용자의 컴퓨터를 '학습 머신'으로 활용합니다.
+Clean Plate Capture: 사용자가 없는 '빈 방' 이미지를 확보하여 Inpainting 소스로 활용.
 
-High-Fidelity Recorder: 조명과 각도가 완벽하게 세팅된 상태에서 4K 60fps로 10분간 영상 녹화 (약 36,000 프레임 확보).
+Action Recording: 다양한 조명, 각도, 거리에서 사용자의 움직임을 10분간(약 3만 프레임) 녹화.
 
-AI Validator: 흔들리거나 초점이 나간 프레임을 자동 폐기하고 'Golden Data' 3,000장을 선별하여 사용자가 최종 컨펌.
+3.2 Auto-Labeling System (자동 라벨링)
 
-Local Fine-Tuning (LoRA): 사용자의 얼굴 특징, 피부 톤, 이상적인 조명 상태를 학습하여 .pt 모델 생성.
+ViTPose가 사람의 코/목 좌표를 추출 -> SAM에게 "이 좌표에 있는 덩어리를 따줘"라고 요청.
 
-3.2 Real-time Visual Features
+SAM이 배경을 완벽하게 날린 'Alpha Mask' 생성.
 
-4K Neural Upscaling: 1080p 입력도 Super-Resolution AI를 거쳐 모공 디테일까지 살아있는 4K로 업스케일링.
+사람 손을 거치지 않고 3만 장의 고품질 학습 데이터셋 구축.
 
-Physics-based Relighting:
+3.3 Real-time Rendering (Inference)
 
-얼굴의 Normal Map(입체 정보)을 실시간 추정.
+Student Model이 실시간으로 인물 마스크 생성.
 
-가상의 'Rim Light(역광)', 'Key Light(주광)'를 배치하여 콧대와 턱선 입체감을 극대화.
+Warping Logic: 마스크 안쪽(인물)만 성형 적용.
 
-Smart Grid Warping:
+Background Reconstruction: 인물이 줄어들어 생긴 빈 공간에 'Clean Plate'를 합성.
+-> 결과: 허리를 절반으로 줄여도 문틀이나 커튼이 전혀 휘지 않음.
 
-단순 픽셀 유동화가 아닌 격자(Grid) 단위 워핑.
-
-배경 마스킹(Segmentation)을 통해 얼굴을 줄여도 뒷배경(문틀 등)이 휘지 않음.
-
-[Phase 2] MUSE v2.0 : The Cinematic VTuber
-
+[Phase 2] MUSE v2.0 : The Cinematic VTuber (복구됨)
 목표: "VTube Studio 완전 대체 및 Cinema 4D 수준의 렌더링 품질 제공"
 
-3.3 Advanced Rendering Engine
+3.4 Advanced Rendering Engine
 
 Format: VRM 표준 지원 및 High-Poly FBX 지원.
 
@@ -119,25 +101,20 @@ True Physics Simulation:
 
 머리카락이 어깨에 닿으면 자연스럽게 흘러내리고, 가슴과 의상의 충돌 처리를 완벽하게 구현.
 
-3.4 Hybrid Overlay
+3.5 Hybrid Overlay
 
 크로마키 없이 캡쳐보드 게임 화면(Background) 위에 캐릭터를 합성.
 
 Screen-Space Reflection: 게임 화면의 불꽃이 튀면 캐릭터 얼굴에도 붉은 빛이 반사됨.
 
-[Phase 3] MUSE v3.0 : The Genesis (Generative AI)
-
+[Phase 3] MUSE v3.0 : The Genesis (Generative AI) (복구됨)
 목표: "매일 얼굴과 의상을 바꾸는 제3의 인격(Hyper-Real Avatar) 생성"
 
-3.5 Real-time Diffusion Pipeline
+3.6 Real-time Diffusion Pipeline
 
 Engine: Stable Diffusion XL (SDXL) Turbo 또는 Flux.1 (TensorRT Optimized).
 
-ControlNet Integration:
-
-Core Engine에서 추출한 ViTPose(뼈대)와 Depth Map을 입력으로 사용.
-
-사용자의 움직임을 100% 동기화하며 이미지를 생성.
+ControlNet Integration: Core Engine에서 추출한 ViTPose(뼈대)와 Depth Map을 입력으로 사용.
 
 Feature:
 
@@ -145,60 +122,31 @@ Instant Cosplay: 프롬프트에 "White Wedding Dress" 입력 시 1초 만에 �
 
 Consistency Control: AnimateDiff 기술을 응용하여 움직임 시 발생하는 텍스처 떨림(Flickering) 억제.
 
-3.6 Style Transfer
+3.7 Style Transfer
 
 실사 모드(v1.0) 방송 중 특정 이벤트 발생 시, 화면 전체를 '유화 스타일'이나 '사이버펑크 스타일'로 실시간 필터링.
 
-4. 기술 스택 상세 (Technology Stack Deep Dive)
+기술 스택 상세 (Updated)
 
 4.1 Core & AI
 
-Language: Python 3.10 (Logic), C++/CUDA (Kernels)
+Teacher Models: Segment Anything (ViT-H), ViTPose-Huge (TensorRT)
 
-Inference: NVIDIA TensorRT 10.x (Essential for 4090)
+Student Model: PyTorch -> ONNX -> TensorRT (FP16 Quantization)
 
-Deep Learning: PyTorch 2.x (Training/Export)
+Training: Mixed Precision Training (AMP) for Speed
 
-Vision Models:
+4.2 Application
 
-Tracking: ViTPose-Huge (Custom retrained on COCO-WholeBody)
+Language: Python 3.10
 
-Face: MediaPipe Mesh (Fine-tuned) -> 3D Morphable Models (3DMM)
+GUI: PySide6
 
-Generation: SDXL Turbo / ControlNet / IP-Adapter
+Graphics: OpenGL 4.6 (ModernGL)
 
-4.2 Rendering & Pipeline
+초기 개발 마일스톤 (Revised)
 
-Graphics API: ModernGL (OpenGL 4.6) or Vulkan (via Kompute)
-
-Media I/O: NVIDIA Video Codec SDK (NVDEC/NVENC)
-
-GUI: PySide6 (Qt for Python) - High DPI Support
-
-5. 비즈니스 및 배포 전략 (Business Strategy)
-
-5.1 Lock-in Strategy
-
-초기에 **v1.0(뷰티)**으로 고사양 스트리머 시장 점유율 확보.
-
-"MUSE를 쓰면 4090 성능 본전을 뽑는다"는 인식을 심어줌.
-
-5.2 Update Cycle
-
-Launch: v1.0 정식 출시 (뷰티 모드 완비).
-
-Update 1: 'Cinematic Pack' (v2.0 버튜버 기능 해금 DLC).
-
-Update 2: 'Genesis Pack' (v3.0 생성형 AI 기능 해금 DLC).
-
-6. 초기 개발 마일스톤 (Initial Execution Plan)
-
-가장 시급한 v1.0 출시를 위한 단기 계획입니다.
-
-Week 1-2: [Input/Output] 4K 캡쳐보드 소스 -> CUDA 메모리 직접 전송 파이프라인 구축.
-
-Week 3-4: [Tracking] ViTPose-Huge 모델 TensorRT 변환 및 60fps 추론 최적화.
-
-Week 5-6: [Rendering] OpenGL 기반 워핑(Warping) 쉐이더 및 리라이팅(Relighting) 구현.
-
-Week 7-8: [Training Tool] 사용자 로컬 데이터 수집기(Recorder) 및 학습기(Trainer) 프로토타입 개발.
+Week 1: [Tool] 'tools/auto_labeling' 구현. SAM + ViTPose 연동 테스트.
+Week 2: [Pipeline] 데이터 수집(Recorder) 및 자동 라벨링 파이프라인 구축.
+Week 3: [Training] 경량 모델(UNet 계열) 선정 및 학습 루프 구현.
+Week 4: [Inference] TensorRT 변환 및 실시간 렌더러 연동 (배경 합성 쉐이더 구현).

@@ -1,57 +1,74 @@
-Project MUSE - File Structure (v6.0 Mode A Focus)
+Project MUSE - File Structure (v6.2 Multi-Task Distillation)
 
 MUSE_Project/
-├── assets/                     # [Mode A 핵심 리소스]
+├── assets/                     # [Resource Layer]
 │   ├── models/
-
-│   │   ├── tracking/           # ViTPose-Huge (TRT), FaceMesh (High-Poly)
-│   │   └── tensorrt_cache/     # 3060 최적화 엔진 캐시 (.engine)
+│   │   ├── tracking/           # [Teacher B] ViTPose-Huge (TRT), FaceMesh (High-Poly)
+│   │   ├── segment_anything/   # [Teacher A] SAM ViT-Huge (Original Weights)
+│   │   ├── personal/           # [Student] 학습된 멀티태스크 모델 (.engine)
+│   │   └── tensorrt_cache/     # RTX 3060용 최적화 엔진 캐시
+│   │
 │   ├── shaders/                # [Visual Core]
-│   │   ├── core/               # YUV->RGB 변환 (Zero-Copy)
-│   │   ├── beauty/             # [Main] Relighting, Warping, Skin-Smoothing
-│   │   └── post/               # [Main] Neural Upscaling, Color Grading
+│   │   ├── core/               # YUV->RGB 변환
+│   │   ├── beauty/             # [Main] 뷰티 & 왜곡 보정 엔진
+│   │   │   ├── relighting.glsl       # 3D 조명
+│   │   │   ├── warping.glsl          # [Key] 마스크 기반 격자 성형
+│   │   │   ├── skin_smooth.glsl      # 피부 보정
+│   │   │   └── background_fill.glsl  # [Key] 빈 배경 채우기 (Inpainting)
+│   │   └── post/               # [Post] Upscaling
+│   │
 │   ├── textures/               # 4K Normal Maps, LUTs
-│   └── presets/                # 사용자별 뷰티 프리셋
+│   └── presets/                # 사용자별 프리셋
 │
 ├── src/                        # [Source Code]
 │   ├── main.py                 # 앱 엔트리
 │   │
-│   ├── core/                   # [System]
-│   │   ├── init.py
-│   │   ├── input_manager.py    # [Zero-Copy] 3060 VRAM으로 직접 전송
-│   │   ├── virtual_cam.py      # OBS 송출
-│   │   └── profiler.py         # [New] 3060 성능 모니터링 (FPS/VRAM)
+│   ├── core/                   # [System Layer]
+│   │   ├── input_manager.py    # VRAM Direct Access
+│   │   ├── virtual_cam.py      # OBS 출력
+│   │   └── profiler.py         # 성능 모니터링
 │   │
-│   ├── ai/                     # [Intelligence]
-│   │   ├── init.py
-│   │   ├── tracking/
-
-│   │   │   ├── vitpose_trt.py  # [Mode A] ViTPose TensorRT 래퍼
-│   │   │   └── facemesh.py     # [Mode A] High-Poly Face 추적기
-│   │   └── personalizer.py     # 사용자 얼굴 학습 (LoRA)
+│   ├── ai/                     # [Intelligence Layer]
+│   │   ├── tracking/           # [Teacher Wrappers]
+│   │   │   ├── vitpose_trt.py  # Teacher B 제어
+│   │   │   └── facemesh.py     # Face 제어
+│   │   │
+│   │   └── distillation/       # [Distillation Pipeline]
+│   │       ├── teacher/        # 선생님 모델
+│   │       │   ├── sam_wrapper.py    # Teacher A 제어
+│   │       │   └── auto_labeler.py   # 정답지 생성기 (Mask + Keypoints)
+│   │       │
+│   │       ├── student/        # 학생 모델 (Multi-Task)
+│   │       │   ├── model_arch.py     # [Key] Backbone + 2 Heads (Mask/Pose)
+│   │       │   └── inference.py      # 실시간 추론 (Mask & Pose 동시 출력)
+│   │       │
+│   │       └── trainer.py      # 학습 루프
 │   │
-│   ├── graphics/               # [Visuals - Mode A]
-│   │   ├── init.py
-│   │   ├── renderer.py         # OpenGL 마스터 렌더러
-│   │   ├── beauty_engine.py    # [Mode A] 뷰티 파이프라인 (워핑+리라이팅)
-│   │   └── shader_loader.py    # GLSL 쉐이더 로더
+│   ├── graphics/               # [Visuals Layer]
+│   │   ├── renderer.py         # OpenGL Context
+│   │   ├── beauty_engine.py    # [Key] 마스크 기반 워핑 로직 구현
+│   │   └── shader_loader.py    # GLSL 로더
 │   │
-│   ├── ui/                     # [Control]
-│   │   ├── init.py
+│   ├── ui/                     # [Control Layer]
 │   │   ├── main_window.py
-│   │   ├── beauty_panel.py     # 뷰티 파라미터 조절 패널
-│   │   └── viewport.py         # 미리보기 창
+│   │   ├── beauty_panel.py
+│   │   └── viewport.py
 │   │
-│   └── utils/
-
-│       ├── init.py
+│   └── utils/                  # [Utility Layer]
 │       ├── cuda_helper.py
+│       ├── logger.py
 │       └── config.py
 │
 ├── tools/                      # [Utilities]
-│   ├── recorder.py             # 고화질 학습 데이터 녹화
-│   ├── trt_converter.py        # [New] PyTorch 모델 -> TensorRT 변환기
-│   └── validator.py            # 데이터 검수
+│   ├── download_models.py      # 모델 다운로더
+│   ├── recorder.py             # [Data] 데이터 수집기
+│   ├── test_sam.py             # [Test] SAM 테스트
+│   ├── trt_converter.py        # [Opt] TensorRT 변환
+│   ├── fix_env.py              # 환경 복구
+│   │
+│   └── auto_labeling/          # [Pipeline]
+│       ├── run_labeling.py     # 배치 작업 실행
+│       └── verify_data.py      # 데이터 검수
 │
 ├── requirements.txt
 └── .env
