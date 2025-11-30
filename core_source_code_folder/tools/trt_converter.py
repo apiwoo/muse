@@ -1,8 +1,280 @@
 # Project MUSE - trt_converter.py
-# Created for Mode A (Visual Supremacy)
+# Target: RTX 3060/4090 Mode A (High Performance)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-class TrtConverter:
-    def __init__(self):
-        """Initialize TrtConverter for RTX 3060+ Env."""
+import os
+import sys
+import subprocess
+import time
+
+# ==================================================================================
+# [Mode 1] PyTorch Worker (ONNX Export)
+# ==================================================================================
+def run_export_worker(pth_path, onnx_path):
+    print(f"🚀 [Process 1] PyTorch Worker Started...")
+    
+    import torch
+    import torch.nn as nn
+    
+    # --------------------------------------------------------
+    # ViTPose Architecture (Embed for Standalone)
+    # --------------------------------------------------------
+    class PatchEmbed(nn.Module):
+        def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=1280):
+            super().__init__()
+            self.img_size = img_size
+            self.grid_size = (img_size[0] // patch_size, img_size[1] // patch_size)
+            self.num_patches = self.grid_size[0] * self.grid_size[1]
+            self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        def forward(self, x):
+            x = self.proj(x)
+            x = x.flatten(2).transpose(1, 2)
+            return x
+
+    class Attention(nn.Module):
+        def __init__(self, dim, num_heads=16, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+            super().__init__()
+            self.num_heads = num_heads
+            head_dim = dim // num_heads
+            self.scale = qk_scale or head_dim ** -0.5
+            self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+            self.attn_drop = nn.Dropout(attn_drop)
+            self.proj = nn.Linear(dim, dim)
+            self.proj_drop = nn.Dropout(proj_drop)
+        def forward(self, x):
+            B, N, C = x.shape
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            x = self.proj(x)
+            x = self.proj_drop(x)
+            return x
+
+    class Mlp(nn.Module):
+        def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+            super().__init__()
+            out_features = out_features or in_features
+            hidden_features = hidden_features or in_features
+            self.fc1 = nn.Linear(in_features, hidden_features)
+            self.act = act_layer()
+            self.fc2 = nn.Linear(hidden_features, out_features)
+            self.drop = nn.Dropout(drop)
+        def forward(self, x):
+            x = self.fc1(x)
+            x = self.act(x)
+            x = self.drop(x)
+            x = self.fc2(x)
+            x = self.drop(x)
+            return x
+
+    class Block(nn.Module):
+        def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., drop_path=0.):
+            super().__init__()
+            self.norm1 = nn.LayerNorm(dim)
+            self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+            self.norm2 = nn.LayerNorm(dim)
+            self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=nn.GELU, drop=drop)
+        def forward(self, x):
+            x = x + self.attn(self.norm1(x))
+            x = x + self.mlp(self.norm2(x))
+            return x
+
+    class ViTPose(nn.Module):
+        def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4., num_classes=17):
+            super().__init__()
+            self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim)) 
+            self.blocks = nn.ModuleList([Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True) for _ in range(depth)])
+            self.norm = nn.LayerNorm(embed_dim)
+            self.keypoint_head = nn.Sequential(
+                nn.ConvTranspose2d(embed_dim, 256, kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(inplace=True),
+                nn.ConvTranspose2d(256, 256, kernel_size=4, stride=2, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(256, num_classes, kernel_size=1, stride=1)
+            )
+        def forward(self, x):
+            B = x.shape[0]
+            x = self.patch_embed(x) 
+            pos_embed = self.pos_embed[:, 1:, :] 
+            x = x + pos_embed
+            for blk in self.blocks:
+                x = blk(x)
+            x = self.norm(x)
+            H, W = self.patch_embed.grid_size
+            x = x.transpose(1, 2).reshape(B, -1, H, W)
+            x = self.keypoint_head(x)
+            return x
+
+    # --------------------------------------------------------
+    # Export Logic
+    # --------------------------------------------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"   Using Device: {device}")
+
+    model = ViTPose(img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32, num_heads=16, num_classes=17).to(device)
+    model.eval()
+
+    try:
+        checkpoint = torch.load(pth_path, map_location=device)
+        state_dict = checkpoint.get('state_dict', checkpoint)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            new_k = k.replace('backbone.', '')
+            if 'cls_token' in new_k: continue
+            new_state_dict[new_k] = v
+        model.load_state_dict(new_state_dict, strict=False)
+        print("   ✅ Weights Loaded Successfully")
+    except Exception as e:
+        print(f"❌ Failed to load weights: {e}")
+        sys.exit(1)
+
+    dummy_input = torch.randn(1, 3, 256, 192).to(device)
+    try:
+        # [Fix] 대용량 모델(2GB+)을 위한 설정 확인
+        # opset_version=13 (최신 기능 지원) 권장
+        torch.onnx.export(
+            model,
+            dummy_input,
+            onnx_path,
+            input_names=['input'],
+            output_names=['output'],
+            dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
+            opset_version=13  
+        )
+        print(f"   ✅ ONNX Saved: {onnx_path}")
+    except Exception as e:
+        print(f"❌ ONNX Export Failed: {e}")
+        sys.exit(1)
+
+# ==================================================================================
+# [Mode 2] TensorRT Worker (Engine Build)
+# ==================================================================================
+def run_build_worker(onnx_path, engine_path):
+    print(f"🚀 [Process 2] TensorRT Worker Started...")
+    
+    try:
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from src.utils.cuda_helper import setup_cuda_environment
+        setup_cuda_environment()
+    except:
         pass
+
+    import tensorrt as trt
+    print(f"   TensorRT Version: {trt.__version__}")
+
+    TRT_LOGGER = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(TRT_LOGGER)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    config = builder.create_builder_config()
+    parser = trt.OnnxParser(network, TRT_LOGGER)
+
+    # [CRITICAL FIX] Large Model Parsing
+    print(f"   📂 Parsing ONNX from file: {onnx_path}")
+    
+    if not os.path.exists(onnx_path):
+        print(f"❌ ONNX file not found: {onnx_path}")
+        sys.exit(1)
+
+    success = parser.parse_from_file(onnx_path)
+    
+    if not success:
+        print("❌ ONNX Parse Failed")
+        for error in range(parser.num_errors):
+            print(parser.get_error(error))
+        sys.exit(1)
+
+    # [CRITICAL FIX 2] Optimization Profile
+    # "Network has dynamic or shape inputs" 에러 해결을 위해 프로파일 정의 필수
+    profile = builder.create_optimization_profile()
+    
+    # 입력 이름: 'input' (ONNX export 시 지정한 이름)
+    # Shape: (Batch, Channel, Height, Width)
+    # Min=(1,3,256,192), Opt=(1,3,256,192), Max=(1,3,256,192)
+    # 현재는 1인용 모드이므로 배치 1로 고정하여 최적화
+    profile.set_shape("input", (1, 3, 256, 192), (1, 3, 256, 192), (1, 3, 256, 192))
+    config.add_optimization_profile(profile)
+    print("   🔧 Optimization Profile Added (Batch Size: 1)")
+
+    # Config
+    try:
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 32) # 4GB
+    except AttributeError:
+        config.max_workspace_size = 1 << 32
+    
+    if builder.platform_has_fast_fp16:
+        config.set_flag(trt.BuilderFlag.FP16)
+        print("   ✨ FP16 Acceleration Enabled")
+
+    print("   ⏳ Building Engine (This may take 3-5 mins)...")
+    serialized_engine = builder.build_serialized_network(network, config)
+    
+    if serialized_engine is None:
+        print("❌ Engine Build Failed")
+        sys.exit(1)
+        
+    with open(engine_path, "wb") as f:
+        f.write(serialized_engine)
+    print(f"   ✅ Engine Saved: {engine_path}")
+
+# ==================================================================================
+# [Main Manager]
+# ==================================================================================
+def main():
+    # 1. Worker Execution Check
+    if len(sys.argv) > 1:
+        if sys.argv[1] == '--export-worker':
+            run_export_worker(sys.argv[2], sys.argv[3])
+            return
+        elif sys.argv[1] == '--build-worker':
+            run_build_worker(sys.argv[2], sys.argv[3])
+            return
+
+    # 2. Manager Mode
+    print("========================================================")
+    print("   MUSE ViTPose Converter (Large Model Support)")
+    print("========================================================")
+
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    MODEL_DIR = os.path.join(BASE_DIR, "assets", "models", "tracking")
+    
+    PTH_PATH = os.path.join(MODEL_DIR, "vitpose_huge_coco_256x192.pth")
+    ONNX_PATH = os.path.join(MODEL_DIR, "vitpose_huge.onnx")
+    ENGINE_PATH = os.path.join(MODEL_DIR, "vitpose_huge.engine")
+
+    # [Force Refresh] 이전에 잘못 생성된 ONNX가 있을 수 있으므로 삭제 후 다시 생성
+    if os.path.exists(ONNX_PATH):
+        print("♻️  Refreshing ONNX file to ensure integrity...")
+        try:
+            os.remove(ONNX_PATH)
+        except:
+            pass
+
+    # Step 1: Export ONNX
+    if not os.path.exists(PTH_PATH):
+        print(f"❌ Model not found: {PTH_PATH}")
+        return
+        
+    print("\n🔄 [Manager] Spawning PyTorch Worker...")
+    try:
+        subprocess.run([sys.executable, __file__, '--export-worker', PTH_PATH, ONNX_PATH], check=True)
+    except subprocess.CalledProcessError:
+        print("❌ PyTorch Worker Failed.")
+        return
+
+    # Step 2: Build Engine
+    print("\n🔄 [Manager] Spawning TensorRT Worker...")
+    try:
+        subprocess.run([sys.executable, __file__, '--build-worker', ONNX_PATH, ENGINE_PATH], check=True)
+        print("\n🎉 All processes finished successfully!")
+        print(f"👉 Result: {ENGINE_PATH}")
+    except subprocess.CalledProcessError:
+        print("❌ TensorRT Worker Failed.")
+
+if __name__ == "__main__":
+    main()
