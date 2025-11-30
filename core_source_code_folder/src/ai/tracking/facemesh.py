@@ -16,6 +16,22 @@ except ImportError:
 from insightface.app import FaceAnalysis
 
 class FaceMesh:
+    # [Core] 성형(Warping)을 위한 부위별 인덱스 정의 (Standard 106 Landmarks)
+    # 이 상수를 BeautyEngine에서 import하여 사용합니다.
+    FACE_INDICES = {
+        "CONTOUR": list(range(0, 33)),          # 얼굴 윤곽 (턱 깎기용)
+        "EYEBROW_L": list(range(33, 38)),       # 왼쪽 눈썹
+        "EYEBROW_R": list(range(38, 43)),       # 오른쪽 눈썹
+        "NOSE_BRIDGE": list(range(52, 57)),     # 콧대 (코 높이기)
+        "NOSE_BASE": list(range(57, 66)),       # 코 볼/끝 (코 축소)
+        "EYE_L": list(range(66, 75)),           # 왼쪽 눈 (눈 키우기)
+        "EYE_R": list(range(75, 84)),           # 오른쪽 눈 (눈 키우기)
+        "MOUTH_OUTER": list(range(84, 96)),     # 입술 외곽
+        "MOUTH_INNER": list(range(96, 104)),    # 입술 안쪽
+        "PUPIL_L": [104],                       # 왼쪽 눈동자
+        "PUPIL_R": [105]                        # 오른쪽 눈동자
+    }
+
     def __init__(self, root_dir="assets/models"):
         """
         [Mode A] High-Poly Face Tracking Engine
@@ -57,16 +73,12 @@ class FaceMesh:
 
     def draw_debug(self, frame, faces):
         """
-        [Debug] 2D 랜드마크 시각화 (기본)
+        [Simple Debug] 점만 찍어서 트래킹 여부 확인
         """
         if not faces:
             return frame
 
         for face in faces:
-            if hasattr(face, 'bbox'):
-                bbox = face.bbox.astype(int)
-                cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
-
             lm = None
             if hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
                 lm = face.landmark_2d_106.astype(int)
@@ -80,31 +92,10 @@ class FaceMesh:
 
     def draw_mesh_debug(self, frame, faces):
         """
-        [New] 3D Mesh 느낌으로 랜드마크를 연결하여 시각화 (InsightFace 106 Standard)
+        [Visual Check] 정의된 부위별로 색상을 다르게 표시 (연결선 X, 그룹 확인용)
         """
         if not faces:
             return frame
-
-        # InsightFace 106 랜드마크 연결 정의
-        connections = [
-            # 1. 얼굴 윤곽
-            list(range(0, 33)),
-            # 2. 눈썹
-            list(range(33, 38)), list(range(38, 43)) + [33],
-            list(range(43, 48)), list(range(48, 52)) + [43],
-            # 3. 콧대
-            list(range(52, 57)),
-            # 4. 코 밑부분
-            list(range(57, 66)),
-            # 5. 왼쪽 눈
-            list(range(66, 74)) + [66],
-            # 6. 오른쪽 눈
-            list(range(75, 83)) + [75],
-            # 7. 입술 외곽
-            list(range(84, 96)) + [84],
-            # 8. 입술 안쪽
-            list(range(96, 104)) + [96]
-        ]
 
         for face in faces:
             lm = None
@@ -113,68 +104,33 @@ class FaceMesh:
             elif face.kps is not None:
                 lm = face.kps.astype(int)
             
-            if lm is None:
-                continue
-            
-            # 106개가 아니면 Mesh 그리기를 건너뜀 (5개일 경우 점만 찍음)
-            if len(lm) != 106:
-                for p in lm:
-                    cv2.circle(frame, tuple(p), 3, (0, 0, 255), -1)
+            if lm is None or len(lm) != 106:
                 continue
 
-            # 1. 모든 점 그리기
-            for p in lm:
-                cv2.circle(frame, tuple(p), 1, (150, 150, 150), -1)
+            # 그룹별 색상 지정 (BGR)
+            colors = {
+                "CONTOUR": (255, 200, 200),     # 살구색
+                "EYEBROW_L": (200, 255, 200),   # 연두색
+                "EYEBROW_R": (200, 255, 200),
+                "EYE_L": (0, 255, 0),           # 초록색
+                "EYE_R": (0, 255, 0),
+                "NOSE_BRIDGE": (200, 200, 255), # 연하늘
+                "NOSE_BASE": (255, 255, 0),     # 노란색
+                "MOUTH_OUTER": (0, 0, 255),     # 빨간색
+                "MOUTH_INNER": (100, 100, 255)  # 진한 빨강
+            }
 
-            # 2. 선 그리기
-            for path in connections:
-                for i in range(len(path) - 1):
-                    if path[i] >= len(lm) or path[i+1] >= len(lm):
-                        continue
+            # 정의된 그룹에 따라 점 찍기
+            for group_name, indices in self.FACE_INDICES.items():
+                color = colors.get(group_name, (255, 255, 255))
+                for idx in indices:
+                    if idx < len(lm):
+                        cv2.circle(frame, tuple(lm[idx]), 2, color, -1)
 
-                    idx1 = path[i]
-                    idx2 = path[i+1]
-                    pt1 = tuple(lm[idx1])
-                    pt2 = tuple(lm[idx2])
-                    
-                    color = (255, 255, 255)
-                    if idx1 < 33: color = (255, 200, 200) # 턱
-                    elif 66 <= idx1 <= 83: color = (200, 255, 200) # 눈
-                    elif idx1 >= 84: color = (200, 200, 255) # 입
-                    
-                    cv2.line(frame, pt1, pt2, color, 1, cv2.LINE_AA)
+            # 눈동자 강조
+            if len(lm) > 105:
+                cv2.circle(frame, tuple(lm[104]), 3, (0, 255, 255), -1) # 노란색 눈동자
 
         return frame
 
-    def draw_indices_debug(self, frame, faces):
-        """
-        [New] 인덱스 번호 시각화
-        """
-        if not faces:
-            return frame
-
-        for face in faces:
-            lm = None
-            if hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
-                lm = face.landmark_2d_106.astype(int)
-            elif hasattr(face, 'kps') and face.kps is not None:
-                lm = face.kps.astype(int)
-            
-            if lm is None:
-                continue
-
-            for idx, p in enumerate(lm):
-                x, y = p
-                cv2.circle(frame, (x, y), 1, (0, 255, 255), -1)
-                
-                font_scale = 0.3
-                color = (255, 255, 255)
-                if idx < 33: color = (200, 200, 255)
-                elif 33 <= idx < 52: color = (200, 255, 200)
-                elif 52 <= idx < 66: color = (255, 200, 255)
-                elif 66 <= idx < 84: color = (255, 255, 0)
-                elif idx >= 84: color = (200, 200, 255)
-
-                cv2.putText(frame, str(idx), (x+2, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1)
-
-        return frame
+    # export_debug_log 제거됨 (불필요)

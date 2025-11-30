@@ -79,9 +79,11 @@ def main():
                 debug_frame = frame_cpu.copy()
                 tracker.draw_indices_debug(debug_frame, faces)
                 
-                # 2. 파일로 저장
+                # 2. 파일로 저장 (이미지 + 로그)
                 cv2.imwrite("debug_snapshot.jpg", debug_frame)
-                print("✅ [Snapshot] 'debug_snapshot.jpg' 저장 완료! 확인해보세요.")
+                tracker.export_debug_log("debug_landmarks.txt", faces) # [New] 로그 저장
+                
+                print("✅ [Snapshot] 'debug_snapshot.jpg' 및 'debug_landmarks.txt' 저장 완료!")
                 snapshot_taken = True
             
             # 평소에는 가벼운 Mesh만 그리기 (FPS 확보)
