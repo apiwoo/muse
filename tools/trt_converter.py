@@ -17,7 +17,7 @@ def run_export_worker(pth_path, onnx_path):
     import torch.nn as nn
     
     # --------------------------------------------------------
-    # ViTPose Architecture (Embed for Standalone)
+    # ViTPose Architecture (Fixed for Weight Compatibility)
     # --------------------------------------------------------
     class PatchEmbed(nn.Module):
         def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=1280):
@@ -89,15 +89,19 @@ def run_export_worker(pth_path, onnx_path):
             self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim)) 
             self.blocks = nn.ModuleList([Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True) for _ in range(depth)])
             self.norm = nn.LayerNorm(embed_dim)
+            
+            # [Fix] 구조를 Sequential로 단순화하여 매핑
+            # Source (MMPose) uses bias=False for ConvTranspose2d when followed by BN
             self.keypoint_head = nn.Sequential(
-                nn.ConvTranspose2d(embed_dim, 256, kernel_size=4, stride=2, padding=1),
+                nn.ConvTranspose2d(embed_dim, 256, kernel_size=4, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(256),
                 nn.ReLU(inplace=True),
-                nn.ConvTranspose2d(256, 256, kernel_size=4, stride=2, padding=1),
+                nn.ConvTranspose2d(256, 256, kernel_size=4, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(256),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(256, num_classes, kernel_size=1, stride=1)
             )
+
         def forward(self, x):
             B = x.shape[0]
             x = self.patch_embed(x) 
@@ -112,7 +116,7 @@ def run_export_worker(pth_path, onnx_path):
             return x
 
     # --------------------------------------------------------
-    # Export Logic
+    # Export Logic with Weight Remapping
     # --------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"   Using Device: {device}")
@@ -121,23 +125,57 @@ def run_export_worker(pth_path, onnx_path):
     model.eval()
 
     try:
+        print("   📂 Loading checkpoint...")
         checkpoint = torch.load(pth_path, map_location=device)
         state_dict = checkpoint.get('state_dict', checkpoint)
+        
+        # [Critical Fix] 가중치 이름 리매핑 (MMPose -> Custom Sequential)
+        # 원본 pth 구조: keypoint_head.deconv_layers.0.weight 등
+        # 대상 model 구조: keypoint_head.0.weight 등
         new_state_dict = {}
+        mapped_count = 0
+        
         for k, v in state_dict.items():
             new_k = k.replace('backbone.', '')
             if 'cls_token' in new_k: continue
+            
+            # Head 가중치 리매핑 규칙
+            if 'keypoint_head.deconv_layers.0.' in new_k:
+                new_k = new_k.replace('keypoint_head.deconv_layers.0.', 'keypoint_head.0.')
+            elif 'keypoint_head.deconv_layers.1.' in new_k:
+                new_k = new_k.replace('keypoint_head.deconv_layers.1.', 'keypoint_head.1.') # BN
+            elif 'keypoint_head.deconv_layers.3.' in new_k: # Note: 2 is ReLU (no weight)
+                new_k = new_k.replace('keypoint_head.deconv_layers.3.', 'keypoint_head.3.') # 2nd ConvT
+            elif 'keypoint_head.deconv_layers.4.' in new_k:
+                new_k = new_k.replace('keypoint_head.deconv_layers.4.', 'keypoint_head.4.') # 2nd BN
+            elif 'keypoint_head.final_layer.' in new_k:
+                new_k = new_k.replace('keypoint_head.final_layer.', 'keypoint_head.6.') # Final Conv2d
+
             new_state_dict[new_k] = v
-        model.load_state_dict(new_state_dict, strict=False)
-        print("   ✅ Weights Loaded Successfully")
+            mapped_count += 1
+
+        # Strict=True로 설정하여 하나라도 빠지면 에러나게 함 (안전장치)
+        # 하지만 일부 불필요한 키 때문에 False로 하되, 로그를 확인
+        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+        
+        print(f"   ✅ Weights Loaded: {mapped_count} keys mapped.")
+        if len(missing_keys) > 0:
+            # keypoint_head 관련 키가 빠졌는지 확인하는 것이 중요
+            head_missing = [k for k in missing_keys if 'keypoint_head' in k]
+            if head_missing:
+                print(f"   ❌ [CRITICAL] Head weights missing: {head_missing}")
+                # Head 가중치가 없으면 모델은 껍데기일 뿐입니다.
+                # 강제 종료하여 사용자가 인지하게 함
+                sys.exit(1)
+            else:
+                print(f"   ⚠️ Non-critical missing keys: {len(missing_keys)} (PosEmbed related etc.)")
+        
     except Exception as e:
         print(f"❌ Failed to load weights: {e}")
         sys.exit(1)
 
     dummy_input = torch.randn(1, 3, 256, 192).to(device)
     try:
-        # [Fix] 대용량 모델(2GB+)을 위한 설정 확인
-        # opset_version=13 (최신 기능 지원) 권장
         torch.onnx.export(
             model,
             dummy_input,
@@ -174,7 +212,6 @@ def run_build_worker(onnx_path, engine_path):
     config = builder.create_builder_config()
     parser = trt.OnnxParser(network, TRT_LOGGER)
 
-    # [CRITICAL FIX] Large Model Parsing
     print(f"   📂 Parsing ONNX from file: {onnx_path}")
     
     if not os.path.exists(onnx_path):
@@ -189,19 +226,11 @@ def run_build_worker(onnx_path, engine_path):
             print(parser.get_error(error))
         sys.exit(1)
 
-    # [CRITICAL FIX 2] Optimization Profile
-    # "Network has dynamic or shape inputs" 에러 해결을 위해 프로파일 정의 필수
     profile = builder.create_optimization_profile()
-    
-    # 입력 이름: 'input' (ONNX export 시 지정한 이름)
-    # Shape: (Batch, Channel, Height, Width)
-    # Min=(1,3,256,192), Opt=(1,3,256,192), Max=(1,3,256,192)
-    # 현재는 1인용 모드이므로 배치 1로 고정하여 최적화
     profile.set_shape("input", (1, 3, 256, 192), (1, 3, 256, 192), (1, 3, 256, 192))
     config.add_optimization_profile(profile)
     print("   🔧 Optimization Profile Added (Batch Size: 1)")
 
-    # Config
     try:
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 32) # 4GB
     except AttributeError:
@@ -226,7 +255,6 @@ def run_build_worker(onnx_path, engine_path):
 # [Main Manager]
 # ==================================================================================
 def main():
-    # 1. Worker Execution Check
     if len(sys.argv) > 1:
         if sys.argv[1] == '--export-worker':
             run_export_worker(sys.argv[2], sys.argv[3])
@@ -235,9 +263,8 @@ def main():
             run_build_worker(sys.argv[2], sys.argv[3])
             return
 
-    # 2. Manager Mode
     print("========================================================")
-    print("   MUSE ViTPose Converter (Large Model Support)")
+    print("   MUSE ViTPose Converter (Weight Repair Edition)")
     print("========================================================")
 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -247,15 +274,11 @@ def main():
     ONNX_PATH = os.path.join(MODEL_DIR, "vitpose_huge.onnx")
     ENGINE_PATH = os.path.join(MODEL_DIR, "vitpose_huge.engine")
 
-    # [Force Refresh] 이전에 잘못 생성된 ONNX가 있을 수 있으므로 삭제 후 다시 생성
-    if os.path.exists(ONNX_PATH):
-        print("♻️  Refreshing ONNX file to ensure integrity...")
-        try:
-            os.remove(ONNX_PATH)
-        except:
-            pass
+    # [Force Refresh] 잘못된 엔진 삭제
+    if os.path.exists(ONNX_PATH): os.remove(ONNX_PATH)
+    if os.path.exists(ENGINE_PATH): os.remove(ENGINE_PATH)
+    print("♻️  Cleaning up old files for clean build...")
 
-    # Step 1: Export ONNX
     if not os.path.exists(PTH_PATH):
         print(f"❌ Model not found: {PTH_PATH}")
         return
@@ -267,12 +290,12 @@ def main():
         print("❌ PyTorch Worker Failed.")
         return
 
-    # Step 2: Build Engine
     print("\n🔄 [Manager] Spawning TensorRT Worker...")
     try:
         subprocess.run([sys.executable, __file__, '--build-worker', ONNX_PATH, ENGINE_PATH], check=True)
         print("\n🎉 All processes finished successfully!")
         print(f"👉 Result: {ENGINE_PATH}")
+        print("👉 이제 'python tools/run_muse.py'를 실행하면 정확한 뼈대가 보일 것입니다.")
     except subprocess.CalledProcessError:
         print("❌ TensorRT Worker Failed.")
 
