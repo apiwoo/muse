@@ -165,16 +165,26 @@ class BeautyWorker(QThread):
         # 스레드가 루프를 돌고 있다면 빠져나오게 함
 
 def main():
-    # [Fix] Ctrl+C (SIGINT) 시그널을 운영체제 기본 동작(종료)으로 처리
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # [Fix] VS Code Stop 버튼(SIGTERM) 및 Ctrl+C 핸들링 강화
+    # 프로그램이 종료 신호를 받으면 즉시 QApplication을 종료시킵니다.
+    def signal_handler(sig, frame):
+        print(f"\n🛑 [System] 종료 시그널 감지 ({sig}). 앱 종료를 요청합니다...")
+        if QApplication.instance():
+            QApplication.instance().quit()
+
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler) # VS Code Stop Button
 
     app = QApplication(sys.argv)
     qdarktheme.setup_theme("dark")
+    
+    # 마지막 창이 닫히면 앱도 확실히 종료되도록 설정
+    app.setQuitOnLastWindowClosed(True)
 
     window = MainWindow()
     worker = BeautyWorker()
     
-    # [Core Fix] 데몬 스레드로 설정
+    # [Core Fix] 스레드 종료 정책 설정
     worker.setTerminationEnabled(True) 
     
     window.connect_worker(worker)
@@ -185,22 +195,28 @@ def main():
     print("🚀 [System] MUSE GUI 가동 완료.")
     
     # GUI 실행 (종료될 때까지 대기)
+    # 윈도우가 닫히거나 quit()이 호출되면 여기서 리턴합니다.
     exit_code = app.exec()
     
-    # --- 프로그램 종료 시퀀스 ---
-    print("🛑 [System] 종료 시퀀스 시작...")
+    # --- 프로그램 종료 시퀀스 (The Final Cleanup) ---
+    print("🛑 [System] 메인 루프 종료. 리소스 해제 시작...")
     
     # 1. 스레드 루프 중지 신호
-    worker.stop()
-    
-    # 2. 스레드 종료 대기 (최대 1초)
-    if not worker.wait(1000):
-        print("⚠️ [System] 스레드가 반응하지 않아 강제 종료합니다.")
-        worker.terminate()
+    if worker.isRunning():
+        print("   -> 워커 스레드 정지 요청...")
+        worker.stop()
+        
+        # 2. 스레드 종료 대기 (최대 1초 -> 0.5초로 단축)
+        if not worker.wait(500):
+            print("⚠️ [System] 스레드가 반응하지 않아 강제 종료(Terminate)합니다.")
+            worker.terminate()
+            worker.wait(100) # terminate 후 잠시 대기
+        else:
+            print("   -> 워커 스레드 정상 종료됨.")
     
     # 3. [Final Blow] 프로세스 강제 사살 (Kill Process)
-    # sys.exit()은 파이썬 인터프리터가 정리 작업을 하느라 늦을 수 있습니다.
-    # os._exit(0)은 운영체제 레벨에서 프로세스를 즉시 증발시킵니다.
+    # sys.exit()은 파이썬 정리 작업 때문에 늦거나(좀비화) 안 꺼질 수 있습니다.
+    # os._exit(0)은 운영체제 레벨에서 프로세스 트리를 즉시 증발시킵니다.
     print("💀 [System] 프로세스 강제 소멸 (os._exit)")
     os._exit(0)
 
