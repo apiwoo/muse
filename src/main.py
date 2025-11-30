@@ -59,7 +59,7 @@ class BeautyWorker(QThread):
         self.beauty_engine = None
 
         # 설정
-        self.DEVICE_ID = 1
+        self.DEVICE_ID = 0
         self.WIDTH = 1920
         self.HEIGHT = 1080
         self.FPS = 30
