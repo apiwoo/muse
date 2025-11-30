@@ -7,6 +7,7 @@ import time
 import cv2
 import numpy as np
 import os
+import signal # [Fix] 시그널 모듈 추가
 
 # [PySide6 GUI Framework]
 from PySide6.QtWidgets import QApplication
@@ -23,7 +24,6 @@ setup_cuda_environment()
 from core.input_manager import InputManager
 from core.virtual_cam import VirtualCamera
 from ai.tracking.facemesh import FaceMesh
-# [New] BodyTracker Import
 from ai.tracking.body_tracker import BodyTracker 
 from graphics.beauty_engine import BeautyEngine
 from ui.main_window import MainWindow
@@ -50,6 +50,13 @@ class BeautyWorker(QThread):
             'waist_slim': 0.0,
             'show_body_debug': False
         }
+        
+        # 자원 핸들 초기화
+        self.input_mgr = None
+        self.virtual_cam = None
+        self.tracker = None
+        self.body_tracker = None
+        self.beauty_engine = None
 
         # 설정
         self.DEVICE_ID = 1
@@ -64,7 +71,6 @@ class BeautyWorker(QThread):
             self.input_mgr = InputManager(device_id=self.DEVICE_ID, width=self.WIDTH, height=self.HEIGHT, fps=self.FPS)
             self.virtual_cam = VirtualCamera(width=self.WIDTH, height=self.HEIGHT, fps=self.FPS)
             self.tracker = FaceMesh(root_dir="assets")
-            # [Step 1] Body Tracker 초기화
             self.body_tracker = BodyTracker()
             self.beauty_engine = BeautyEngine()
         except Exception as e:
@@ -76,7 +82,11 @@ class BeautyWorker(QThread):
 
         while self.running:
             # [Step 1] Input
-            frame_gpu, ret = self.input_mgr.read()
+            if self.input_mgr:
+                frame_gpu, ret = self.input_mgr.read()
+            else:
+                break
+                
             if not ret:
                 self.msleep(10)
                 continue
@@ -88,21 +98,27 @@ class BeautyWorker(QThread):
                 frame_cpu = frame_gpu
 
             # 얼굴 트래킹
-            faces = self.tracker.process(frame_cpu)
+            faces = []
+            if self.tracker:
+                faces = self.tracker.process(frame_cpu)
             
-            # [New] 바디 트래킹
-            body_landmarks = self.body_tracker.process(frame_cpu)
+            # 바디 트래킹
+            body_landmarks = None
+            if self.body_tracker:
+                body_landmarks = self.body_tracker.process(frame_cpu)
 
-            # [Step 3] Beauty Processing (Warping)
+            # [Step 3] Beauty Processing (Warping + Segmentation)
             # 얼굴과 몸 정보를 모두 엔진에 전달
-            frame_cpu = self.beauty_engine.process(frame_cpu, faces, body_landmarks, self.params)
+            if self.beauty_engine:
+                frame_cpu = self.beauty_engine.process(frame_cpu, faces, body_landmarks, self.params)
 
             # [Debug] 몸 뼈대 그리기 (체크박스가 켜져있을 때만)
-            if self.params.get('show_body_debug', False):
+            if self.params.get('show_body_debug', False) and self.body_tracker:
                 frame_cpu = self.body_tracker.draw_debug(frame_cpu, body_landmarks)
 
             # [Step 4] Output
-            self.virtual_cam.send(frame_cpu)
+            if self.virtual_cam:
+                self.virtual_cam.send(frame_cpu)
             
             self.frame_processed.emit(frame_cpu)
 
@@ -114,10 +130,30 @@ class BeautyWorker(QThread):
                 frame_count = 0
                 prev_time = curr_time
 
-        # 리소스 정리
-        self.input_mgr.release()
-        self.virtual_cam.close()
+        # 루프 탈출 후 정리
+        self.cleanup()
         print("🧵 [Worker] 스레드 종료")
+
+    def cleanup(self):
+        """자원 강제 해제 (중복 호출 방지)"""
+        # 이미 해제되었다면 패스
+        if self.input_mgr is None and self.virtual_cam is None:
+            return
+
+        print("🧹 [Worker] 자원 정리 시작...")
+        if self.input_mgr:
+            self.input_mgr.release()
+            self.input_mgr = None
+        
+        if self.virtual_cam:
+            self.virtual_cam.close()
+            self.virtual_cam = None
+            
+        # AI 엔진 메모리 해제
+        self.tracker = None
+        self.body_tracker = None
+        self.beauty_engine = None
+        print("✨ [Worker] 자원 정리 완료")
 
     @Slot(dict)
     def update_params(self, new_params):
@@ -126,24 +162,47 @@ class BeautyWorker(QThread):
 
     def stop(self):
         self.running = False
-        self.wait()
+        # 스레드가 루프를 돌고 있다면 빠져나오게 함
 
 def main():
+    # [Fix] Ctrl+C (SIGINT) 시그널을 운영체제 기본 동작(종료)으로 처리
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+
     app = QApplication(sys.argv)
     qdarktheme.setup_theme("dark")
 
     window = MainWindow()
     worker = BeautyWorker()
+    
+    # [Core Fix] 데몬 스레드로 설정
+    worker.setTerminationEnabled(True) 
+    
     window.connect_worker(worker)
     
     worker.start()
     window.show()
     
     print("🚀 [System] MUSE GUI 가동 완료.")
+    
+    # GUI 실행 (종료될 때까지 대기)
     exit_code = app.exec()
     
+    # --- 프로그램 종료 시퀀스 ---
+    print("🛑 [System] 종료 시퀀스 시작...")
+    
+    # 1. 스레드 루프 중지 신호
     worker.stop()
-    sys.exit(exit_code)
+    
+    # 2. 스레드 종료 대기 (최대 1초)
+    if not worker.wait(1000):
+        print("⚠️ [System] 스레드가 반응하지 않아 강제 종료합니다.")
+        worker.terminate()
+    
+    # 3. [Final Blow] 프로세스 강제 사살 (Kill Process)
+    # sys.exit()은 파이썬 인터프리터가 정리 작업을 하느라 늦을 수 있습니다.
+    # os._exit(0)은 운영체제 레벨에서 프로세스를 즉시 증발시킵니다.
+    print("💀 [System] 프로세스 강제 소멸 (os._exit)")
+    os._exit(0)
 
 if __name__ == "__main__":
     main()

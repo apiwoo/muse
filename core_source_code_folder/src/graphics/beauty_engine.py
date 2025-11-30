@@ -4,6 +4,7 @@
 
 import cv2
 import numpy as np
+import mediapipe as mp
 # [Fix] main.py의 sys.path 설정에 맞춰 'src.' 제거
 from ai.tracking.facemesh import FaceMesh
 
@@ -12,10 +13,13 @@ class BeautyEngine:
         """
         [Mode A] Real-time Beauty Engine
         - 역할: 얼굴/몸 랜드마크를 기반으로 이미지 왜곡(Warping) 수행
-        - V1.2 Update: Support ViTPose-Huge (COCO Format)
+        - V1.3 Update: Background Protection (Segmentation)
         """
-        print("💄 [BeautyEngine] 성형 엔진 초기화 (V1.2 - ViTPose Integration)")
-        pass
+        print("💄 [BeautyEngine] 성형 엔진 초기화 (V1.3 - Background Protection)")
+        
+        # [New] 배경 보호를 위한 세그멘테이션 모델 로드
+        self.mp_seg = mp.solutions.selfie_segmentation
+        self.segmenter = self.mp_seg.SelfieSegmentation(model_selection=1) # 1: Landscape mode (더 정확함)
 
     def process(self, frame, faces, body_landmarks=None, params=None):
         """
@@ -31,13 +35,17 @@ class BeautyEngine:
         if params is None:
             params = {}
 
-        result = frame.copy()
+        # 원본 보존 (배경 복원용)
+        original_bg = frame.copy()
+        
+        # 워핑을 적용할 작업용 이미지
+        warped_frame = frame.copy()
 
         # [Step 1] Body Reshaping (ViTPose COCO Format)
         if body_landmarks is not None:
             # 허리 축소
             if params.get('waist_slim', 0) > 0:
-                result = self._warp_waist(result, body_landmarks, strength=params['waist_slim'])
+                warped_frame = self._warp_waist(warped_frame, body_landmarks, strength=params['waist_slim'])
 
         # [Step 2] Face Reshaping
         if faces:
@@ -47,13 +55,43 @@ class BeautyEngine:
 
                 # V라인 (턱 깎기)
                 if params.get('face_v', 0) > 0:
-                    result = self._warp_face_contour(result, lm, strength=params['face_v'])
+                    warped_frame = self._warp_face_contour(warped_frame, lm, strength=params['face_v'])
 
                 # 왕눈이 (눈 키우기)
                 if params.get('eye_scale', 0) > 0:
-                    result = self._warp_eyes(result, lm, strength=params['eye_scale'])
+                    warped_frame = self._warp_eyes(warped_frame, lm, strength=params['eye_scale'])
 
-        return result
+        # [Step 3] Background Protection (배경 왜곡 방지)
+        # 워핑된 결과물에서 '사람'만 오려내어, 원본 배경(original_bg) 위에 덮어씌웁니다.
+        # 이렇게 하면 배경이 휘어지는 현상이 사라집니다.
+        
+        # 1. 마스크 추출 (MediaPipe는 RGB를 원함)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.segmenter.process(frame_rgb)
+        
+        if results.segmentation_mask is not None:
+            # 마스크 처리 (0~1 사이 값)
+            mask = results.segmentation_mask
+            
+            # 경계선 부드럽게 (Anti-aliasing)
+            # Bilateral Filter 등을 쓰면 더 좋지만 속도를 위해 GaussianBlur 사용
+            mask = cv2.GaussianBlur(mask, (0, 0), 2) # Sigma=2
+            mask = np.stack((mask,) * 3, axis=-1) # 3채널로 확장
+
+            # [핵심] 합성: (사람_워핑 * 마스크) + (원본_배경 * (1-마스크))
+            # 마스크가 1에 가까울수록(사람) 워핑된 이미지를 쓰고,
+            # 마스크가 0에 가까울수록(배경) 원본 배경을 씁니다.
+            
+            # 주의: 워핑된 이미지(warped_frame)의 마스크 위치가 원본과 약간 다를 수 있지만(몸을 줄였으니까),
+            # 줄어든 만큼은 배경이 보여야 하므로 원본 마스크를 쓰는게 맞습니다.
+            # (엄밀히는 워핑된 마스크를 써야 하지만, 축소 워핑이라 원본 마스크가 더 큽니다.
+            #  따라서 줄어든 틈새로 원본 배경이 보이게 됩니다 -> 자연스러운 Inpainting 효과)
+            
+            final_output = (warped_frame * mask + original_bg * (1.0 - mask)).astype(np.uint8)
+            return final_output
+        else:
+            # 마스크 추출 실패 시 그냥 워핑된거 반환
+            return warped_frame
 
     def _get_landmarks(self, face):
         if hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
@@ -66,24 +104,21 @@ class BeautyEngine:
     def _warp_waist(self, img, keypoints, strength):
         """
         허리 잘록하게 만들기 (Waist Slimming)
-        - Update: COCO 17 Keypoint 포맷 지원 (NumPy Array)
-        - Indices: L-Shoulder(5), R-Shoulder(6), L-Hip(11), R-Hip(12)
         """
-        # 신뢰도 임계값 (이보다 낮으면 보정 스킵)
-        CONF_THRESH = 0.3
+        # 신뢰도 임계값
+        CONF_THRESH = 0.4
 
         # COCO Indices
         idx_l_sh, idx_r_sh = 5, 6
         idx_l_hip, idx_r_hip = 11, 12
         
         try:
-            # 1. 신뢰도 체크
-            # 키포인트가 존재하지 않거나 신뢰도가 너무 낮으면 건너뜀 (왜곡 방지)
+            # 신뢰도 체크
             if (keypoints[idx_l_sh, 2] < CONF_THRESH or keypoints[idx_r_sh, 2] < CONF_THRESH or
                 keypoints[idx_l_hip, 2] < CONF_THRESH or keypoints[idx_r_hip, 2] < CONF_THRESH):
                 return img
 
-            # 2. 좌표 추출 (이미 픽셀 단위임)
+            # 좌표 추출
             l_sh = keypoints[idx_l_sh, :2]
             r_sh = keypoints[idx_r_sh, :2]
             l_hip = keypoints[idx_l_hip, :2]
@@ -92,29 +127,27 @@ class BeautyEngine:
         except IndexError:
             return img
 
-        # 3. 허리 위치 추정 (어깨와 힙의 중간보다 약간 아래)
-        # 0.6 지점 (힙 쪽에 더 가까움)
+        # 허리 위치 추정 (어깨와 힙 사이, 힙 쪽에 가깝게)
         l_waist = l_sh * 0.4 + l_hip * 0.6
         r_waist = r_sh * 0.4 + r_hip * 0.6
         
         # 몸통 중심선
         center_waist = (l_waist + r_waist) / 2
         
-        # 워핑 반경 (몸통 너비의 절반 정도)
+        # 워핑 반경
         body_width = np.linalg.norm(l_waist - r_waist)
-        # 몸이 옆으로 섰을 때 등 예외 처리
         if body_width < 10: return img
         
-        radius = int(body_width * 0.6)
+        radius = int(body_width * 0.7) # 반경을 조금 더 넓게
         
-        # 강도 조절 (너무 세면 배경이 심하게 휨)
-        warp_strength = strength * 0.4
+        # 강도 조절
+        warp_strength = strength * 0.5 # 0.0 ~ 0.5
 
-        # 4. 왼쪽 허리 당기기 (중심 쪽으로)
+        # 왼쪽 허리 당기기 (중심 쪽으로)
         vec_l = center_waist - l_waist
         img = self._apply_local_warp(img, l_waist, radius, warp_strength, mode='shrink', vector=vec_l)
 
-        # 5. 오른쪽 허리 당기기 (중심 쪽으로)
+        # 오른쪽 허리 당기기 (중심 쪽으로)
         vec_r = center_waist - r_waist
         img = self._apply_local_warp(img, r_waist, radius, warp_strength, mode='shrink', vector=vec_r)
 
@@ -162,9 +195,7 @@ class BeautyEngine:
     def _apply_local_warp(self, img, center, radius, strength, mode='expand', vector=None):
         """
         [Core Algorithm] 국소 영역 워핑
-        - Update: 입력 좌표(center)를 정수형(int)으로 강제 변환하여 슬라이싱 오류 해결
         """
-        # [Fix] float 좌표가 들어오면 슬라이싱에서 에러나므로 int로 변환
         cx, cy = int(center[0]), int(center[1])
         r = int(radius)
         
@@ -209,6 +240,7 @@ class BeautyEngine:
 
         warped_roi = cv2.remap(roi, map_x, map_y, cv2.INTER_LINEAR)
         
+        # 자연스러운 합성을 위해 Gaussian Blur 마스크 사용
         mask_img = np.zeros((h, w), dtype=np.float32)
         mask_img[mask] = 1.0
         mask_img = cv2.GaussianBlur(mask_img, (5, 5), 0)

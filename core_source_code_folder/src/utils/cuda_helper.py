@@ -8,52 +8,64 @@ import glob
 
 def setup_cuda_environment():
     """
-    [핵심] Windows 환경에서 pip로 설치된 NVIDIA 라이브러리(DLL)들을
-    시스템 경로(PATH)에 강제로 주입합니다.
+    [핵심] Windows 환경에서 DLL 로드 문제를 해결합니다.
+    프로젝트 내부의 'libs' 폴더를 최우선으로 등록하여
+    시스템 환경에 상관없이 안정적인 실행을 보장합니다.
     """
     if platform.system() != "Windows":
         return
 
-    # print("🔧 [CUDA Helper] NVIDIA 라이브러리 경로 탐색 중...")
+    # print("🔧 [CUDA Helper] 라이브러리 경로 설정 중...")
     
     # Python site-packages 경로들 확인
     site_packages = [p for p in sys.path if 'site-packages' in p]
     
-    found_dlls = 0
+    dll_dirs = set()
     
-    # 우선순위를 높이기 위해 수집된 경로들을 리스트에 담습니다.
-    new_paths = []
+    # [Custom Fix] 프로젝트 내부 'libs' 폴더 우선 추가 (Portable)
+    # 현재 파일: src/utils/cuda_helper.py
+    # 루트 경로: src/utils/../.. (즉, 프로젝트 루트)
+    current_file = os.path.abspath(__file__)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+    local_lib_path = os.path.join(project_root, "libs")
+    
+    if os.path.exists(local_lib_path):
+        dll_dirs.add(local_lib_path)
 
+    # 1. 일반적인 NVIDIA 패키지 경로 탐색
     for sp in site_packages:
-        # nvidia 폴더 내부 탐색
         nvidia_path = os.path.join(sp, "nvidia")
-        if not os.path.exists(nvidia_path):
-            continue
+        if os.path.exists(nvidia_path):
+            for root, dirs, files in os.walk(nvidia_path):
+                if os.path.basename(root) in ['bin', 'lib']:
+                    if any(f.endswith('.dll') for f in files):
+                        dll_dirs.add(root)
+
+        # 2. Torch 라이브러리
+        torch_lib = os.path.join(sp, "torch", "lib")
+        if os.path.exists(torch_lib):
+            dll_dirs.add(torch_lib)
+
+    # 3. 발견된 경로 등록
+    found_cudnn_8 = False
+    
+    for directory in dll_dirs:
+        try:
+            # Python 3.8+ DLL 로드 허용
+            os.add_dll_directory(directory)
+            # PATH 환경변수 업데이트
+            os.environ['PATH'] = directory + os.pathsep + os.environ['PATH']
             
-        # nvidia 폴더 하위의 모든 디렉토리 검사 (cudnn, cublas 등)
-        for root, dirs, files in os.walk(nvidia_path):
-            # 'bin' 또는 'lib' 폴더가 있으면 후보
-            if os.path.basename(root) in ['bin', 'lib']:
-                # DLL 파일이 하나라도 있는지 확인
-                dlls = glob.glob(os.path.join(root, "*.dll"))
-                if dlls:
-                    try:
-                        # Python 3.8+ 필수 (DLL 로드 경로 추가)
-                        os.add_dll_directory(root)
-                        # PATH 환경변수에도 추가 (서브프로세스 등을 위해)
-                        new_paths.append(root)
-                        found_dlls += 1
-                    except Exception as e:
-                        pass
-                        # print(f"   ⚠️ 경로 등록 실패: {root} ({e})")
+            if glob.glob(os.path.join(directory, "cudnn64_8.dll")):
+                found_cudnn_8 = True
+                
+        except Exception:
+            pass
 
-    # PATH 환경변수 업데이트 (맨 앞에 추가하여 우선순위 확보)
-    if new_paths:
-        os.environ['PATH'] = os.pathsep.join(new_paths) + os.pathsep + os.environ['PATH']
-
-    if found_dlls > 0:
-        # 너무 자주 뜨면 시끄러우니 주석 처리 가능
-        # print(f"   ✅ 총 {found_dlls}개의 NVIDIA 라이브러리 경로를 로드했습니다.")
+    # 4. 진단
+    if found_cudnn_8:
+        # print("   ✅ [OK] 필수 DLL(cudnn64_8.dll)이 로드되었습니다.")
         pass
     else:
-        print("   ⚠️ [Warning] NVIDIA 라이브러리를 찾지 못했습니다. 'setup.py'를 확인하세요.")
+        print("   ⚠️ [Warning] 'cudnn64_8.dll'을 찾지 못했습니다.")
+        print(f"      -> 프로젝트 루트에 'libs' 폴더를 만들고 파일을 넣어주세요: {local_lib_path}")

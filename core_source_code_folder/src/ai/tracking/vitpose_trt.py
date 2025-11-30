@@ -23,6 +23,7 @@ class VitPoseTrt:
         [High-End] ViTPose TensorRT Inference Engine
         - Backend: TensorRT 10.x + CuPy (Zero-Copy)
         - Model: ViT-Huge (COCO 17 Keypoints)
+        - V2.0 Update: Letterbox Preprocessing (비율 왜곡 방지)
         """
         print(f"🚀 [ViTPose] TensorRT 엔진 로딩 중: {os.path.basename(engine_path)}")
         
@@ -42,20 +43,17 @@ class VitPoseTrt:
         
         # 2. Allocate Buffers (using CuPy for GPU Memory)
         # Input: (1, 3, 256, 192) -> NCHW
-        self.input_shape = (1, 3, 256, 192)
-        self.input_dtype = np.float32
-        self.input_size = np.prod(self.input_shape) * 4 # bytes
+        self.input_h, self.input_w = 256, 192
+        self.input_shape = (1, 3, self.input_h, self.input_w)
         
         # Output: (1, 17, 64, 48) -> Heatmaps (1/4 scale)
         self.output_shape = (1, 17, 64, 48)
-        self.output_size = np.prod(self.output_shape) * 4
         
         # GPU Buffers
         self.d_input = cp.zeros(self.input_shape, dtype=cp.float32)
         self.d_output = cp.zeros(self.output_shape, dtype=cp.float32)
         
-        # Binding (TensorRT 10.x style)
-        # 0: input, 1: output
+        # Binding
         self.bindings = [int(self.d_input.data.ptr), int(self.d_output.data.ptr)]
         
         # Preprocessing Constants (ImageNet Mean/Std)
@@ -66,7 +64,7 @@ class VitPoseTrt:
 
     def inference(self, frame_bgr):
         """
-        :param frame_bgr: (H, W, 3) BGR Image (CPU numpy or GPU cupy)
+        :param frame_bgr: (H, W, 3) BGR Image (CPU numpy)
         :return: keypoints (17, 3) -> [x, y, conf] (Original Scale)
         """
         if frame_bgr is None:
@@ -74,65 +72,73 @@ class VitPoseTrt:
 
         h_orig, w_orig = frame_bgr.shape[:2]
 
-        # 1. Preprocess (Resize & Normalize)
-        # Resize to (192, 256) -> (W, H)
-        # Note: cv2.resize takes (W, H)
-        img_resized = cv2.resize(frame_bgr, (192, 256))
+        # [Step 1] Letterbox Resize (비율 유지)
+        # 1. 스케일 계산 (가로/세로 중 더 많이 줄여야 하는 쪽 기준)
+        scale = min(self.input_w / w_orig, self.input_h / h_orig)
         
-        # To GPU & RGB Conversion
-        img_gpu = cp.asarray(img_resized)
+        # 2. 리사이즈된 크기
+        nw = int(w_orig * scale)
+        nh = int(h_orig * scale)
+        
+        # 3. 리사이즈 수행
+        img_resized = cv2.resize(frame_bgr, (nw, nh))
+        
+        # 4. 패딩 (회색 배경)
+        # 캔버스 생성 (256, 192)
+        img_canvas = np.full((self.input_h, self.input_w, 3), 127.5, dtype=np.uint8)
+        
+        # 중앙 정렬을 위한 오프셋 계산
+        pad_w = (self.input_w - nw) // 2
+        pad_h = (self.input_h - nh) // 2
+        
+        # 이미지 붙여넣기
+        img_canvas[pad_h:pad_h+nh, pad_w:pad_w+nw] = img_resized
+
+        # [Step 2] To GPU & Normalize
+        img_gpu = cp.asarray(img_canvas)
         img_gpu = img_gpu[..., ::-1] # BGR -> RGB
         
-        # (H, W, C) -> (B, C, H, W) & Normalize
+        # (H, W, C) -> (B, C, H, W)
         img_gpu = img_gpu.transpose(2, 0, 1).astype(cp.float32) / 255.0
-        img_gpu = img_gpu.reshape(1, 3, 256, 192)
+        img_gpu = img_gpu.reshape(1, 3, self.input_h, self.input_w)
         img_gpu = (img_gpu - self.mean) / self.std
         
-        # Copy to input buffer (Flatten for safety if needed, but shape matches)
         cp.copyto(self.d_input, img_gpu)
 
-        # 2. Inference
+        # [Step 3] Inference
         self.context.execute_v2(bindings=self.bindings)
 
-        # 3. Post-process (Heatmap -> Keypoints)
-        # Heatmaps: (1, 17, 64, 48)
+        # [Step 4] Post-process (Heatmap -> Keypoints)
         heatmaps = self.d_output # GPU array
         
-        # Find max location in each heatmap (17 channels)
-        # Flatten H,W dimensions to find argmax easily
-        # (1, 17, 3072)
+        # Flatten for argmax
         heatmaps_flat = heatmaps.reshape(1, 17, -1)
         
-        # Max Values (Confidence)
-        max_vals = cp.amax(heatmaps_flat, axis=2) # (1, 17)
-        max_vals = max_vals.reshape(17, 1)
+        # Confidence
+        max_vals = cp.amax(heatmaps_flat, axis=2).reshape(1, 17, 1)
         
-        # Max Indices
-        max_inds = cp.argmax(heatmaps_flat, axis=2) # (1, 17)
+        # Coordinates (in Heatmap 64x48 scale)
+        max_inds = cp.argmax(heatmaps_flat, axis=2)
         
-        # Convert indices to (x, y)
-        # Width of heatmap is 48
-        w_heat = 48
+        w_heat = 48 # Heatmap width
         y_heat = max_inds // w_heat
         x_heat = max_inds % w_heat
         
-        # Stack [x, y, conf]
-        # Coordinates are in heatmap scale (64x48).
-        # We need to scale them back to original image size.
-        # Scale factors: Input (256x192) -> Heatmap (64x48) is 1/4
-        # So Heatmap -> Input is x4
-        # Input -> Original is (w_orig/192, h_orig/256)
+        # Stack [x, y]
+        kpts = cp.stack([x_heat, y_heat], axis=-1).astype(cp.float32)
         
-        scale_x = (w_orig / 192.0) * 4.0
-        scale_y = (h_orig / 256.0) * 4.0
+        # [Critical] 좌표 복원 (Heatmap -> Input -> Original)
+        # 1. Heatmap(64x48) -> Input(256x192) : 4배 확대
+        kpts *= 4.0
         
-        kpts = cp.stack([x_heat, y_heat], axis=1).astype(cp.float32)
-        kpts[:, 0] *= scale_x
-        kpts[:, 1] *= scale_y
+        # 2. Remove Padding (Letterbox 역연산)
+        kpts[..., 0] -= pad_w
+        kpts[..., 1] -= pad_h
         
-        # Combine with confidence
-        # Result: (17, 3)
-        result_kpts = cp.hstack([kpts, max_vals])
+        # 3. Scale Back (Input -> Original)
+        kpts /= scale
         
-        # Return as CPU numpy for compatibility with other modules
-        return cp.asnumpy(result_kpts)
+        # Combine [x, y, conf]
+        result_kpts = cp.concatenate([kpts, max_vals], axis=-1)
+        
+        return cp.asnumpy(result_kpts[0])
