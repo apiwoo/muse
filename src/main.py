@@ -44,6 +44,7 @@ class BeautyWorker(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self.should_reset_bg = False # 리셋 플래그
         
         # [V4.0] 파라미터 초기화 (Body Quartet)
         self.params = {
@@ -96,6 +97,11 @@ class BeautyWorker(QThread):
             if not ret:
                 self.msleep(10)
                 continue
+            
+            # [Event] Background Reset Request
+            if self.should_reset_bg and self.beauty_engine:
+                self.beauty_engine.reset_background(frame_gpu)
+                self.should_reset_bg = False
 
             # [Step 2] AI Processing Prep (Copy for Inference)
             if cp and hasattr(frame_gpu, 'get'):
@@ -108,14 +114,14 @@ class BeautyWorker(QThread):
             if self.tracker:
                 faces = self.tracker.process(frame_cpu_for_ai)
             
-            # 바디 트래킹 (ViTPose)
+            # 바디 트래킹 (ViTPose or StudentTRT)
             body_landmarks = None
             if self.body_tracker:
                 body_landmarks = self.body_tracker.process(frame_cpu_for_ai)
 
             # [Step 3] Beauty Processing (GPU to GPU)
             if self.beauty_engine:
-                frame_out_gpu = self.beauty_engine.process(frame_gpu, faces, body_landmarks, self.params)
+                frame_out_gpu = self.beauty_engine.process(frame_gpu, faces, body_landmarks, self.params, mask=self.body_tracker.get_mask())
             else:
                 frame_out_gpu = frame_gpu
 
@@ -187,6 +193,11 @@ class BeautyWorker(QThread):
     def update_params(self, new_params):
         """UI 슬라이더 변경 시 호출되는 슬롯"""
         self.params = new_params.copy()
+        
+    @Slot()
+    def reset_background(self):
+        """UI에서 B키를 누르면 호출됨 -> 플래그 설정"""
+        self.should_reset_bg = True
 
     def stop(self):
         self.running = False

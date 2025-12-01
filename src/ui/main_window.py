@@ -2,8 +2,8 @@
 # Created for Mode A (Visual Supremacy)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QDockWidget
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QDockWidget, QLabel
+from PySide6.QtCore import Qt, Signal
 
 from ui.viewport import Viewport
 from ui.beauty_panel import BeautyPanel
@@ -15,10 +15,13 @@ class MainWindow(QMainWindow):
     - 우측: BeautyPanel (조절 패널)
     - 역할: UI 레이아웃 구성 및 Worker Thread와의 연결 고리
     """
+    # [New] 배경 리셋 요청 시그널 (Worker가 수신)
+    request_bg_reset = Signal()
+
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Project MUSE: Visual Supremacy (v2.0 GUI)")
+        self.setWindowTitle("Project MUSE: Visual Supremacy (v2.1 GUI)")
         self.resize(1280, 720)
         self.setStyleSheet("background-color: #121212; color: #F0F0F0;")
 
@@ -39,6 +42,11 @@ class MainWindow(QMainWindow):
         
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_panel)
 
+        # 상태 표시줄
+        self.status_label = QLabel("Ready. Press 'B' to reset background.")
+        self.status_label.setStyleSheet("padding: 5px; color: #888;")
+        self.statusBar().addWidget(self.status_label)
+
     def connect_worker(self, worker):
         """
         [Critical] Worker Thread와 UI 연결
@@ -51,7 +59,22 @@ class MainWindow(QMainWindow):
         # 2. 파라미터 송신: UI 슬라이더가 변하면 Worker에 전달
         self.beauty_panel.paramChanged.connect(worker.update_params)
         
+        # 3. [New] 배경 리셋 신호 연결
+        self.request_bg_reset.connect(worker.reset_background)
+        
         print("🔗 [MainWindow] UI와 Worker 스레드 연결 완료")
+
+    def keyPressEvent(self, event):
+        """
+        [New] 키보드 입력 감지
+        - B 키: 배경 리셋
+        """
+        if event.key() == Qt.Key_B:
+            print("⌨️ [Key] 'B' Pressed -> Request Background Reset")
+            self.request_bg_reset.emit()
+            self.status_label.setText("Background Reset Triggered!")
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         """

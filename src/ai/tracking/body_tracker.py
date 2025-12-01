@@ -6,9 +6,15 @@ import cv2
 import numpy as np
 import time
 import math
+import os
 
-# [Change] Remove ViTPose, Add Student Inference
-# from ai.tracking.vitpose_trt import VitPoseTrt
+# [Change] Smart Import: Try TensorRT first, then PyTorch
+try:
+    from src.ai.distillation.student.inference_trt import StudentInferenceTRT
+    TRT_AVAILABLE = True
+except ImportError:
+    TRT_AVAILABLE = False
+
 from src.ai.distillation.student.inference import StudentInference
 
 # ==============================================================================
@@ -61,19 +67,40 @@ class OneEuroFilter:
 class BodyTracker:
     def __init__(self):
         """
-        [BodyTracker V2.0]
+        [BodyTracker V2.1]
         - Engine: Personalized Student Model (Lightweight)
-        - Features: Pose Estimation + Background Masking
+        - Priority: TensorRT (.engine) > PyTorch (.pth)
         - Jitter Control: OneEuro Filter
         """
-        print("💪 [BodyTracker] 개인화 모델(Student) 로드 중...")
-        try:
-            # [Change] Student Inference Engine 연결
-            self.model = StudentInference()
-            self.engine_ready = self.model.is_ready
-        except Exception as e:
-            print(f"❌ [BodyTracker] 모델 로드 실패: {e}")
-            self.engine_ready = False
+        self.model = None
+        self.engine_ready = False
+        self.mode = "None"
+        
+        # 1. Try TensorRT First
+        if TRT_AVAILABLE:
+            print("💪 [BodyTracker] TensorRT 엔진(High-Perf) 로드 시도...")
+            try:
+                trt_model = StudentInferenceTRT()
+                if trt_model.is_ready:
+                    self.model = trt_model
+                    self.engine_ready = True
+                    self.mode = "TensorRT"
+                    print("   ✅ TensorRT 가속 활성화됨.")
+            except Exception as e:
+                print(f"   ⚠️ TensorRT 로드 실패: {e}")
+
+        # 2. Fallback to PyTorch
+        if not self.engine_ready:
+            print("💪 [BodyTracker] PyTorch 엔진(Fallback) 로드 시도...")
+            try:
+                self.model = StudentInference()
+                if self.model.is_ready:
+                    self.engine_ready = True
+                    self.mode = "PyTorch"
+                    print("   ✅ PyTorch 엔진 활성화됨 (최적화를 위해 TensorRT 변환 권장).")
+            except Exception as e:
+                print(f"❌ [BodyTracker] 모든 모델 로드 실패: {e}")
+                self.engine_ready = False
             
         self.last_log_time = time.time()
         self.latest_mask = None # 마스크 저장용
@@ -111,7 +138,7 @@ class BodyTracker:
         # [Log] 2초에 한 번씩만 상태 출력
         if curr_time - self.last_log_time > 2.0:
             max_conf = np.max(confs)
-            print(f"🔍 [BodyTracker] Student Tracking: Conf={max_conf:.2f}")
+            print(f"🔍 [BodyTracker] Tracking ({self.mode}): Conf={max_conf:.2f}")
             self.last_log_time = curr_time
         
         return smoothed_keypoints

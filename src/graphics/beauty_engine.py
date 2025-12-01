@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# Optimized V12.0: Self-Healing Background (Dynamic Update)
+# Optimized V12.1: Self-Healing & Manual Reset Support
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -200,12 +200,12 @@ void composite_kernel(
 class BeautyEngine:
     def __init__(self):
         """
-        [Mode A] Real-time Beauty Engine (GPU Edition V12.0)
+        [Mode A] Real-time Beauty Engine (GPU Edition V12.1)
+        - V12.1: Manual Background Reset Support
         - V12.0: Self-Healing Background (Dynamic Update)
         - V11.0: Zero Distortion
-        - V10.2: Smart Smooth Logic
         """
-        print("💄 [BeautyEngine] GPU 엔진 V12.0 (Self-Healing Background)")
+        print("💄 [BeautyEngine] GPU 엔진 V12.1 (Self-Healing & Reset)")
         
         self.map_scale = 0.25 
         
@@ -220,10 +220,6 @@ class BeautyEngine:
         
         self.bg_gpu = None
         self.has_bg = False
-        
-        # [V12.0] Background Learning Rate
-        # 값이 클수록 조명 변화에 빨리 적응하지만, 마스크 오차 시 잔상(Ghosting)이 생길 수 있음.
-        # 0.05 정도면 약 20프레임(0.6초) 만에 조명 변화를 따라감.
         self.bg_learning_rate = 0.05
         
         # [V10.1] 움직임 속도 추적
@@ -238,7 +234,6 @@ class BeautyEngine:
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.update_bg_kernel = cp.RawKernel(UPDATE_BG_KERNEL_CODE, 'update_bg_kernel')
             
-            # 초기 배경 로드 (시작점)
             self._auto_load_background()
 
     def _auto_load_background(self):
@@ -258,12 +253,32 @@ class BeautyEngine:
                         return
             
             print("⚠️ [BeautyEngine] 저장된 배경이 없습니다. 실시간 학습으로 시작합니다.")
-            self.has_bg = True # 파일이 없어도 빈 캔버스에서 시작 가능 (검은색 -> 실시간 채움)
-            self.bg_cpu_raw = None # 나중에 0으로 초기화됨
+            self.has_bg = True
+            self.bg_cpu_raw = None 
             
         except Exception as e:
             print(f"❌ [BeautyEngine] 배경 로드 중 오류: {e}")
             self.has_bg = False
+
+    def reset_background(self, frame):
+        """
+        [New] 현재 프레임으로 배경을 강제 초기화합니다.
+        방송 중 조명이 바뀌거나 카메라가 이동했을 때 호출됩니다.
+        """
+        if not HAS_CUDA or frame is None: return
+        
+        print("🔄 [BeautyEngine] 배경 버퍼 강제 리셋 (Instant Reset)")
+        
+        if hasattr(frame, 'device'):
+            # 이미 GPU에 있는 경우
+            cp.copyto(self.bg_gpu, frame)
+        else:
+            # CPU에서 온 경우
+            frame_gpu = cp.asarray(frame)
+            if self.bg_gpu is not None and self.bg_gpu.shape == frame_gpu.shape:
+                cp.copyto(self.bg_gpu, frame_gpu)
+            else:
+                self.bg_gpu = frame_gpu # 크기가 다르면 교체
 
     def process(self, frame, faces, body_landmarks=None, params=None, mask=None):
         if frame is None: return frame
@@ -297,9 +312,9 @@ class BeautyEngine:
                     bg_resized = cv2.resize(self.bg_cpu_raw, (w, h))
                     self.bg_gpu = cp.asarray(bg_resized)
                 else:
-                    # 파일이 없으면 현재 프레임으로 시작 (혹은 검은색)
+                    # 파일이 없으면 현재 프레임으로 시작
                     print("⚡ [BeautyEngine] 배경 파일 없음 -> 현재 프레임으로 초기화")
-                    self.bg_gpu = cp.array(frame_gpu) # Copy current frame as init BG
+                    self.bg_gpu = cp.array(frame_gpu)
             else:
                 self.bg_gpu = cp.zeros_like(frame_gpu)
                 
