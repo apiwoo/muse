@@ -1,155 +1,105 @@
 # Project MUSE - facemesh.py
-# Created for Mode A (Visual Supremacy)
+# Target: MediaPipe Migration (Lightweight & High Detail)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
 import numpy as np
-import os
-
-# GPU 가속 라이브러리 (선택적)
-try:
-    import cupy as cp
-except ImportError:
-    cp = None
-
-# InsightFace (고정밀 얼굴 분석)
-from insightface.app import FaceAnalysis
+import mediapipe as mp
 
 class FaceMesh:
-    # [Core] 성형(Warping)을 위한 부위별 인덱스 정의 (Custom 106 Model Layout)
-    # 분석된 랜드마크 구조에 맞춰 인덱스를 재정의했습니다.
+    # [MediaPipe Indices Map]
+    # 성형 엔진에서 사용할 부위별 랜드마크 인덱스 매핑 (478 Landmarks 기준)
     FACE_INDICES = {
-        # [얼굴 윤곽] 0: 턱 중앙, 1: 왼쪽 관자놀이, 17: 오른쪽 관자놀이
-        # 좌측 라인: 1 -> 9~16(외곽) -> 2~8(턱선) -> 0
-        # 우측 라인: 17 -> 25~32(외곽) -> 18~24(턱선) -> 0
-        "JAW_L": [1] + list(range(9, 17)) + list(range(2, 9)),  # 왼쪽 얼굴 라인
-        "JAW_R": [17] + list(range(25, 33)) + list(range(18, 25)), # 오른쪽 얼굴 라인
-        "CHIN_CENTER": [0],
-
-        # [눈썹]
-        "EYEBROW_L": list(range(43, 52)),       # 왼쪽 눈썹 (43~51)
-        "EYEBROW_R": list(range(97, 106)),      # 오른쪽 눈썹 (97~105)
-
-        # [눈]
-        "EYE_L": list(range(33, 43)),           # 왼쪽 눈 (33~42)
-        "EYE_R": list(range(87, 97)),           # 오른쪽 눈 (87~96)
-
-        # [코]
-        "NOSE_ROOT": [72],                      # 미간 (콧대 시작)
-        "NOSE_BRIDGE": [73, 74, 86],            # 콧대 ~ 코끝(86)
-        "NOSE_TIP": [86],                       # 코에서 가장 높은 점
-        "NOSE_BASE": [80],                      # 코 밑 중앙
-        "NOSE_BODY": list(range(75, 87)),       # 코 전체 영역
-
-        # [입]
-        "MOUTH_ALL": list(range(52, 72)),       # 입 전체
-        "MOUTH_CORNERS": [52, 61]               # 입꼬리 (좌:52, 우:61)
+        # [눈] (왼쪽/오른쪽) - 눈꺼풀 위아래 및 눈꼬리 포함
+        "EYE_L": [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 144, 145, 153],
+        "EYE_R": [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390],
+        
+        # [턱 라인] (V라인 성형용) - 인덱스 보강
+        # 귀(234) -> 턱끝(152) -> 귀(454) 이어지는 전체 외곽선
+        # 이전보다 포인트를 더 촘촘하게 배치하여 울퉁불퉁함 방지
+        "JAW_L": [
+            234, 93, 132, 58, 172, 136, 150, 149, 176, 148, 152
+        ],
+        "JAW_R": [
+            454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152
+        ],
+        
+        # [코] (중심점)
+        "NOSE_TIP": [1],
     }
 
-    def __init__(self, root_dir="assets/models"):
+    def __init__(self, root_dir=None):
         """
-        [Mode A] High-Poly Face Tracking Engine
-        - 모델: InsightFace 'buffalo_l' (Detection + 106 Landmark)
-        - 역할: 얼굴 좌표 추출 및 분석 (성형용 데이터 제공)
+        [Mode A] MediaPipe Face Mesh Engine
+        - 장점: 초경량(CPU 가능), 478개 상세 랜드마크
+        - 변경: InsightFace(Heavy) -> MediaPipe(Light)
         """
-        print("🧠 [FaceMesh] AI 엔진 로딩 중... (InsightFace)")
+        print("🧠 [FaceMesh] AI 엔진 로딩 중... (MediaPipe)")
         
-        # 모델 경로: assets/models/insightface
-        # [중요] landmark_2d_106 모델을 명시적으로 지정하여 106개 포인트를 강제함
-        self.app = FaceAnalysis(
-            name='buffalo_l', 
-            root=root_dir, 
-            allowed_modules=['detection', 'landmark_2d_106', 'genderage'], 
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(
+            max_num_faces=1,
+            refine_landmarks=True, # 눈동자(Iris) 추적 포함
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
         )
-        
-        # 엔진 준비
-        try:
-            self.app.prepare(ctx_id=0, det_size=(640, 640))
-            print("✅ [FaceMesh] 엔진 장전 완료 (CUDA Accelerated)")
-        except Exception as e:
-            print(f"⚠️ [FaceMesh] 엔진 로딩 실패: {e}")
-            self.app = None
+        print("✅ [FaceMesh] 엔진 장전 완료 (CPU Optimized)")
+
+    class FaceResult:
+        """BeautyEngine과 호환성을 위한 결과 래퍼"""
+        def __init__(self, landmarks):
+            self.landmarks = landmarks # numpy array (478, 2)
 
     def process(self, frame_bgr):
         """
-        프레임에서 얼굴 랜드마크를 추출합니다.
+        :param frame_bgr: 입력 프레임 (BGR)
+        :return: [FaceResult] 리스트
         """
-        if self.app is None or frame_bgr is None:
+        if frame_bgr is None:
             return []
 
-        try:
-            # InsightFace 추론 (좌표 추출)
-            faces = self.app.get(frame_bgr)
-            return faces
-        except Exception as e:
-            return []
+        h, w = frame_bgr.shape[:2]
+        
+        # 1. BGR -> RGB 변환 (MediaPipe는 RGB를 사용)
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        
+        # 2. 추론
+        results = self.face_mesh.process(frame_rgb)
+        
+        final_faces = []
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                # 3. Normalized(0~1) -> Pixel(x,y) 변환
+                # 속도를 위해 numpy 연산 사용
+                lm_array = np.array([
+                    [lm.x * w, lm.y * h] for lm in face_landmarks.landmark
+                ], dtype=int)
+                
+                final_faces.append(self.FaceResult(lm_array))
+                
+        return final_faces
 
     def draw_debug(self, frame, faces):
         """
-        [Simple Debug] 점만 찍어서 트래킹 여부만 가볍게 확인
+        [Visual Check] 랜드마크 시각화
         """
         if not faces:
             return frame
 
         for face in faces:
-            lm = None
-            if hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
-                lm = face.landmark_2d_106.astype(int)
-            elif face.kps is not None:
-                lm = face.kps.astype(int)
+            # 주요 부위만 점 찍기
+            for idx in range(0, len(face.landmarks), 2): # 너무 많으니 2개당 1개만
+                pt = face.landmarks[idx]
+                cv2.circle(frame, tuple(pt), 1, (100, 255, 100), -1)
+                
+            # 코 끝 강조
+            nose = face.landmarks[1]
+            cv2.circle(frame, tuple(nose), 4, (0, 0, 255), -1)
 
-            if lm is not None:
-                for p in lm:
-                    cv2.circle(frame, tuple(p), 2, (0, 255, 255), -1)
         return frame
 
     def draw_mesh_debug(self, frame, faces):
-        """
-        [Visual Check] 정의된 부위별로 색상을 다르게 표시 (연결선 X, 그룹 확인용)
-        이 함수는 우리가 정의한 'FACE_INDICES'가 실제 얼굴 부위와 매칭되는지 색깔로 검증할 때 씁니다.
-        """
-        if not faces:
-            return frame
-
-        for face in faces:
-            lm = None
-            if hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
-                lm = face.landmark_2d_106.astype(int)
-            elif face.kps is not None:
-                lm = face.kps.astype(int)
-            
-            if lm is None or len(lm) != 106:
-                continue
-
-            # 그룹별 색상 지정 (BGR)
-            colors = {
-                "JAW_L": (255, 200, 200),     # 살구색 (왼쪽 턱)
-                "JAW_R": (255, 200, 200),     # 살구색 (오른쪽 턱)
-                "CHIN_CENTER": (255, 100, 100), # 진한 살구색 (턱 끝)
-                "EYEBROW_L": (200, 255, 200),   # 연두색
-                "EYEBROW_R": (200, 255, 200),
-                "EYE_L": (0, 255, 0),           # 초록색 (눈)
-                "EYE_R": (0, 255, 0),
-                "NOSE_BRIDGE": (200, 200, 255), # 연하늘
-                "NOSE_BODY": (255, 255, 0),     # 노란색 (코)
-                "MOUTH_ALL": (0, 0, 255),       # 빨간색 (입술)
-            }
-
-            # 정의된 그룹에 따라 점 찍기 (선 연결 X)
-            for group_name, indices in self.FACE_INDICES.items():
-                color = colors.get(group_name, (255, 255, 255))
-                for idx in indices:
-                    if idx < len(lm):
-                        cv2.circle(frame, tuple(lm[idx]), 2, color, -1)
-
-            # 코 끝 강조 (86번)
-            cv2.circle(frame, tuple(lm[86]), 3, (0, 255, 255), -1)
-
-        return frame
+        return self.draw_debug(frame, faces)
 
     def draw_indices_debug(self, frame, faces):
-        """
-        [Compatibility] main.py와의 호환성을 위해 유지.
-        """
-        return self.draw_mesh_debug(frame, faces)
+        return self.draw_debug(frame, faces)
