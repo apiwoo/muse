@@ -81,7 +81,7 @@ class BeautyWorker(QThread):
         frame_count = 0
 
         while self.running:
-            # [Step 1] Input
+            # [Step 1] Input (GPU Array Returned)
             if self.input_mgr:
                 frame_gpu, ret = self.input_mgr.read()
             else:
@@ -91,35 +91,41 @@ class BeautyWorker(QThread):
                 self.msleep(10)
                 continue
 
-            # [Step 2] AI Processing
+            # [Step 2] AI Processing Prep (Copy for Inference)
             if cp and hasattr(frame_gpu, 'get'):
-                frame_cpu = frame_gpu.get()
+                frame_cpu_for_ai = frame_gpu.get()
             else:
-                frame_cpu = frame_gpu
+                frame_cpu_for_ai = frame_gpu
             
             # 얼굴 트래킹 (MediaPipe)
             faces = []
             if self.tracker:
-                faces = self.tracker.process(frame_cpu)
+                faces = self.tracker.process(frame_cpu_for_ai)
             
             # 바디 트래킹 (ViTPose)
             body_landmarks = None
             if self.body_tracker:
-                body_landmarks = self.body_tracker.process(frame_cpu)
+                body_landmarks = self.body_tracker.process(frame_cpu_for_ai)
 
-            # [Step 3] Beauty Processing (Pure Warping)
+            # [Step 3] Beauty Processing (GPU to GPU)
             if self.beauty_engine:
-                frame_cpu = self.beauty_engine.process(frame_cpu, faces, body_landmarks, self.params)
+                frame_out_gpu = self.beauty_engine.process(frame_gpu, faces, body_landmarks, self.params)
+            else:
+                frame_out_gpu = frame_gpu
 
-            # [Debug] 몸 뼈대 그리기
-            if self.params.get('show_body_debug', False) and self.body_tracker:
-                frame_cpu = self.body_tracker.draw_debug(frame_cpu, body_landmarks)
-
-            # [Step 4] Output
+            # [Step 4] Output & Debug
             if self.virtual_cam:
-                self.virtual_cam.send(frame_cpu)
+                self.virtual_cam.send(frame_out_gpu)
+
+            if hasattr(frame_out_gpu, 'get'):
+                frame_out_cpu = frame_out_gpu.get()
+            else:
+                frame_out_cpu = frame_out_gpu
+
+            if self.params.get('show_body_debug', False) and self.body_tracker:
+                frame_out_cpu = self.body_tracker.draw_debug(frame_out_cpu, body_landmarks)
             
-            self.frame_processed.emit(frame_cpu)
+            self.frame_processed.emit(frame_out_cpu)
 
             # [Step 5] FPS Log
             frame_count += 1
@@ -134,23 +140,42 @@ class BeautyWorker(QThread):
         print("🧵 [Worker] 스레드 종료")
 
     def cleanup(self):
-        """자원 강제 해제"""
-        if self.input_mgr is None and self.virtual_cam is None:
-            return
-
+        """자원 강제 해제 (순서 중요)"""
         print("🧹 [Worker] 자원 정리 시작...")
-        if self.input_mgr:
-            self.input_mgr.release()
-            self.input_mgr = None
         
-        if self.virtual_cam:
-            self.virtual_cam.close()
-            self.virtual_cam = None
-            
+        # 1. AI 엔진 및 GPU 메모리 해제
         self.tracker = None
         self.body_tracker = None
         self.beauty_engine = None
-        print("✨ [Worker] 자원 정리 완료")
+        
+        if cp:
+            try:
+                # [중요] GPU 메모리 풀 강제 초기화 (드라이버 좀비 방지)
+                mempool = cp.get_default_memory_pool()
+                pinned_mempool = cp.get_default_pinned_memory_pool()
+                mempool.free_all_blocks()
+                pinned_mempool.free_all_blocks()
+                print("   -> GPU 메모리 풀(VRAM) 초기화 완료")
+            except Exception as e:
+                print(f"   ⚠️ GPU 메모리 해제 경고: {e}")
+
+        # 2. 카메라 해제 (하드웨어 점유 해제)
+        if self.input_mgr:
+            try:
+                self.input_mgr.release()
+                print("   -> 카메라(Input) 연결 해제 완료")
+            except: pass
+            self.input_mgr = None
+        
+        # 3. 가상 카메라 해제
+        if self.virtual_cam:
+            try:
+                self.virtual_cam.close()
+                print("   -> 가상 카메라(Output) 연결 해제 완료")
+            except: pass
+            self.virtual_cam = None
+            
+        print("✨ [Worker] 모든 자원 정리 완료")
 
     @Slot(dict)
     def update_params(self, new_params):
@@ -188,19 +213,23 @@ def main():
     
     exit_code = app.exec()
     
-    print("🛑 [System] 메인 루프 종료. 리소스 해제 시작...")
+    print("🛑 [System] 메인 루프 종료. 안전 종료 절차 시작...")
     
     if worker.isRunning():
-        print("   -> 워커 스레드 정지 요청...")
+        print("   -> 워커 스레드 정지 신호 전송...")
         worker.stop()
-        if not worker.wait(500):
-            print("⚠️ [System] 스레드가 반응하지 않아 강제 종료(Terminate)합니다.")
+        
+        # [수정] 대기 시간 3초로 연장 (GPU 작업 마무리 시간 보장)
+        if not worker.wait(3000):
+            print("⚠️ [System] 스레드가 3초 내에 응답하지 않습니다. 강제 종료(Terminate)합니다.")
+            print("   (주의: 이 과정에서 드라이버가 불안정해질 수 있습니다)")
             worker.terminate()
-            worker.wait(100)
+            worker.wait(1000)
         else:
             print("   -> 워커 스레드 정상 종료됨.")
     
-    print("💀 [System] 프로세스 강제 소멸 (os._exit)")
+    print("💀 [System] 프로세스 완전 종료 (os._exit)")
+    # [중요] 모든 파이썬 스레드와 리소스를 강제로 끊고 나감
     os._exit(0)
 
 if __name__ == "__main__":
