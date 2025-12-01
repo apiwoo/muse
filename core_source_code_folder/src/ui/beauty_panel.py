@@ -20,11 +20,15 @@ class BeautyPanel(QWidget):
         self.setStyleSheet("background-color: #1E1E1E;")
         self.setFixedWidth(320)
 
-        # 초기 파라미터
+        # [V4.0] 파라미터 리셋 (The Quartet)
         self.current_params = {
             'eye_scale': 0.0,
             'face_v': 0.0,
-            'waist_slim': 0.0,
+            'head_scale': 0.0,
+            'shoulder_narrow': 0.0, # [1] 어깨
+            'ribcage_slim': 0.0,    # [2] 흉통
+            'waist_slim': 0.0,      # [3] 허리
+            'hip_widen': 0.0,       # [4] 골반
             'show_body_debug': False
         }
 
@@ -57,7 +61,6 @@ class BeautyPanel(QWidget):
         face_layout = QVBoxLayout()
         face_layout.setSpacing(20)
         
-        # Face > Warping Group
         face_warp_group = QGroupBox("Face Reshape")
         self._style_groupbox(face_warp_group)
         fw_layout = QVBoxLayout()
@@ -69,6 +72,10 @@ class BeautyPanel(QWidget):
         self.slider_chin = ModernSlider("V-Line", initial_value=0.0)
         self.slider_chin.valueChanged.connect(lambda v: self._update_param('face_v', v))
         fw_layout.addWidget(self.slider_chin)
+
+        self.slider_head = ModernSlider("Head Size", initial_value=0.0)
+        self.slider_head.valueChanged.connect(lambda v: self._update_param('head_scale', v))
+        fw_layout.addWidget(self.slider_head)
         
         face_warp_group.setLayout(fw_layout)
         face_layout.addWidget(face_warp_group)
@@ -94,13 +101,29 @@ class BeautyPanel(QWidget):
         body_layout.addWidget(debug_group)
 
         # Body > Reshape Group
-        body_warp_group = QGroupBox("Body Reshape")
+        body_warp_group = QGroupBox("Body Quartet")
         self._style_groupbox(body_warp_group)
         bw_layout = QVBoxLayout()
 
-        self.slider_waist = ModernSlider("Waist Slim", initial_value=0.0)
+        # [1] 어깨 (Narrow)
+        self.slider_shoulder = ModernSlider("Shoulder", initial_value=0.0)
+        self.slider_shoulder.valueChanged.connect(lambda v: self._update_param('shoulder_narrow', v))
+        bw_layout.addWidget(self.slider_shoulder)
+
+        # [2] 흉통 (Ribcage)
+        self.slider_ribcage = ModernSlider("Ribcage", initial_value=0.0)
+        self.slider_ribcage.valueChanged.connect(lambda v: self._update_param('ribcage_slim', v))
+        bw_layout.addWidget(self.slider_ribcage)
+
+        # [3] 허리 (Waist)
+        self.slider_waist = ModernSlider("Waist", initial_value=0.0)
         self.slider_waist.valueChanged.connect(lambda v: self._update_param('waist_slim', v))
         bw_layout.addWidget(self.slider_waist)
+
+        # [4] 골반 (Hip)
+        self.slider_hip = ModernSlider("Hip", initial_value=0.0)
+        self.slider_hip.valueChanged.connect(lambda v: self._update_param('hip_widen', v))
+        bw_layout.addWidget(self.slider_hip)
 
         body_warp_group.setLayout(bw_layout)
         body_layout.addWidget(body_warp_group)
@@ -112,7 +135,6 @@ class BeautyPanel(QWidget):
         tabs.addTab(body_tab, "BODY")
         layout.addWidget(tabs)
 
-        # 하단 정보
         layout.addStretch()
         info_label = QLabel("Mode A: Visual Supremacy (MediaPipe)")
         info_label.setStyleSheet("color: #555; font-size: 10px;")

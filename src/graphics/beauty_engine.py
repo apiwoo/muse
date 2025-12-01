@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# Optimized V10.0: Native CUDA Remap & Fused Kernels
+# Optimized V10.2: Smart Smooth Logic (Continuous Adaptive Smoothing)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -146,11 +146,12 @@ void remap_kernel(
 class BeautyEngine:
     def __init__(self):
         """
-        [Mode A] Real-time Beauty Engine (GPU Edition V10.0)
+        [Mode A] Real-time Beauty Engine (GPU Edition V10.2)
+        - V10.2: Smart Smooth Logic (Continuous Mapping + Alpha Inertia)
+        - V10.1: Body Velocity Integration
         - V10.0: Full CUDA Remapping
-        - V4.0: Body Quartet Reshape (Shoulder, Ribcage, Waist, Hip)
         """
-        print("💄 [BeautyEngine] GPU 엔진 V10.0 (Quartet Update)")
+        print("💄 [BeautyEngine] GPU 엔진 V10.2 (Smart Smooth Update)")
         
         self.map_scale = 0.25 
         
@@ -163,7 +164,13 @@ class BeautyEngine:
         
         self.prev_gpu_dx = None
         self.prev_gpu_dy = None
+        
+        # [V10.1] 움직임 속도 추적용 변수
         self.prev_face_center = None
+        self.prev_body_center = None 
+        
+        # [V10.2] Alpha 관성 변수 (급격한 필터 변화 방지)
+        self.current_alpha = 0.85
 
         self.warp_params = [] 
         
@@ -193,6 +200,7 @@ class BeautyEngine:
             self.prev_gpu_dx = None 
             self.prev_gpu_dy = None
             self.prev_face_center = None
+            self.prev_body_center = None
             print(f"⚡ [BeautyEngine] Grid Cache Rebuilt: {w}x{h}")
 
         sw, sh = int(w * self.map_scale), int(h * self.map_scale)
@@ -205,13 +213,71 @@ class BeautyEngine:
         self.warp_params.clear() 
         has_deformation = False
         
-        # --- Body Reshaping (Quartet) ---
+        # =================================================================
+        # [V10.2 Update] Smart Smooth Logic (Continuous Mapping)
+        # =================================================================
+        max_velocity = 0.0
+        
+        # 1. Face Velocity Calculation
+        current_face_center = None
+        if faces:
+            current_face_center = np.mean(faces[0].landmarks, axis=0)
+            if self.prev_face_center is not None:
+                face_vel = np.linalg.norm(current_face_center - self.prev_face_center)
+                max_velocity = max(max_velocity, face_vel)
+        
+        # 2. Body Velocity Calculation
+        current_body_center = None
+        body_cpu = None
+        
         if body_landmarks is not None:
             if hasattr(body_landmarks, 'get'): 
                 body_cpu = body_landmarks.get()
             else:
                 body_cpu = body_landmarks
             
+            valid_points = []
+            for idx in [5, 6, 11, 12]:
+                if idx < len(body_cpu) and body_cpu[idx][2] > 0.4:
+                    valid_points.append(body_cpu[idx][:2])
+            
+            if valid_points:
+                current_body_center = np.mean(valid_points, axis=0)
+                if self.prev_body_center is not None:
+                    body_vel = np.linalg.norm(current_body_center - self.prev_body_center)
+                    max_velocity = max(max_velocity, body_vel)
+
+        # 3. 상태 업데이트
+        self.prev_face_center = current_face_center
+        self.prev_body_center = current_body_center
+        
+        # 4. Continuous Alpha Mapping (선형 보간)
+        # - 정지(Vel <= 0.5): 0.96 (강력한 고정, 돌처럼)
+        # - 이동(Vel >= 6.0): 0.15 (최소한의 필터, 물처럼, 절대 0이 아님)
+        min_vel = 0.5
+        max_vel = 6.0
+        max_alpha = 0.96
+        min_alpha = 0.15
+        
+        target_alpha = max_alpha # 기본값
+        
+        if max_velocity <= min_vel:
+            target_alpha = max_alpha
+        elif max_velocity >= max_vel:
+            target_alpha = min_alpha
+        else:
+            # 보간: y = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+            ratio = (max_velocity - min_vel) / (max_vel - min_vel)
+            target_alpha = max_alpha - ratio * (max_alpha - min_alpha)
+
+        # 5. Alpha Inertia (부드러운 전환)
+        # 필터 강도 자체가 급격히 변하지 않도록 한번 더 스무딩
+        self.current_alpha = self.current_alpha * 0.8 + target_alpha * 0.2
+            
+        # =================================================================
+        
+        # --- Body Reshaping (Quartet) ---
+        if body_cpu is not None:
             scaled_body = body_cpu[:, :2] * self.map_scale
             
             # 1. Shoulder Narrow (어깨)
@@ -220,7 +286,7 @@ class BeautyEngine:
                 self._collect_shoulder_params(scaled_body, shoulder_strength)
                 has_deformation = True
 
-            # 2. Ribcage Slim (흉통) - New
+            # 2. Ribcage Slim (흉통)
             ribcage_strength = params.get('ribcage_slim', 0)
             if ribcage_strength > 0:
                 self._collect_ribcage_params(scaled_body, ribcage_strength)
@@ -239,20 +305,10 @@ class BeautyEngine:
                 has_deformation = True
 
         # --- Face Reshaping ---
-        target_alpha = 0.8
-        
         if faces:
             face_v = params.get('face_v', 0)
             eye_scale = params.get('eye_scale', 0)
             head_scale = params.get('head_scale', 0) 
-
-            current_face_center = np.mean(faces[0].landmarks, axis=0)
-            if self.prev_face_center is not None:
-                velocity = np.linalg.norm(current_face_center - self.prev_face_center)
-                if velocity > 3.0: target_alpha = 0.0
-                elif velocity > 1.0: target_alpha = 0.3
-                else: target_alpha = 0.85
-            self.prev_face_center = current_face_center
 
             for face in faces:
                 lm_small = face.landmarks * self.map_scale
@@ -266,8 +322,6 @@ class BeautyEngine:
 
             if face_v > 0 or eye_scale > 0 or head_scale != 0:
                 has_deformation = True
-        else:
-            self.prev_face_center = None
 
         self.gpu_dx.fill(0)
         self.gpu_dy.fill(0)
@@ -288,7 +342,8 @@ class BeautyEngine:
             )
 
         if has_deformation or (self.prev_gpu_dx is not None):
-            self._apply_temporal_smoothing_fast(target_alpha)
+            # [V10.2] 계산된 current_alpha 적용
+            self._apply_temporal_smoothing_fast(self.current_alpha)
             
             cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
             cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=5, output=self.gpu_dy)

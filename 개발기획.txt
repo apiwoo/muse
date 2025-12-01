@@ -1,6 +1,6 @@
 [Project MUSE] Master Plan: The Visual Singularity
 
-Version: 7.0 (The Definitive Integrated Master Plan)
+Version: 8.0 (The Personalized Hybrid Architecture)
 
 Target:
 
@@ -35,38 +35,44 @@ GPU: RTX 3060 12GB 이상
 
 역할: 경량화된 Student Model 추론 (Inference), OBS 송출
 
-핵심 파이프라인: Teacher-Student Distillation
+핵심 파이프라인: Teacher-Student Distillation (Updated)
 
 2.1 The Teachers (Offline / High-Spec)
-세상에서 가장 똑똑하지만 느린 모델들이 '정답지(Label)'를 만듭니다.
+세상에서 가장 똑똑하지만 느린 모델들이 '정답지(Label)'를 만듭니다. 방송 중에는 사용되지 않습니다.
 
-Teacher A (Segmentation): SAM (ViT-Huge). 머리카락 한 올, 옷 주름까지 완벽하게 분리.
+Teacher A (Segmentation): SAM (ViT-Huge). 머리카락 한 올, 옷 주름, 손가락 사이까지 완벽하게 분리.
 
-Teacher B (Keypoints): ViTPose-Huge. 관절 위치를 픽셀 단위로 추적하여 SAM에게 힌트(Prompt) 제공.
+Teacher B (Keypoints): ViTPose-Huge. 관절 위치를 픽셀 단위로 추적하여 SAM에게 힌트(Prompt) 제공 및 Student 모델의 뼈대 학습 지도.
 
 2.2 The Student (Online / Low-Latency)
-선생님들이 만든 정답지를 보고 '내 방'과 '내 모습'만 달달 외웁니다.
+선생님들이 만든 정답지를 보고 '내 방'과 '내 모습'만 달달 외운 "개인화된 천재"입니다.
 
-Model: MobileNetV3 기반 Multi-Task Model (Mask + Pose 동시 출력).
+Model: MobileNetV3 기반 Multi-Task Model (2 Heads: Segmentation + Pose).
+
+Input: 사용자 개인화 데이터 (10분 영상, 약 3,600장).
+
+Role:
+
+배경 분리 (Segmentation): "이 픽셀이 주인님인가 배경인가?"를 0.005초 안에 판단.
+
+뼈대 추적 (Pose Estimation): 성형을 위한 신체 좌표 제공 (VitPose 대체).
 
 Performance: 4K 해상도에서 100fps 이상 처리 속도 확보.
-
-Goal: "이 픽셀이 사람인가 배경인가?"를 0.005초 안에 판단.
 
 단계별 상세 기능 명세 (Detailed Roadmap)
 
 [Phase 1] MUSE v1.0 : Personalized Anti-Distortion (배경 왜곡 완전 해결)
 목표: "현존하는 그 어떤 툴보다 압도적으로 예쁘고 자연스러운 실사 화면 구현"
 
-3.1 Data Acquisition (데이터 수집)
+3.1 Data Acquisition (데이터 수집) - Completed Logic
+
+Recorder Tool: tools/recorder.py를 통해 데이터 수집.
 
 Clean Plate Capture: 사용자가 없는 '빈 방' 이미지를 확보하여 Inpainting 소스로 활용.
 
-Smart Sampling: 10분(36,000프레임) 영상에서 '유의미한 변화'가 있는 3,000~5,000장만 추출.
+Motion Data Capture: 다양한 자세(가림, 격한 움직임 포함)의 10분 영상 녹화.
 
-움직임이 적을 때는 스킵, 클 때는 캡처하는 가변 샘플링 적용.
-
-학습 효율 극대화 및 과적합 방지.
+Strategy: 3~5분의 '가림(Occlusion)' 데이터를 포함하여 손이 얼굴을 가려도 배경으로 인식되지 않도록 학습.
 
 3.2 Auto-Labeling System (자동 라벨링)
 
@@ -74,22 +80,22 @@ ViTPose가 사람의 코/목 좌표를 추출 -> SAM에게 "이 좌표에 있는
 
 SAM이 배경을 완벽하게 날린 'Alpha Mask' 생성.
 
-사람 손을 거치지 않고 3,000장의 고품질 정예 데이터셋 구축.
+사람 손을 거치지 않고 3,600장의 고품질 정예 데이터셋(Image + Mask + Keypoints) 구축.
 
 3.3 Real-time Rendering (Hybrid Inference)
 
-Student Model: 실시간으로 인물 마스크 생성 및 배경 방어.
+Student Model (New): 실시간으로 인물 마스크 생성(배경 방어) 및 몸 뼈대 추적.
 
-InsightFace: 고정밀 얼굴 좌표 추출 (디테일 담당).
+MediaPipe (Legacy): 고정밀 얼굴 좌표 추출 (눈 키우기, 턱 깎기 등 디테일 성형 담당).
 
 Warping Logic:
 
-마스크 안쪽(인물)만 성형 적용.
+Student 모델이 따준 마스크 안쪽(인물)만 성형 적용.
 
-마스크 바깥쪽(배경)은 절대 건드리지 않음.
+마스크 바깥쪽(배경)은 절대 건드리지 않음 (Layer 분리).
 
-Background Reconstruction: 인물이 줄어들어 생긴 빈 공간에 'Clean Plate'를 합성.
--> 결과: 허리를 절반으로 줄여도 문틀이나 커튼이 전혀 휘지 않음.
+Background Reconstruction: 인물이 줄어들어 생긴 빈 공간에 미리 찍어둔 'Clean Plate'를 합성.
+-> 결과: 몸을 아무리 흔들거나 줄여도 배경은 사진이라서 절대 움직이지 않음 (Jitter Zero).
 
 [Phase 2] MUSE v2.0 : The Cinematic VTuber (복구됨)
 목표: "VTube Studio 완전 대체 및 Cinema 4D 수준의 렌더링 품질 제공"
@@ -141,9 +147,9 @@ Consistency Control: AnimateDiff 기술을 응용하여 움직임 시 발생하�
 
 4.1 Core & AI
 
-Teacher Models: Segment Anything (ViT-H), ViTPose-Huge (TensorRT)
+Teacher Models: Segment Anything (ViT-H), ViTPose-Huge (TensorRT) - Offline Only
 
-Student Model: PyTorch (MobileNetV3) -> TensorRT (FP16 Quantization)
+Student Model: PyTorch (MobileNetV3) -> TensorRT (FP16 Quantization) - Real-time
 
 Training: Mixed Precision Training (AMP) for Speed
 
@@ -159,7 +165,7 @@ I/O: NVIDIA Video Codec SDK (NVDEC/NVENC)
 
 초기 개발 마일스톤 (Revised)
 
-Week 1: [Tool] 'tools/auto_labeling' 구현. SAM + ViTPose 연동 테스트.
-Week 2: [Pipeline] 데이터 수집(Recorder) 및 자동 라벨링 파이프라인 구축.
-Week 3: [Training] Multi-Task Student 모델 선정 및 학습 루프 구현.
-Week 4: [Inference] TensorRT 변환 및 실시간 렌더러 연동 (배경 합성 쉐이더 구현).
+Week 1: [Data] recorder.py로 데이터 수집 및 auto_labeler로 정답지(Label) 생성.
+Week 2: [Training] Multi-Task Student 모델 학습 (Segmentation + Pose).
+Week 3: [Inference] Student 모델 TensorRT 변환 및 실시간 엔진 연동.
+Week 4: [Integration] 배경 합성 쉐이더 구현 및 최종 튜닝 (Hybrid Inference).

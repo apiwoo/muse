@@ -19,7 +19,7 @@ except ImportError:
 
 # ==============================================================================
 # [CUDA Kernel 1] Fused Warp Vector Generator (FP32)
-# 벡터장 생성 커널 (이전 버전과 동일)
+# 벡터장 생성 커널
 # ==============================================================================
 WARP_KERNEL_CODE = r'''
 extern "C" __global__
@@ -59,15 +59,16 @@ void warp_kernel(
             float factor = (1.0f - dist / r);
             factor = factor * factor * s;
 
-            if (mode == 0) { // Expand
+            if (mode == 0) { // Expand (확대)
                 acc_dx -= diff_x * factor;
                 acc_dy -= diff_y * factor;
             } 
-            else if (mode == 1) { // Shrink with Vector
+            else if (mode == 1) { // Shrink with Vector (방향성 이동/수축)
+                // vx, vy 방향으로 픽셀을 당겨옴
                 acc_dx -= vx * factor * r * 0.5f;
                 acc_dy -= vy * factor * r * 0.5f;
             }
-            else { // Shrink to Center
+            else if (mode == 2) { // Shrink to Center (중심 수축)
                 acc_dx += diff_x * factor;
                 acc_dy += diff_y * factor;
             }
@@ -80,8 +81,7 @@ void warp_kernel(
 '''
 
 # ==============================================================================
-# [CUDA Kernel 2] Native Remap & Upscaling (New in V10.0)
-# 작은 벡터맵을 바로 참조하여 원본 이미지를 변형합니다. (Zero-Copy Upscaling)
+# [CUDA Kernel 2] Native Remap & Upscaling
 # ==============================================================================
 REMAP_KERNEL_CODE = r'''
 extern "C" __global__
@@ -99,59 +99,44 @@ void remap_kernel(
 
     if (x >= width || y >= height) return;
 
-    // 1. Get displacement from small map (Nearest Neighbor fetch)
-    // We avoid creating a huge 'repeated' array by calculating index on-the-fly.
     int sx = x / scale;
     int sy = y / scale;
 
-    // Clamp coords
     if (sx >= small_width) sx = small_width - 1;
     if (sy >= small_height) sy = small_height - 1;
 
     int s_idx = sy * small_width + sx;
 
-    // Read displacement and scale it up
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
 
-    // 2. Calculate source coordinates (Backward Mapping)
     float src_x = (float)x + shift_x;
     float src_y = (float)y + shift_y;
 
-    // 3. Bilinear Interpolation
     int x1 = (int)floorf(src_x);
     int y1 = (int)floorf(src_y);
     int x2 = x1 + 1;
     int y2 = y1 + 1;
 
-    // Calculate weights
     float wx2 = src_x - (float)x1;
     float wx1 = 1.0f - wx2;
     float wy2 = src_y - (float)y1;
     float wy1 = 1.0f - wy2;
 
-    // Clamp bounds
     x1 = max(0, min(x1, width - 1));
     y1 = max(0, min(y1, height - 1));
     x2 = max(0, min(x2, width - 1));
     y2 = max(0, min(y2, height - 1));
 
-    // Pointers (Indices for HWC layout)
     int stride = width * 3;
-    int idx11 = y1 * stride + x1 * 3;
-    int idx12 = y2 * stride + x1 * 3;
-    int idx21 = y1 * stride + x2 * 3;
-    int idx22 = y2 * stride + x2 * 3;
-
     int out_idx = y * stride + x * 3;
 
-    // Process RGB Channels simultaneously
     for (int c = 0; c < 3; ++c) {
         float val = 
-            (float)src[idx11 + c] * wx1 * wy1 +
-            (float)src[idx21 + c] * wx2 * wy1 +
-            (float)src[idx12 + c] * wx1 * wy2 +
-            (float)src[idx22 + c] * wx2 * wy2;
+            (float)src[y1 * stride + x1 * 3 + c] * wx1 * wy1 +
+            (float)src[y1 * stride + x2 * 3 + c] * wx2 * wy1 +
+            (float)src[y2 * stride + x1 * 3 + c] * wx1 * wy2 +
+            (float)src[y2 * stride + x2 * 3 + c] * wx2 * wy2;
         
         dst[out_idx + c] = (unsigned char)val;
     }
@@ -162,34 +147,26 @@ class BeautyEngine:
     def __init__(self):
         """
         [Mode A] Real-time Beauty Engine (GPU Edition V10.0)
-        - V10.0 Update: Full CUDA Remapping (No Python Loop, No huge temp arrays)
-        - Performance: ~30 FPS guaranteed even with heavy warping
+        - V10.0: Full CUDA Remapping
+        - V4.0: Body Quartet Reshape (Shoulder, Ribcage, Waist, Hip)
         """
-        print("💄 [BeautyEngine] GPU 엔진 V10.0 (Native CUDA Remap)")
+        print("💄 [BeautyEngine] GPU 엔진 V10.0 (Quartet Update)")
         
-        # [Optimization Config]
         self.map_scale = 0.25 
         
-        # Grid Cache
         self.cache_w = 0
         self.cache_h = 0
         self.gpu_initialized = False
         
-        # GPU Vector Buffers (FP32)
         self.gpu_dx = None
         self.gpu_dy = None
         
-        # Temporal Smoothing Buffers
         self.prev_gpu_dx = None
         self.prev_gpu_dy = None
-        
-        # Motion Tracking
         self.prev_face_center = None
 
-        # Warp Params Buffer
         self.warp_params = [] 
         
-        # Compile Kernels
         if HAS_CUDA:
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
             self.remap_kernel = cp.RawKernel(REMAP_KERNEL_CODE, 'remap_kernel')
@@ -198,7 +175,6 @@ class BeautyEngine:
         if frame is None: return frame
         if params is None: params = {}
 
-        # Handle GPU/CPU input
         is_gpu_input = HAS_CUDA and hasattr(frame, 'device')
         
         if is_gpu_input:
@@ -211,7 +187,6 @@ class BeautyEngine:
             else:
                 return frame 
 
-        # [Step 0] Base Grid Caching
         if self.cache_w != w or self.cache_h != h:
             self.cache_w, self.cache_h = w, h
             self.gpu_initialized = False
@@ -220,7 +195,6 @@ class BeautyEngine:
             self.prev_face_center = None
             print(f"⚡ [BeautyEngine] Grid Cache Rebuilt: {w}x{h}")
 
-        # [Step 1] GPU Initialization (FP32)
         sw, sh = int(w * self.map_scale), int(h * self.map_scale)
         
         if not self.gpu_initialized:
@@ -228,30 +202,49 @@ class BeautyEngine:
             self.gpu_dy = cp.zeros((sh, sw), dtype=cp.float32)
             self.gpu_initialized = True
 
-        # [Step 2] Parameter Collection
         self.warp_params.clear() 
         has_deformation = False
         
-        # 1. Body Reshaping
-        waist_strength = params.get('waist_slim', 0)
-        if body_landmarks is not None and waist_strength > 0:
+        # --- Body Reshaping (Quartet) ---
+        if body_landmarks is not None:
             if hasattr(body_landmarks, 'get'): 
                 body_cpu = body_landmarks.get()
             else:
                 body_cpu = body_landmarks
             
-            # Simple Numpy Vectorization check
-            # (데이터 개수가 적으므로 기존 로직 유지하되 안전하게 처리)
             scaled_body = body_cpu[:, :2] * self.map_scale
-            self._collect_waist_params(scaled_body, waist_strength)
-            has_deformation = True
+            
+            # 1. Shoulder Narrow (어깨)
+            shoulder_strength = params.get('shoulder_narrow', 0)
+            if shoulder_strength > 0:
+                self._collect_shoulder_params(scaled_body, shoulder_strength)
+                has_deformation = True
 
-        # 2. Face Reshaping & Velocity
+            # 2. Ribcage Slim (흉통) - New
+            ribcage_strength = params.get('ribcage_slim', 0)
+            if ribcage_strength > 0:
+                self._collect_ribcage_params(scaled_body, ribcage_strength)
+                has_deformation = True
+
+            # 3. Waist Slim (허리)
+            waist_strength = params.get('waist_slim', 0)
+            if waist_strength > 0:
+                self._collect_waist_params(scaled_body, waist_strength)
+                has_deformation = True
+
+            # 4. Hip Widen (골반)
+            hip_strength = params.get('hip_widen', 0)
+            if hip_strength > 0:
+                self._collect_hip_params(scaled_body, hip_strength)
+                has_deformation = True
+
+        # --- Face Reshaping ---
         target_alpha = 0.8
         
         if faces:
             face_v = params.get('face_v', 0)
             eye_scale = params.get('eye_scale', 0)
+            head_scale = params.get('head_scale', 0) 
 
             current_face_center = np.mean(faces[0].landmarks, axis=0)
             if self.prev_face_center is not None:
@@ -261,18 +254,21 @@ class BeautyEngine:
                 else: target_alpha = 0.85
             self.prev_face_center = current_face_center
 
-            if face_v > 0 or eye_scale > 0:
-                for face in faces:
-                    lm_small = face.landmarks * self.map_scale
-                    if face_v > 0:
-                        self._collect_face_contour_params(lm_small, face_v)
-                    if eye_scale > 0:
-                        self._collect_eyes_params(lm_small, eye_scale)
+            for face in faces:
+                lm_small = face.landmarks * self.map_scale
+                
+                if face_v > 0:
+                    self._collect_face_contour_params(lm_small, face_v)
+                if eye_scale > 0:
+                    self._collect_eyes_params(lm_small, eye_scale)
+                if head_scale != 0: 
+                    self._collect_head_params(lm_small, head_scale)
+
+            if face_v > 0 or eye_scale > 0 or head_scale != 0:
                 has_deformation = True
         else:
             self.prev_face_center = None
 
-        # [Step 3] Execute Fused Kernel 1 (Vector Generation)
         self.gpu_dx.fill(0)
         self.gpu_dy.fill(0)
 
@@ -291,24 +287,19 @@ class BeautyEngine:
                 (self.gpu_dx, self.gpu_dy, params_gpu, num_points, sw, sh)
             )
 
-        # [Step 4] Apply & Remap
         if has_deformation or (self.prev_gpu_dx is not None):
-            # Temporal Smoothing
             self._apply_temporal_smoothing_fast(target_alpha)
             
-            # Spatial Smoothing (Gaussian Blur)
             cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
             cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=5, output=self.gpu_dy)
             
-            # [V10.0] Native CUDA Remap
-            # Result buffer allocation
             result_gpu = cp.empty_like(frame_gpu)
             
             block_dim = (32, 32)
             grid_dim = ((w + block_dim[0] - 1) // block_dim[0], 
                         (h + block_dim[1] - 1) // block_dim[1])
             
-            scale = int(1.0 / self.map_scale) # 4
+            scale = int(1.0 / self.map_scale) 
             
             self.remap_kernel(
                 grid_dim, block_dim,
@@ -320,16 +311,57 @@ class BeautyEngine:
                 return result_gpu
             else:
                 return result_gpu.get()
-        
         else:
             return frame_gpu if is_gpu_input else frame
 
     # ==========================================================
-    # [Parameter Collectors]
+    # [Body Reshaping Quartet]
     # ==========================================================
-    def _collect_waist_params(self, keypoints, strength):
+    def _collect_shoulder_params(self, keypoints, strength):
+        """1. 어깨 줄이기 (안쪽으로 당김)"""
+        l_sh, r_sh = keypoints[5], keypoints[6]
+        
+        shoulder_width = np.linalg.norm(l_sh - r_sh)
+        if shoulder_width < 3: return
+        center_shoulder = (l_sh + r_sh) / 2
+        
+        radius = int(shoulder_width * 0.6)
+        s = strength * 0.3
+        
+        vec_l = center_shoulder - l_sh
+        vec_r = center_shoulder - r_sh
+        
+        self._add_param(l_sh, radius, s, mode=1, vector=vec_l)
+        self._add_param(r_sh, radius, s, mode=1, vector=vec_r)
+
+    def _collect_ribcage_params(self, keypoints, strength):
+        """2. 흉통 줄이기 (갈비뼈 부근 안쪽으로 당김)"""
         l_sh, r_sh = keypoints[5], keypoints[6]
         l_hip, r_hip = keypoints[11], keypoints[12]
+        
+        # 흉통 위치 추정 (어깨와 골반 사이 상단 35% 지점)
+        l_rib = l_sh * 0.65 + l_hip * 0.35
+        r_rib = r_sh * 0.65 + r_hip * 0.35
+        center_rib = (l_rib + r_rib) / 2
+        
+        rib_width = np.linalg.norm(l_rib - r_rib)
+        if rib_width < 3: return
+        
+        radius = int(rib_width * 0.7)
+        s = strength * 0.4
+        
+        vec_l = center_rib - l_rib
+        vec_r = center_rib - r_rib
+        
+        self._add_param(l_rib, radius, s, mode=1, vector=vec_l)
+        self._add_param(r_rib, radius, s, mode=1, vector=vec_r)
+
+    def _collect_waist_params(self, keypoints, strength):
+        """3. 허리 줄이기 (안쪽으로 당김)"""
+        l_sh, r_sh = keypoints[5], keypoints[6]
+        l_hip, r_hip = keypoints[11], keypoints[12]
+        
+        # 허리 위치 (상단 60% 지점)
         l_waist = l_sh * 0.4 + l_hip * 0.6
         r_waist = r_sh * 0.4 + r_hip * 0.6
         center_waist = (l_waist + r_waist) / 2
@@ -341,39 +373,76 @@ class BeautyEngine:
         s = strength * 0.4
         
         vec_l = center_waist - l_waist
-        self._add_param(l_waist, radius, s, mode=1, vector=vec_l)
-        
         vec_r = center_waist - r_waist
+        
+        self._add_param(l_waist, radius, s, mode=1, vector=vec_l)
         self._add_param(r_waist, radius, s, mode=1, vector=vec_r)
+
+    def _collect_hip_params(self, keypoints, strength):
+        """4. 골반 늘리기 (바깥쪽으로 밀어냄)"""
+        l_hip, r_hip = keypoints[11], keypoints[12]
+        
+        hip_width = np.linalg.norm(l_hip - r_hip)
+        if hip_width < 3: return
+        center_hip = (l_hip + r_hip) / 2
+        
+        radius = int(hip_width * 0.7)
+        s = strength * 0.3
+        
+        # 바깥 방향 벡터
+        vec_l_out = l_hip - center_hip 
+        vec_r_out = r_hip - center_hip 
+        
+        self._add_param(l_hip, radius, s, mode=1, vector=vec_l_out)
+        self._add_param(r_hip, radius, s, mode=1, vector=vec_r_out)
+
+    # ==========================================================
+    # [Face Reshaping]
+    # ==========================================================
+    def _collect_head_params(self, lm, strength):
+        chin = lm[152]
+        forehead = lm[10]
+        head_height = np.linalg.norm(chin - forehead)
+        
+        up_vec = forehead - chin
+        up_vec /= (np.linalg.norm(up_vec) + 1e-6)
+        center = np.mean(lm, axis=0) + up_vec * (head_height * 0.5)
+        
+        radius = int(head_height * 1.6)
+        
+        dist_to_top = center[1]
+        safe_factor = 1.0
+        if dist_to_top < radius:
+            safe_factor = max(0.2, dist_to_top / radius)
+        
+        if strength > 0:
+            s = strength * 0.5 * safe_factor
+            self._add_param(center, radius, s, mode=2)
+        else:
+            s = abs(strength) * 0.5 * safe_factor
+            self._add_param(center, radius, s, mode=0)
 
     def _collect_eyes_params(self, lm, strength):
         indices_l = FaceMesh.FACE_INDICES['EYE_L']
         indices_r = FaceMesh.FACE_INDICES['EYE_R']
-        
         pts_l = lm[indices_l]
         center_l = np.mean(pts_l, axis=0)
         width_l = np.linalg.norm(pts_l[0] - pts_l[8])
         radius_l = int(width_l * 1.5)
-
         pts_r = lm[indices_r]
         center_r = np.mean(pts_r, axis=0)
         width_r = np.linalg.norm(pts_r[0] - pts_r[8])
         radius_r = int(width_r * 1.5)
-
         self._add_param(center_l, radius_l, strength, mode=0)
         self._add_param(center_r, radius_r, strength, mode=0)
 
     def _collect_face_contour_params(self, lm, strength):
         target_pt = lm[FaceMesh.FACE_INDICES['NOSE_TIP'][0]]
-        
-        # 반복문 최적화: 리스트 컴프리헨션 사용 등은 가능하지만
-        # 점 개수가 적으므로 가독성을 위해 기존 구조 유지
         for idx in FaceMesh.FACE_INDICES['JAW_L']:
             pt = lm[idx]
             radius = int(np.linalg.norm(pt - target_pt) * 0.6)
             vector = target_pt - pt
             self._add_param(pt, radius, strength * 0.3, mode=1, vector=vector)
-
         for idx in FaceMesh.FACE_INDICES['JAW_R']:
             pt = lm[idx]
             radius = int(np.linalg.norm(pt - target_pt) * 0.6)

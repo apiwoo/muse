@@ -73,11 +73,10 @@ class BodyTracker:
             
         self.last_log_time = time.time()
         
-        # [Jitter Control] 필터 초기화
-        # min_cutoff: 기본 떨림 억제 강도 (클수록 덜 떨림, 0.1~1.0 추천)
-        # beta: 빠른 움직임 반응 속도 (클수록 반응 빠름, 0.001~0.1 추천)
-        # 현재 설정: 정지 상태에서는 강력하게 잡고(0.5), 움직일 땐 적당히 따라감(0.005)
-        self.filter = OneEuroFilter(time.time(), min_cutoff=0.5, beta=0.005, d_cutoff=1.0)
+        # [Jitter Control V1.6] 반응성 극대화 튜닝
+        # min_cutoff: 0.5 (기본 떨림 제어 유지)
+        # beta: 0.2 (기존 0.005에서 40배 상향 -> 빠른 동작 즉각 추적)
+        self.filter = OneEuroFilter(time.time(), min_cutoff=0.5, beta=0.2, d_cutoff=1.0)
 
     def process(self, frame_bgr):
         """
