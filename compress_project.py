@@ -42,9 +42,18 @@ IGNORE_FOLDERS = {
     
     # [추가] 대용량 바이너리나 미디어 리소스만 콕 집어서 제외
     "models",    # AI 가중치 파일 (.pth 등) - 용량이 커서 코드 공유 시 제외
-    "images",    # UI 아이콘 및 리소스 이미지
+    # "images",  # UI 아이콘만 제외하려 했으나, 라벨링 결과(images)도 이름이 같으므로 여기서 제외됨
     "videos",    # 테스트용 비디오
-    "fonts"      # 폰트 파일
+    "fonts",      # 폰트 파일
+    
+    # [NEW] 학습 데이터 및 라벨링 결과물 제외 (압축 대상 아님)
+    "recorded_data", # 녹화된 원본 영상 및 데이터 루트
+    "images",        # 라벨링된 이미지 (recorded_data 내부에 있지만 안전장치로 추가)
+    "masks",         # 라벨링된 마스크
+    "labels",        # 라벨링된 JSON 데이터
+    
+    # [NEW] 자기 자신 제외 (재귀 복사 방지)
+    OUTPUT_DIR_NAME
 }
 # ==========================================
 
@@ -60,13 +69,14 @@ def copy_core_code():
     print(f"🚀 Project MUSE 핵심 소스코드 추출(복사) 시작: {current_dir}")
     print(f"📂 대상 폴더: {OUTPUT_DIR_NAME} (덮어쓰기 모드)")
     print(f"ℹ️  설정: 확장자 {len(ALLOWED_EXTENSIONS)}종, 특수파일 {len(ALLOWED_FILENAMES)}종 포함")
+    print(f"🚫 제외 폴더: recorded_data, masks, labels, images 등")
 
     # 결과 폴더가 없으면 생성 (있으면 무시)
     os.makedirs(target_dir, exist_ok=True)
     
     for root, dirs, files in os.walk(current_dir):
         # 제외 폴더는 아예 진입하지 않음 (리스트를 직접 수정하여 os.walk 제어)
-        # 여기서 assets가 빠졌으므로, assets 폴더로 진입하되 models/images는 걸러짐
+        # 여기서 assets가 빠졌으므로, assets 폴더로 진입하되 models 등은 걸러짐
         dirs[:] = [d for d in dirs if d not in IGNORE_FOLDERS]
         
         for file in files:
