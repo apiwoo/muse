@@ -1,10 +1,11 @@
 # Project MUSE - beauty_engine.py
-# Optimized V10.2: Smart Smooth Logic (Continuous Adaptive Smoothing)
+# Optimized V12.0: Self-Healing Background (Dynamic Update)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
 import numpy as np
-import time
+import os
+import glob
 from ai.tracking.facemesh import FaceMesh
 
 # [GPU Acceleration Setup]
@@ -19,15 +20,14 @@ except ImportError:
 
 # ==============================================================================
 # [CUDA Kernel 1] Fused Warp Vector Generator (FP32)
-# 벡터장 생성 커널
 # ==============================================================================
 WARP_KERNEL_CODE = r'''
 extern "C" __global__
 void warp_kernel(
-    float* dx, float* dy,       // Output buffers (H, W) - float32
-    const float* params,        // [cx, cy, r, strength, vx, vy, mode] * num_points
-    int num_points,             // Number of warp points
-    int width, int height       // Grid dimensions
+    float* dx, float* dy,       
+    const float* params,        
+    int num_points,             
+    int width, int height       
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -36,7 +36,6 @@ void warp_kernel(
 
     int idx = y * width + x;
     
-    // Accumulator
     float acc_dx = 0.0f;
     float acc_dy = 0.0f;
 
@@ -59,16 +58,15 @@ void warp_kernel(
             float factor = (1.0f - dist / r);
             factor = factor * factor * s;
 
-            if (mode == 0) { // Expand (확대)
+            if (mode == 0) { 
                 acc_dx -= diff_x * factor;
                 acc_dy -= diff_y * factor;
             } 
-            else if (mode == 1) { // Shrink with Vector (방향성 이동/수축)
-                // vx, vy 방향으로 픽셀을 당겨옴
+            else if (mode == 1) { 
                 acc_dx -= vx * factor * r * 0.5f;
                 acc_dy -= vy * factor * r * 0.5f;
             }
-            else if (mode == 2) { // Shrink to Center (중심 수축)
+            else if (mode == 2) { 
                 acc_dx += diff_x * factor;
                 acc_dy += diff_y * factor;
             }
@@ -81,18 +79,60 @@ void warp_kernel(
 '''
 
 # ==============================================================================
-# [CUDA Kernel 2] Native Remap & Upscaling
+# [CUDA Kernel 2] Background Updater (Self-Healing)
+# 현재 프레임의 배경(Mask=0)을 배경 버퍼에 학습시킴
 # ==============================================================================
-REMAP_KERNEL_CODE = r'''
+UPDATE_BG_KERNEL_CODE = r'''
 extern "C" __global__
-void remap_kernel(
-    const unsigned char* src,  // Source Image (H x W x 3)
-    unsigned char* dst,        // Dest Image (H x W x 3)
-    const float* dx_small,     // Warp Vector X (h x w)
-    const float* dy_small,     // Warp Vector Y (h x w)
-    int width, int height,     // Full Resolution
-    int small_width, int small_height, // Small Resolution
-    int scale                  // Upscale Factor (e.g., 4)
+void update_bg_kernel(
+    const unsigned char* current_frame, // Live Input (BGR)
+    const unsigned char* mask,          // Segmentation Mask (0=BG, 255=Person)
+    unsigned char* bg_buffer,           // Persistent Background Buffer (Update Target)
+    int width, int height,
+    float learning_rate                 // 0.0 ~ 1.0 (How fast to adapt)
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int stride = width;
+    int pixel_idx = idx * 3;
+
+    // Check Mask (0 is Background)
+    // We update only if it is SURELY background.
+    if (mask[idx] < 10) { 
+        for (int c = 0; c < 3; ++c) {
+            float old_bg = (float)bg_buffer[pixel_idx + c];
+            float new_bg = (float)current_frame[pixel_idx + c];
+            
+            // Linear Interpolation (Moving Average)
+            // bg = bg * (1 - lr) + new * lr
+            float updated = old_bg * (1.0f - learning_rate) + new_bg * learning_rate;
+            
+            bg_buffer[pixel_idx + c] = (unsigned char)updated;
+        }
+    }
+}
+'''
+
+# ==============================================================================
+# [CUDA Kernel 3] Remap & Composite (Compositor)
+# ==============================================================================
+COMPOSITE_KERNEL_CODE = r'''
+extern "C" __global__
+void composite_kernel(
+    const unsigned char* src,  
+    const unsigned char* mask, 
+    const unsigned char* bg,   
+    unsigned char* dst,        
+    const float* dx_small,     
+    const float* dy_small,     
+    int width, int height,     
+    int small_width, int small_height, 
+    int scale,                 
+    int use_bg                 
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -129,16 +169,30 @@ void remap_kernel(
     y2 = max(0, min(y2, height - 1));
 
     int stride = width * 3;
+    int m_stride = width;
     int out_idx = y * stride + x * 3;
 
+    float m11 = (float)mask[y1 * m_stride + x1];
+    float m12 = (float)mask[y1 * m_stride + x2];
+    float m21 = (float)mask[y2 * m_stride + x1];
+    float m22 = (float)mask[y2 * m_stride + x2];
+
+    float alpha = (m11 * wx1 * wy1 + m12 * wx2 * wy1 + m21 * wx1 * wy2 + m22 * wx2 * wy2) / 255.0f;
+    
     for (int c = 0; c < 3; ++c) {
-        float val = 
+        float p_val = 
             (float)src[y1 * stride + x1 * 3 + c] * wx1 * wy1 +
             (float)src[y1 * stride + x2 * 3 + c] * wx2 * wy1 +
             (float)src[y2 * stride + x1 * 3 + c] * wx1 * wy2 +
             (float)src[y2 * stride + x2 * 3 + c] * wx2 * wy2;
-        
-        dst[out_idx + c] = (unsigned char)val;
+
+        float bg_val = 0.0f;
+        if (use_bg == 1) {
+            bg_val = (float)bg[y * stride + x * 3 + c];
+            dst[out_idx + c] = (unsigned char)(p_val * alpha + bg_val * (1.0f - alpha));
+        } else {
+            dst[out_idx + c] = (unsigned char)p_val;
+        }
     }
 }
 '''
@@ -146,12 +200,12 @@ void remap_kernel(
 class BeautyEngine:
     def __init__(self):
         """
-        [Mode A] Real-time Beauty Engine (GPU Edition V10.2)
-        - V10.2: Smart Smooth Logic (Continuous Mapping + Alpha Inertia)
-        - V10.1: Body Velocity Integration
-        - V10.0: Full CUDA Remapping
+        [Mode A] Real-time Beauty Engine (GPU Edition V12.0)
+        - V12.0: Self-Healing Background (Dynamic Update)
+        - V11.0: Zero Distortion
+        - V10.2: Smart Smooth Logic
         """
-        print("💄 [BeautyEngine] GPU 엔진 V10.2 (Smart Smooth Update)")
+        print("💄 [BeautyEngine] GPU 엔진 V12.0 (Self-Healing Background)")
         
         self.map_scale = 0.25 
         
@@ -161,24 +215,57 @@ class BeautyEngine:
         
         self.gpu_dx = None
         self.gpu_dy = None
-        
         self.prev_gpu_dx = None
         self.prev_gpu_dy = None
         
-        # [V10.1] 움직임 속도 추적용 변수
+        self.bg_gpu = None
+        self.has_bg = False
+        
+        # [V12.0] Background Learning Rate
+        # 값이 클수록 조명 변화에 빨리 적응하지만, 마스크 오차 시 잔상(Ghosting)이 생길 수 있음.
+        # 0.05 정도면 약 20프레임(0.6초) 만에 조명 변화를 따라감.
+        self.bg_learning_rate = 0.05
+        
+        # [V10.1] 움직임 속도 추적
         self.prev_face_center = None
         self.prev_body_center = None 
-        
-        # [V10.2] Alpha 관성 변수 (급격한 필터 변화 방지)
         self.current_alpha = 0.85
 
         self.warp_params = [] 
         
         if HAS_CUDA:
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
-            self.remap_kernel = cp.RawKernel(REMAP_KERNEL_CODE, 'remap_kernel')
+            self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
+            self.update_bg_kernel = cp.RawKernel(UPDATE_BG_KERNEL_CODE, 'update_bg_kernel')
+            
+            # 초기 배경 로드 (시작점)
+            self._auto_load_background()
 
-    def process(self, frame, faces, body_landmarks=None, params=None):
+    def _auto_load_background(self):
+        try:
+            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            data_dir = os.path.join(root_dir, "recorded_data")
+            sessions = sorted(glob.glob(os.path.join(data_dir, "*")), reverse=True)
+            
+            for session in sessions:
+                bg_path = os.path.join(session, "background.jpg")
+                if os.path.exists(bg_path):
+                    print(f"🖼️ [BeautyEngine] 초기 배경 로드: {os.path.basename(session)}")
+                    bg_img = cv2.imread(bg_path)
+                    if bg_img is not None:
+                        self.bg_cpu_raw = bg_img
+                        self.has_bg = True
+                        return
+            
+            print("⚠️ [BeautyEngine] 저장된 배경이 없습니다. 실시간 학습으로 시작합니다.")
+            self.has_bg = True # 파일이 없어도 빈 캔버스에서 시작 가능 (검은색 -> 실시간 채움)
+            self.bg_cpu_raw = None # 나중에 0으로 초기화됨
+            
+        except Exception as e:
+            print(f"❌ [BeautyEngine] 배경 로드 중 오류: {e}")
+            self.has_bg = False
+
+    def process(self, frame, faces, body_landmarks=None, params=None, mask=None):
         if frame is None: return frame
         if params is None: params = {}
 
@@ -194,6 +281,7 @@ class BeautyEngine:
             else:
                 return frame 
 
+        # 그리드/버퍼 초기화
         if self.cache_w != w or self.cache_h != h:
             self.cache_w, self.cache_h = w, h
             self.gpu_initialized = False
@@ -201,6 +289,20 @@ class BeautyEngine:
             self.prev_gpu_dy = None
             self.prev_face_center = None
             self.prev_body_center = None
+            
+            # [V12.0] 배경 버퍼 초기화
+            if self.has_bg:
+                if self.bg_cpu_raw is not None:
+                    # 파일이 있으면 그걸로 시작
+                    bg_resized = cv2.resize(self.bg_cpu_raw, (w, h))
+                    self.bg_gpu = cp.asarray(bg_resized)
+                else:
+                    # 파일이 없으면 현재 프레임으로 시작 (혹은 검은색)
+                    print("⚡ [BeautyEngine] 배경 파일 없음 -> 현재 프레임으로 초기화")
+                    self.bg_gpu = cp.array(frame_gpu) # Copy current frame as init BG
+            else:
+                self.bg_gpu = cp.zeros_like(frame_gpu)
+                
             print(f"⚡ [BeautyEngine] Grid Cache Rebuilt: {w}x{h}")
 
         sw, sh = int(w * self.map_scale), int(h * self.map_scale)
@@ -213,12 +315,38 @@ class BeautyEngine:
         self.warp_params.clear() 
         has_deformation = False
         
+        # [V12.0] 마스크 준비 (GPU)
+        mask_gpu = None
+        use_bg = 0
+        if self.has_bg and mask is not None:
+            if hasattr(mask, 'device'): 
+                mask_gpu = mask
+            else:
+                mask_gpu = cp.asarray(mask)
+            use_bg = 1
+        else:
+            mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
+
         # =================================================================
-        # [V10.2 Update] Smart Smooth Logic (Continuous Mapping)
+        # [V12.0 Core] Self-Healing Background Update
+        # 워핑하기 전에, 현재 프레임의 배경 부분을 학습합니다.
+        # =================================================================
+        if use_bg == 1:
+            block_dim = (32, 32)
+            grid_dim = ((w + block_dim[0] - 1) // block_dim[0], 
+                        (h + block_dim[1] - 1) // block_dim[1])
+            
+            self.update_bg_kernel(
+                grid_dim, block_dim,
+                (frame_gpu, mask_gpu, self.bg_gpu, w, h, self.bg_learning_rate)
+            )
+
+        # =================================================================
+        # Smart Smooth Logic (V10.2)
         # =================================================================
         max_velocity = 0.0
         
-        # 1. Face Velocity Calculation
+        # Face Velocity
         current_face_center = None
         if faces:
             current_face_center = np.mean(faces[0].landmarks, axis=0)
@@ -226,99 +354,60 @@ class BeautyEngine:
                 face_vel = np.linalg.norm(current_face_center - self.prev_face_center)
                 max_velocity = max(max_velocity, face_vel)
         
-        # 2. Body Velocity Calculation
+        # Body Velocity
         current_body_center = None
         body_cpu = None
-        
         if body_landmarks is not None:
-            if hasattr(body_landmarks, 'get'): 
-                body_cpu = body_landmarks.get()
-            else:
-                body_cpu = body_landmarks
-            
+            if hasattr(body_landmarks, 'get'): body_cpu = body_landmarks.get()
+            else: body_cpu = body_landmarks
             valid_points = []
             for idx in [5, 6, 11, 12]:
                 if idx < len(body_cpu) and body_cpu[idx][2] > 0.4:
                     valid_points.append(body_cpu[idx][:2])
-            
             if valid_points:
                 current_body_center = np.mean(valid_points, axis=0)
                 if self.prev_body_center is not None:
                     body_vel = np.linalg.norm(current_body_center - self.prev_body_center)
                     max_velocity = max(max_velocity, body_vel)
 
-        # 3. 상태 업데이트
         self.prev_face_center = current_face_center
         self.prev_body_center = current_body_center
         
-        # 4. Continuous Alpha Mapping (선형 보간)
-        # - 정지(Vel <= 0.5): 0.96 (강력한 고정, 돌처럼)
-        # - 이동(Vel >= 6.0): 0.15 (최소한의 필터, 물처럼, 절대 0이 아님)
-        min_vel = 0.5
-        max_vel = 6.0
-        max_alpha = 0.96
-        min_alpha = 0.15
-        
-        target_alpha = max_alpha # 기본값
-        
-        if max_velocity <= min_vel:
-            target_alpha = max_alpha
-        elif max_velocity >= max_vel:
-            target_alpha = min_alpha
+        min_vel, max_vel = 0.5, 6.0
+        max_alpha, min_alpha = 0.96, 0.15
+        target_alpha = max_alpha
+        if max_velocity <= min_vel: target_alpha = max_alpha
+        elif max_velocity >= max_vel: target_alpha = min_alpha
         else:
-            # 보간: y = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
             ratio = (max_velocity - min_vel) / (max_vel - min_vel)
             target_alpha = max_alpha - ratio * (max_alpha - min_alpha)
 
-        # 5. Alpha Inertia (부드러운 전환)
-        # 필터 강도 자체가 급격히 변하지 않도록 한번 더 스무딩
         self.current_alpha = self.current_alpha * 0.8 + target_alpha * 0.2
             
         # =================================================================
         
-        # --- Body Reshaping (Quartet) ---
+        # Body Reshaping
         if body_cpu is not None:
             scaled_body = body_cpu[:, :2] * self.map_scale
-            
-            # 1. Shoulder Narrow (어깨)
-            shoulder_strength = params.get('shoulder_narrow', 0)
-            if shoulder_strength > 0:
-                self._collect_shoulder_params(scaled_body, shoulder_strength)
-                has_deformation = True
+            for key in ['shoulder_narrow', 'ribcage_slim', 'waist_slim', 'hip_widen']:
+                val = params.get(key, 0)
+                if val > 0:
+                    if key == 'shoulder_narrow': self._collect_shoulder_params(scaled_body, val)
+                    elif key == 'ribcage_slim': self._collect_ribcage_params(scaled_body, val)
+                    elif key == 'waist_slim': self._collect_waist_params(scaled_body, val)
+                    elif key == 'hip_widen': self._collect_hip_params(scaled_body, val)
+                    has_deformation = True
 
-            # 2. Ribcage Slim (흉통)
-            ribcage_strength = params.get('ribcage_slim', 0)
-            if ribcage_strength > 0:
-                self._collect_ribcage_params(scaled_body, ribcage_strength)
-                has_deformation = True
-
-            # 3. Waist Slim (허리)
-            waist_strength = params.get('waist_slim', 0)
-            if waist_strength > 0:
-                self._collect_waist_params(scaled_body, waist_strength)
-                has_deformation = True
-
-            # 4. Hip Widen (골반)
-            hip_strength = params.get('hip_widen', 0)
-            if hip_strength > 0:
-                self._collect_hip_params(scaled_body, hip_strength)
-                has_deformation = True
-
-        # --- Face Reshaping ---
+        # Face Reshaping
         if faces:
             face_v = params.get('face_v', 0)
             eye_scale = params.get('eye_scale', 0)
             head_scale = params.get('head_scale', 0) 
-
             for face in faces:
                 lm_small = face.landmarks * self.map_scale
-                
-                if face_v > 0:
-                    self._collect_face_contour_params(lm_small, face_v)
-                if eye_scale > 0:
-                    self._collect_eyes_params(lm_small, eye_scale)
-                if head_scale != 0: 
-                    self._collect_head_params(lm_small, head_scale)
+                if face_v > 0: self._collect_face_contour_params(lm_small, face_v)
+                if eye_scale > 0: self._collect_eyes_params(lm_small, eye_scale)
+                if head_scale != 0: self._collect_head_params(lm_small, head_scale)
 
             if face_v > 0 or eye_scale > 0 or head_scale != 0:
                 has_deformation = True
@@ -326,10 +415,10 @@ class BeautyEngine:
         self.gpu_dx.fill(0)
         self.gpu_dy.fill(0)
 
+        # Warp Vector
         if has_deformation and self.warp_params:
             params_arr = np.array(self.warp_params, dtype=np.float32)
             params_gpu = cp.asarray(params_arr)
-            
             num_points = len(self.warp_params)
             
             block_dim = (16, 16)
@@ -341,8 +430,8 @@ class BeautyEngine:
                 (self.gpu_dx, self.gpu_dy, params_gpu, num_points, sw, sh)
             )
 
+        # Smoothing & Compositing
         if has_deformation or (self.prev_gpu_dx is not None):
-            # [V10.2] 계산된 current_alpha 적용
             self._apply_temporal_smoothing_fast(self.current_alpha)
             
             cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
@@ -356,10 +445,10 @@ class BeautyEngine:
             
             scale = int(1.0 / self.map_scale) 
             
-            self.remap_kernel(
+            self.composite_kernel(
                 grid_dim, block_dim,
-                (frame_gpu, result_gpu, self.gpu_dx, self.gpu_dy, 
-                 w, h, sw, sh, scale)
+                (frame_gpu, mask_gpu, self.bg_gpu, result_gpu, self.gpu_dx, self.gpu_dy, 
+                 w, h, sw, sh, scale, use_bg)
             )
             
             if is_gpu_input:
@@ -370,101 +459,62 @@ class BeautyEngine:
             return frame_gpu if is_gpu_input else frame
 
     # ==========================================================
-    # [Body Reshaping Quartet]
+    # [Reshaping Helpers] (동일함)
     # ==========================================================
     def _collect_shoulder_params(self, keypoints, strength):
-        """1. 어깨 줄이기 (안쪽으로 당김)"""
         l_sh, r_sh = keypoints[5], keypoints[6]
-        
-        shoulder_width = np.linalg.norm(l_sh - r_sh)
-        if shoulder_width < 3: return
-        center_shoulder = (l_sh + r_sh) / 2
-        
-        radius = int(shoulder_width * 0.6)
+        width = np.linalg.norm(l_sh - r_sh)
+        if width < 3: return
+        center = (l_sh + r_sh) / 2
+        radius = int(width * 0.6)
         s = strength * 0.3
-        
-        vec_l = center_shoulder - l_sh
-        vec_r = center_shoulder - r_sh
-        
-        self._add_param(l_sh, radius, s, mode=1, vector=vec_l)
-        self._add_param(r_sh, radius, s, mode=1, vector=vec_r)
+        self._add_param(l_sh, radius, s, mode=1, vector=(center-l_sh))
+        self._add_param(r_sh, radius, s, mode=1, vector=(center-r_sh))
 
     def _collect_ribcage_params(self, keypoints, strength):
-        """2. 흉통 줄이기 (갈비뼈 부근 안쪽으로 당김)"""
         l_sh, r_sh = keypoints[5], keypoints[6]
         l_hip, r_hip = keypoints[11], keypoints[12]
-        
-        # 흉통 위치 추정 (어깨와 골반 사이 상단 35% 지점)
         l_rib = l_sh * 0.65 + l_hip * 0.35
         r_rib = r_sh * 0.65 + r_hip * 0.35
-        center_rib = (l_rib + r_rib) / 2
-        
-        rib_width = np.linalg.norm(l_rib - r_rib)
-        if rib_width < 3: return
-        
-        radius = int(rib_width * 0.7)
+        center = (l_rib + r_rib) / 2
+        width = np.linalg.norm(l_rib - r_rib)
+        if width < 3: return
+        radius = int(width * 0.7)
         s = strength * 0.4
-        
-        vec_l = center_rib - l_rib
-        vec_r = center_rib - r_rib
-        
-        self._add_param(l_rib, radius, s, mode=1, vector=vec_l)
-        self._add_param(r_rib, radius, s, mode=1, vector=vec_r)
+        self._add_param(l_rib, radius, s, mode=1, vector=(center-l_rib))
+        self._add_param(r_rib, radius, s, mode=1, vector=(center-r_rib))
 
     def _collect_waist_params(self, keypoints, strength):
-        """3. 허리 줄이기 (안쪽으로 당김)"""
         l_sh, r_sh = keypoints[5], keypoints[6]
         l_hip, r_hip = keypoints[11], keypoints[12]
-        
-        # 허리 위치 (상단 60% 지점)
         l_waist = l_sh * 0.4 + l_hip * 0.6
         r_waist = r_sh * 0.4 + r_hip * 0.6
-        center_waist = (l_waist + r_waist) / 2
-        
-        body_width = np.linalg.norm(l_waist - r_waist)
-        if body_width < 3: return 
-        
-        radius = int(body_width * 0.6)
+        center = (l_waist + r_waist) / 2
+        width = np.linalg.norm(l_waist - r_waist)
+        if width < 3: return 
+        radius = int(width * 0.6)
         s = strength * 0.4
-        
-        vec_l = center_waist - l_waist
-        vec_r = center_waist - r_waist
-        
-        self._add_param(l_waist, radius, s, mode=1, vector=vec_l)
-        self._add_param(r_waist, radius, s, mode=1, vector=vec_r)
+        self._add_param(l_waist, radius, s, mode=1, vector=(center-l_waist))
+        self._add_param(r_waist, radius, s, mode=1, vector=(center-r_waist))
 
     def _collect_hip_params(self, keypoints, strength):
-        """4. 골반 늘리기 (바깥쪽으로 밀어냄)"""
         l_hip, r_hip = keypoints[11], keypoints[12]
-        
-        hip_width = np.linalg.norm(l_hip - r_hip)
-        if hip_width < 3: return
-        center_hip = (l_hip + r_hip) / 2
-        
-        radius = int(hip_width * 0.7)
+        width = np.linalg.norm(l_hip - r_hip)
+        if width < 3: return
+        center = (l_hip + r_hip) / 2
+        radius = int(width * 0.7)
         s = strength * 0.3
-        
-        # 바깥 방향 벡터
-        vec_l_out = l_hip - center_hip 
-        vec_r_out = r_hip - center_hip 
-        
-        self._add_param(l_hip, radius, s, mode=1, vector=vec_l_out)
-        self._add_param(r_hip, radius, s, mode=1, vector=vec_r_out)
+        self._add_param(l_hip, radius, s, mode=1, vector=(l_hip-center))
+        self._add_param(r_hip, radius, s, mode=1, vector=(r_hip-center))
 
-    # ==========================================================
-    # [Face Reshaping]
-    # ==========================================================
     def _collect_head_params(self, lm, strength):
         chin = lm[152]
         forehead = lm[10]
-        head_height = np.linalg.norm(chin - forehead)
-        
+        height = np.linalg.norm(chin - forehead)
         up_vec = forehead - chin
         up_vec /= (np.linalg.norm(up_vec) + 1e-6)
-        center = np.mean(lm, axis=0) + up_vec * (head_height * 0.5)
-        
-        radius = int(head_height * 1.6)
-        
+        center = np.mean(lm, axis=0) + up_vec * (height * 0.5)
+        radius = int(height * 1.6)
         dist_to_top = center[1]
         safe_factor = 1.0
         if dist_to_top < radius:

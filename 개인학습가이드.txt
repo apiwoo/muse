@@ -1,0 +1,134 @@
+Project MUSE: The Visual Singularity
+
+Zero Distortion Pipeline User Manual (v12.0 Edition)
+
+🚀 1. 시스템 개요
+
+이 시스템은 **"사용자에게 과적합(Overfitting)된 개인화 모델"**을 사용하여, 저사양 GPU에서도 완벽한 배경 분리와 신체 추적을 수행합니다.
+범용성을 포기하는 대신, 특정 환경(내 방)과 특정 인물(나)에 대해서는 선생님 모델(ViTPose/SAM) 수준의 성능을 냅니다.
+
+[v12.0 핵심 기능: Self-Healing Background]
+배경은 더 이상 고정된 사진이 아닙니다. AI가 실시간으로 변화하는 조명과 배경 상태를 학습하여, 낮/밤이 바뀌거나 카메라가 미세하게 흔들려도 스스로 배경을 복구하고 동기화합니다.
+
+🎥 2. 파이프라인 단계별 가이드
+
+[Step 1] 데이터 수집 (Recording)
+
+목표: 학습에 필요한 "내 모습"과 "초기 배경" 데이터를 확보합니다.
+
+실행: python tools/recorder.py
+
+초기 배경 촬영 (Base Clean Plate):
+
+화면 밖으로 나가세요.
+
+B 키를 눌러 **background.jpg**를 저장합니다.
+
+이 사진은 시스템 시작 시 '초기값'으로 사용되며, 이후에는 실시간으로 업데이트됩니다.
+
+학습 데이터 녹화:
+
+다시 화면 안으로 들어오세요.
+
+R 키를 눌러 녹화를 시작합니다.
+
+약 5~10분간 다양한 동작을 수행하세요.
+
+가만히 서 있기, 앉기, 팔 벌리기
+
+중요: 손으로 얼굴 가리기, 몸 돌리기 등 "AI가 헷갈릴 만한 동작"을 많이 넣어야 강해집니다.
+
+다시 R을 눌러 저장하고 종료(Q)합니다.
+
+[Step 2] 정답지 생성 (Auto-Labeling)
+
+목표: 녹화된 영상에 대해 선생님 모델들이 "정답(Mask, Keypoints)"을 달아줍니다.
+
+실행: python tools/auto_labeling/run_labeling.py <SESSION_NAME>
+
+예: python tools/auto_labeling/run_labeling.py 20231025_143000
+
+작동 원리:
+
+Teacher A (ViTPose-Huge): 뼈대 좌표를 아주 정밀하게 찾습니다.
+
+Teacher B (SAM ViT-Huge): 뼈대 좌표를 힌트로 받아, 사람 영역(Mask)을 칼같이 따냅니다.
+
+결과: recorded_data/<SESSION>/ 폴더에 images, masks, labels가 생성됩니다.
+
+[Step 3] 개인화 학습 (Distillation Training)
+
+목표: 선생님의 지식을 경량 모델(Student)에게 주입합니다.
+
+실행: python tools/train_student.py <SESSION_NAME>
+
+과정:
+
+MobileNetV3 기반의 학생 모델이 데이터를 보며 학습합니다.
+
+입력: 내 방에서 찍은 내 사진
+
+출력: 배경 제거 마스크 + 뼈대 좌표
+
+완료: 약 30분~1시간 후 assets/models/personal/student_model_final.pth가 생성됩니다.
+
+[Step 4] 엔진 구동 (Live Inference)
+
+목표: 학습된 모델을 로드하여 실시간 방송을 시작합니다.
+
+실행: python tools/run_muse.py (또는 src/main.py)
+
+작동 로직 (Zero Distortion Pipeline):
+
+Input: 웹캠 영상 (Live)
+
+AI Inference: Student 모델이 실시간으로 뼈대와 배경 마스크를 추출합니다.
+
+Background Update (매 프레임): 마스크 바깥쪽(배경) 영역을 실시간으로 학습하여 배경 버퍼를 최신 상태(조명, 물체 이동 반영)로 업데이트합니다.
+
+Rendering: - 뼈대를 기준으로 몸을 성형(Warping)합니다.
+
+줄어든 공간을 최신 업데이트된 배경 버퍼로 메꿉니다(Compositing).
+
+결과: 몸을 줄여도 배경이 울렁거리지 않으며, 조명이 바뀌어도 자연스럽게 동기화됩니다.
+
+⚠️ 3. 잠재적 문제점 및 해결 방안 (Troubleshooting)
+
+이 방식은 "과적합(Overfitting)"을 이용하기 때문에 강력하지만, 환경 변화에 취약할 수 있습니다.
+단, v12.0부터는 '자가 치유(Self-Healing)' 기능으로 대부분 자동 해결됩니다.
+
+1) 조명 변화 (Lighting Shift)
+
+상황: 낮에 background.jpg를 찍고 밤에 방송을 시작했습니다.
+
+자동 해결: 엔진이 켜지는 순간, 현재 카메라에 잡히는 어두운 배경을 즉시 학습하여 배경 버퍼를 업데이트합니다. 약 0.5~1초 내에 조명 동기화가 완료됩니다.
+
+2) 카메라 미세 이동 (Camera Movement)
+
+상황: 청소하다 웹캠을 툭 쳐서 각도가 살짝 틀어졌습니다.
+
+자동 해결: - 틀어진 배경이 실시간으로 배경 버퍼에 덮어씌워집니다.
+
+팁: 카메라가 틀어졌다면 잠시 몸을 좌우로 움직여주세요. 몸에 가려져 있던 배경 부분까지 드러나면서 더 빠르게 수정됩니다.
+
+3) 의상 변경 (Outfit Dependency)
+
+문제: 반팔을 입고 학습했는데 패딩을 입으면, AI가 옷을 배경으로 착각할 수 있습니다. (이건 자동 해결 안 됨)
+
+해결:
+
+자주 입는 옷 스타일별로 데이터를 조금씩 섞어서 학습시키면 일반화 성능이 올라갑니다.
+
+가장 좋은 건 방송 때 입을 옷을 입고 1분이라도 추가 녹화 후 **파인튜닝(Fine-tuning)**하는 것입니다.
+
+4) 배경 물체 이동 (Object Shift)
+
+상황: 배경에 있던 의자를 치웠습니다.
+
+자동 해결: 인물이 가리고 있지 않은 영역이라면, 의자가 사라진 현재 화면이 배경 버퍼에 반영되어 의자가 자연스럽게 사라집니다.
+
+💡 4. 개발자 팁 (Optimization)
+
+학습 속도: RTX 3060 기준 50 Epoch 학습에 약 20~30분 소요됩니다.
+
+추론 속도: Student 모델은 매우 가벼워서(MobileNetV3), RTX 3060에서 100FPS 이상 방어가 가능합니다. 남는 GPU 자원은 고사양 게임 송출에 쓰세요.
