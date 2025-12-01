@@ -1,9 +1,9 @@
-Project MUSE - File Structure (v6.2 Multi-Task Distillation)
+Project MUSE - File Structure (v6.5 MediaPipe Update)
 
 MUSE_Project/
 ├── assets/                     # [Resource Layer]
 │   ├── models/
-│   │   ├── tracking/           # [Teacher B] ViTPose-Huge (TRT), FaceMesh (High-Poly)
+│   │   ├── tracking/           # [Teacher B] ViTPose-Huge (TRT Engine)
 │   │   ├── segment_anything/   # [Teacher A] SAM ViT-Huge (Original Weights)
 │   │   ├── personal/           # [Student] 학습된 멀티태스크 모델 (.engine)
 │   │   └── tensorrt_cache/     # RTX 3060용 최적화 엔진 캐시
@@ -29,9 +29,9 @@ MUSE_Project/
 │   │   └── profiler.py         # 성능 모니터링
 │   │
 │   ├── ai/                     # [Intelligence Layer]
-│   │   ├── tracking/           # [Teacher Wrappers]
-│   │   │   ├── vitpose_trt.py  # Teacher B 제어
-│   │   │   └── facemesh.py     # Face 제어
+│   │   ├── tracking/           # [Tracking Engines]
+│   │   │   ├── vitpose_trt.py  # [Body] ViTPose-Huge (TensorRT)
+│   │   │   └── facemesh.py     # [Face] MediaPipe Face Mesh (CPU)
 │   │   │
 │   │   └── distillation/       # [Distillation Pipeline]
 │   │       ├── teacher/        # 선생님 모델
@@ -46,7 +46,7 @@ MUSE_Project/
 │   │
 │   ├── graphics/               # [Visuals Layer]
 │   │   ├── renderer.py         # OpenGL Context
-│   │   ├── beauty_engine.py    # [Key] 마스크 기반 워핑 로직 구현
+│   │   ├── beauty_engine.py    # [Key] MediaPipe & ViTPose 기반 워핑 로직
 │   │   └── shader_loader.py    # GLSL 로더
 │   │
 │   ├── ui/                     # [Control Layer]
@@ -70,5 +70,6 @@ MUSE_Project/
 │       ├── run_labeling.py     # 배치 작업 실행
 │       └── verify_data.py      # 데이터 검수
 │
+├── libs/                       # [Portable] NVIDIA DLLs (cudnn, etc.)
 ├── requirements.txt
 └── .env

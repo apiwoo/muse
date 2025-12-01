@@ -7,11 +7,11 @@ import time
 import cv2
 import numpy as np
 import os
-import signal # [Fix] 시그널 모듈 추가
+import signal
 
 # [PySide6 GUI Framework]
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QThread, Signal, Slot
+from PySide6.QtCore import QThread, Signal, Slot, Qt
 import qdarktheme
 
 # [System Path Setup]
@@ -57,7 +57,7 @@ class BeautyWorker(QThread):
         self.tracker = None
         self.body_tracker = None
         self.beauty_engine = None
-
+        
         # 설정
         self.DEVICE_ID = 0
         self.WIDTH = 1920
@@ -96,23 +96,22 @@ class BeautyWorker(QThread):
                 frame_cpu = frame_gpu.get()
             else:
                 frame_cpu = frame_gpu
-
-            # 얼굴 트래킹
+            
+            # 얼굴 트래킹 (MediaPipe)
             faces = []
             if self.tracker:
                 faces = self.tracker.process(frame_cpu)
             
-            # 바디 트래킹
+            # 바디 트래킹 (ViTPose)
             body_landmarks = None
             if self.body_tracker:
                 body_landmarks = self.body_tracker.process(frame_cpu)
 
-            # [Step 3] Beauty Processing (Warping + Segmentation)
-            # 얼굴과 몸 정보를 모두 엔진에 전달
+            # [Step 3] Beauty Processing (Pure Warping)
             if self.beauty_engine:
                 frame_cpu = self.beauty_engine.process(frame_cpu, faces, body_landmarks, self.params)
 
-            # [Debug] 몸 뼈대 그리기 (체크박스가 켜져있을 때만)
+            # [Debug] 몸 뼈대 그리기
             if self.params.get('show_body_debug', False) and self.body_tracker:
                 frame_cpu = self.body_tracker.draw_debug(frame_cpu, body_landmarks)
 
@@ -135,8 +134,7 @@ class BeautyWorker(QThread):
         print("🧵 [Worker] 스레드 종료")
 
     def cleanup(self):
-        """자원 강제 해제 (중복 호출 방지)"""
-        # 이미 해제되었다면 패스
+        """자원 강제 해제"""
         if self.input_mgr is None and self.virtual_cam is None:
             return
 
@@ -149,7 +147,6 @@ class BeautyWorker(QThread):
             self.virtual_cam.close()
             self.virtual_cam = None
             
-        # AI 엔진 메모리 해제
         self.tracker = None
         self.body_tracker = None
         self.beauty_engine = None
@@ -162,31 +159,26 @@ class BeautyWorker(QThread):
 
     def stop(self):
         self.running = False
-        # 스레드가 루프를 돌고 있다면 빠져나오게 함
 
 def main():
-    # [Fix] VS Code Stop 버튼(SIGTERM) 및 Ctrl+C 핸들링 강화
-    # 프로그램이 종료 신호를 받으면 즉시 QApplication을 종료시킵니다.
     def signal_handler(sig, frame):
         print(f"\n🛑 [System] 종료 시그널 감지 ({sig}). 앱 종료를 요청합니다...")
         if QApplication.instance():
             QApplication.instance().quit()
 
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler) # VS Code Stop Button
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     app = QApplication(sys.argv)
     qdarktheme.setup_theme("dark")
     
-    # 마지막 창이 닫히면 앱도 확실히 종료되도록 설정
     app.setQuitOnLastWindowClosed(True)
 
     window = MainWindow()
     worker = BeautyWorker()
-    
-    # [Core Fix] 스레드 종료 정책 설정
     worker.setTerminationEnabled(True) 
     
+    # UI 연결
     window.connect_worker(worker)
     
     worker.start()
@@ -194,29 +186,20 @@ def main():
     
     print("🚀 [System] MUSE GUI 가동 완료.")
     
-    # GUI 실행 (종료될 때까지 대기)
-    # 윈도우가 닫히거나 quit()이 호출되면 여기서 리턴합니다.
     exit_code = app.exec()
     
-    # --- 프로그램 종료 시퀀스 (The Final Cleanup) ---
     print("🛑 [System] 메인 루프 종료. 리소스 해제 시작...")
     
-    # 1. 스레드 루프 중지 신호
     if worker.isRunning():
         print("   -> 워커 스레드 정지 요청...")
         worker.stop()
-        
-        # 2. 스레드 종료 대기 (최대 1초 -> 0.5초로 단축)
         if not worker.wait(500):
             print("⚠️ [System] 스레드가 반응하지 않아 강제 종료(Terminate)합니다.")
             worker.terminate()
-            worker.wait(100) # terminate 후 잠시 대기
+            worker.wait(100)
         else:
             print("   -> 워커 스레드 정상 종료됨.")
     
-    # 3. [Final Blow] 프로세스 강제 사살 (Kill Process)
-    # sys.exit()은 파이썬 정리 작업 때문에 늦거나(좀비화) 안 꺼질 수 있습니다.
-    # os._exit(0)은 운영체제 레벨에서 프로세스 트리를 즉시 증발시킵니다.
     print("💀 [System] 프로세스 강제 소멸 (os._exit)")
     os._exit(0)
 

@@ -1,5 +1,5 @@
 # Project MUSE - beauty_panel.py
-# Created for Mode A (Visual Supremacy)
+# Clean Version: No Capture Button
 # (C) 2025 MUSE Corp. All rights reserved.
 
 from PySide6.QtWidgets import (
@@ -11,7 +11,6 @@ from ui.controls.sliders import ModernSlider
 class BeautyPanel(QWidget):
     """
     [UI Panel] 뷰티 파라미터를 조절하는 우측 사이드바
-    - V1.1 Update: Face/Body 탭 분리, Body 컨트롤 추가
     """
     paramChanged = Signal(dict)
 
@@ -19,14 +18,14 @@ class BeautyPanel(QWidget):
         super().__init__()
         
         self.setStyleSheet("background-color: #1E1E1E;")
-        self.setFixedWidth(320) # 너비 약간 확장
+        self.setFixedWidth(320)
 
         # 초기 파라미터
         self.current_params = {
             'eye_scale': 0.0,
             'face_v': 0.0,
             'waist_slim': 0.0,
-            'show_body_debug': False # 디버깅용 뼈대 보기
+            'show_body_debug': False
         }
 
         self._init_ui()
@@ -115,7 +114,7 @@ class BeautyPanel(QWidget):
 
         # 하단 정보
         layout.addStretch()
-        info_label = QLabel("Mode A: Visual Supremacy")
+        info_label = QLabel("Mode A: Visual Supremacy (MediaPipe)")
         info_label.setStyleSheet("color: #555; font-size: 10px;")
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
