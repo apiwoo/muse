@@ -44,10 +44,16 @@ class BeautyWorker(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        
+        # [V4.0] 파라미터 초기화 (Body Quartet)
         self.params = {
             'eye_scale': 0.0, 
             'face_v': 0.0,
-            'waist_slim': 0.0,
+            'head_scale': 0.0,
+            'shoulder_narrow': 0.0, # [1]
+            'ribcage_slim': 0.0,    # [2]
+            'waist_slim': 0.0,      # [3]
+            'hip_widen': 0.0,       # [4]
             'show_body_debug': False
         }
         
