@@ -1,37 +1,53 @@
-# ========================
-# Python & System
-# ========================
-__pycache__/
+========================
+
+Python & System
+
+========================
+
+pycache/
 *.py[cod]
 *$py.class
 *.log
 .DS_Store
 Thumbs.db
 
-# ========================
-# Virtual Environment
-# ========================
+========================
+
+Virtual Environment
+
+========================
+
 venv/
 env/
 .venv/
 
-# ========================
-# IDE Settings
-# ========================
+========================
+
+IDE Settings
+
+========================
+
 .vscode/
 .idea/
 
-# ========================
-# Secrets & Config
-# ========================
+========================
+
+Secrets & Config
+
+========================
+
 .env
 
-# ========================
-# [Project MUSE] Large Assets
-# 100MB 넘는 파일들은 Git에 올리면 안 됩니다.
-# ========================
+========================
 
-# AI Models (Downloader로 받아야 함)
+[Project MUSE] Large Assets
+
+100MB 넘는 파일들은 Git에 올리면 안 됩니다.
+
+========================
+
+AI Models (Downloader로 받아야 함)
+
 assets/models/
 *.pth
 *.onnx
@@ -39,13 +55,28 @@ assets/models/
 *.pt
 *.bin
 
-# Recorded Videos
+Recorded Videos
+
 recorded_data/
 *.avi
 *.mp4
 *.mkv
 
-# Downloaded Archives
+Downloaded Archives
+
 *.zip
 *.tar.gz
 libs/
+
+========================
+
+[Added] Generated Data & Results
+
+이 폴더들은 Git에 올라가지 않습니다.
+
+========================
+
+core_source_code_folder/
+images/
+masks/
+labels/
