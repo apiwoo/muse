@@ -1,5 +1,5 @@
 # Project MUSE - inference.py
-# The "Student" Inference Engine: Lightweight & Real-time
+# The "Student" Inference Engine: Lightweight & Real-time (PyTorch)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import torch
@@ -11,26 +11,23 @@ import sys
 # 프로젝트 루트 경로 확보
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
 
-# [Change] 'src.' prefix removed
 from ai.distillation.student.model_arch import MuseStudentModel
 
 class StudentInference:
     def __init__(self, model_path=None):
         """
-        [MUSE Student Inference]
-        - 역할: 학습된 개인화 모델(.pth)을 로드하여 실시간 추론 수행
-        - 출력: (Segmentation Mask, Pose Keypoints)
+        [MUSE Student Inference - PyTorch Fallback]
+        - High-Fidelity Mode: 960x544
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"🎓 [Student] 추론 엔진 초기화 (Device: {self.device})")
 
-        # 1. 모델 아키텍처 준비
+        # 1. 모델 아키텍처 준비 (ResNet-34 U-Net)
         self.model = MuseStudentModel(num_keypoints=17).to(self.device)
         self.model.eval()
 
         # 2. 가중치 로드
         if model_path is None:
-            # 기본 경로: assets/models/personal/student_model_final.pth
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
             model_path = os.path.join(base_dir, "assets", "models", "personal", "student_model_final.pth")
 
@@ -45,11 +42,13 @@ class StudentInference:
                 self.is_ready = False
         else:
             print(f"   ⚠️ 모델 파일이 없습니다: {model_path}")
-            print("   -> 'tools/train_student.py'를 실행하여 모델을 먼저 학습시키세요.")
             self.is_ready = False
 
-        # 추론용 상수
-        self.input_size = (512, 512)
+        # 추론용 상수 (High-Fidelity)
+        self.input_w = 960
+        self.input_h = 544
+        self.input_size = (self.input_w, self.input_h)
+        
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
 
@@ -57,8 +56,6 @@ class StudentInference:
         """
         :param frame_bgr: (H, W, 3) OpenCV Image
         :return: (mask_binary, keypoints)
-            - mask_binary: (H, W) 0 or 255 uint8
-            - keypoints: (17, 3) [x, y, conf]
         """
         if not self.is_ready or frame_bgr is None:
             return None, None
@@ -88,8 +85,8 @@ class StudentInference:
             mask_final = cv2.resize(mask_uint8, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
             
             # --- Output 2: Pose ---
-            # Heatmap -> Coordinates
-            heatmaps = pred_pose.squeeze().cpu().numpy() # (17, 128, 128)
+            # Heatmaps are now same resolution as input (1/1 scale)
+            heatmaps = pred_pose.squeeze().cpu().numpy() # (17, 544, 960)
             keypoints = self._parse_heatmaps(heatmaps, (w_orig, h_orig))
 
         return mask_final, keypoints
@@ -98,7 +95,7 @@ class StudentInference:
         """히트맵에서 최대값 좌표(x, y)를 추출하고 원본 크기로 복원"""
         kpts = []
         w_orig, h_orig = original_size
-        _, h_map, w_map = heatmaps.shape
+        _, h_map, w_map = heatmaps.shape # (17, 544, 960)
         
         scale_x = w_orig / w_map
         scale_y = h_orig / h_map

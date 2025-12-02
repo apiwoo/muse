@@ -1,5 +1,6 @@
 # Project MUSE - convert_student_to_trt.py
-# Target: Convert Student Model (MobileNetV3) to TensorRT Engine
+# Target: Convert Student Model (ResNet-34 U-Net) to TensorRT Engine
+# Resolution: 960x544 (High-Fidelity)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -13,8 +14,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.ai.distillation.student.model_arch import MuseStudentModel
 
+# [High-Fidelity Resolution Config]
+# Width: 960, Height: 544
+TARGET_W = 960
+TARGET_H = 544
+
 def export_onnx(pth_path, onnx_path):
-    print(f"🚀 [Step 1] PyTorch -> ONNX 변환 시작...")
+    print(f"🚀 [Step 1] PyTorch -> ONNX 변환 시작... (Res: {TARGET_W}x{TARGET_H})")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MuseStudentModel(num_keypoints=17).to(device)
@@ -22,7 +28,7 @@ def export_onnx(pth_path, onnx_path):
     # 가중치 로드
     if not os.path.exists(pth_path):
         print(f"❌ 모델 파일이 없습니다: {pth_path}")
-        print("   -> 먼저 'python tools/train_student.py'를 실행하여 모델을 학습하세요.")
+        print("   -> 먼저 'tools/train_student.py'를 실행하여 모델을 학습하세요.")
         sys.exit(1)
         
     try:
@@ -34,8 +40,9 @@ def export_onnx(pth_path, onnx_path):
         print(f"❌ 가중치 로드 실패: {e}")
         sys.exit(1)
 
-    # 더미 입력 (Batch:1, Channel:3, Height:512, Width:512)
-    dummy_input = torch.randn(1, 3, 512, 512).to(device)
+    # 더미 입력 (Batch:1, Channel:3, Height:544, Width:960)
+    # 주의: PyTorch는 (N, C, H, W) 순서입니다.
+    dummy_input = torch.randn(1, 3, TARGET_H, TARGET_W).to(device)
     
     try:
         torch.onnx.export(
@@ -44,6 +51,7 @@ def export_onnx(pth_path, onnx_path):
             onnx_path,
             input_names=['input'],
             output_names=['seg_logits', 'pose_heatmaps'],
+            # 배치 사이즈는 가변(dynamic)으로 두거나 고정할 수 있습니다. 여기선 1로 고정 추천(RT 성능 최적화)
             dynamic_axes={'input': {0: 'batch_size'}, 'seg_logits': {0: 'batch_size'}, 'pose_heatmaps': {0: 'batch_size'}},
             opset_version=13
         )
@@ -82,9 +90,12 @@ def build_engine(onnx_path, engine_path):
                 print(parser.get_error(error))
             sys.exit(1)
 
-    # 최적화 프로파일 설정 (입력 크기 고정: 512x512)
+    # 최적화 프로파일 설정 (입력 크기 고정: 960x544)
+    # TensorRT Shape: (Batch, Channel, Height, Width)
+    input_shape = (1, 3, TARGET_H, TARGET_W)
+    
     profile = builder.create_optimization_profile()
-    profile.set_shape("input", (1, 3, 512, 512), (1, 3, 512, 512), (1, 3, 512, 512))
+    profile.set_shape("input", input_shape, input_shape, input_shape)
     config.add_optimization_profile(profile)
 
     # 메모리 풀 설정 (4GB)
@@ -113,10 +124,14 @@ def build_engine(onnx_path, engine_path):
 def main():
     print("========================================================")
     print("   MUSE Student Model Optimization Tool")
+    print("   (High-Fidelity Mode: 960x544)")
     print("========================================================")
     
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_dir = os.path.join(base_dir, "assets", "models", "personal")
+    
+    # 여러 프로파일을 순회하며 변환하도록 확장 가능하지만, 일단 기본 파일명 기준
+    # 실제 운영 시에는 인자값으로 파일명을 받아야 함
     
     pth_path = os.path.join(model_dir, "student_model_final.pth")
     onnx_path = os.path.join(model_dir, "student_model.onnx")
@@ -128,7 +143,7 @@ def main():
     # 2. Build TensorRT Engine
     build_engine(onnx_path, engine_path)
     
-    print("\n🎉 변환 완료! 이제 'tools/run_muse.py'를 실행하면 고속 추론 모드가 작동합니다.")
+    print("\n🎉 변환 완료! 이제 'tools/run_muse.py'를 실행하면 고화질 추론이 작동합니다.")
 
 if __name__ == "__main__":
     main()
