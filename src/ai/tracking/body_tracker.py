@@ -1,5 +1,5 @@
 # Project MUSE - body_tracker.py
-# Target: Mode A (Personalized Student Model Integrated)
+# Target: Multi-Model Student Loader
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -7,9 +7,9 @@ import numpy as np
 import time
 import math
 import os
+import glob
 
-# [Change] Smart Import: Try TensorRT first, then PyTorch
-# 'src.' prefix removed for compatibility when running from src/main.py
+# [Change] Smart Import
 try:
     from ai.distillation.student.inference_trt import StudentInferenceTRT
     TRT_AVAILABLE = True
@@ -18,10 +18,7 @@ except ImportError:
 
 from ai.distillation.student.inference import StudentInference
 
-# ==============================================================================
-# [Core Algorithm] OneEuro Filter Implementation
-# 지진(Jitter) 현상을 잡기 위한 적응형 필터입니다.
-# ==============================================================================
+# OneEuro Filter (Jitter Control)
 class OneEuroFilter:
     def __init__(self, t0, min_cutoff=1.0, beta=0.0, d_cutoff=1.0):
         self.min_cutoff = float(min_cutoff)
@@ -44,113 +41,125 @@ class OneEuroFilter:
             self.dx_prev = np.zeros_like(x)
             self.t_prev = t
             return x
-
         t_e = t - self.t_prev
-        
-        # Avoid division by zero
         if t_e <= 0.0: return self.x_prev
-
-        # The filtered derivative of the signal.
         a_d = self.smoothing_factor(t_e, self.d_cutoff)
         dx = (x - self.x_prev) / t_e
         dx_hat = self.exponential_smoothing(a_d, dx, self.dx_prev)
-
-        # The filtered signal.
         cutoff = self.min_cutoff + self.beta * np.abs(dx_hat)
         a = self.smoothing_factor(t_e, cutoff)
         x_hat = self.exponential_smoothing(a, x, self.x_prev)
-
         self.x_prev = x_hat
         self.dx_prev = dx_hat
         self.t_prev = t
         return x_hat
 
 class BodyTracker:
-    def __init__(self):
+    def __init__(self, profiles=[]):
         """
-        [BodyTracker V2.1]
-        - Engine: Personalized Student Model (Lightweight)
-        - Priority: TensorRT (.engine) > PyTorch (.pth)
-        - Jitter Control: OneEuro Filter
+        [BodyTracker V3.0] Multi-Model Support
+        - profiles: ['front', 'top', 'default'...]
+        - 모든 프로파일에 대한 엔진을 미리 로드합니다.
         """
-        self.model = None
-        self.engine_ready = False
-        self.mode = "None"
+        self.models = {} # {'front': model_obj, ...}
+        self.active_profile = None
+        self.active_model = None
         
-        # 1. Try TensorRT First
-        if TRT_AVAILABLE:
-            print("💪 [BodyTracker] TensorRT 엔진(High-Perf) 로드 시도...")
-            try:
-                trt_model = StudentInferenceTRT()
-                if trt_model.is_ready:
-                    self.model = trt_model
-                    self.engine_ready = True
-                    self.mode = "TensorRT"
-                    print("   ✅ TensorRT 가속 활성화됨.")
-            except Exception as e:
-                print(f"   ⚠️ TensorRT 로드 실패: {e}")
+        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        self.model_dir = os.path.join(self.root_dir, "assets", "models", "personal")
+        
+        print(f"🧠 [BodyTracker] 멀티 모델 로딩 시작 (대상: {profiles})")
+        
+        # 1. 기본 모델 검색 (student_model.engine -> fallback)
+        default_engine = os.path.join(self.model_dir, "student_model.engine")
+        default_model = self._load_model("default", default_engine)
+        if default_model:
+            self.models['default'] = default_model
+            self.active_profile = 'default'
+            self.active_model = default_model
 
-        # 2. Fallback to PyTorch
-        if not self.engine_ready:
-            print("💪 [BodyTracker] PyTorch 엔진(Fallback) 로드 시도...")
-            try:
-                self.model = StudentInference()
-                if self.model.is_ready:
-                    self.engine_ready = True
-                    self.mode = "PyTorch"
-                    print("   ✅ PyTorch 엔진 활성화됨 (최적화를 위해 TensorRT 변환 권장).")
-            except Exception as e:
-                print(f"❌ [BodyTracker] 모든 모델 로드 실패: {e}")
-                self.engine_ready = False
-            
-        self.last_log_time = time.time()
-        self.latest_mask = None # 마스크 저장용
-        
-        # [Jitter Control]
+        # 2. 프로파일별 모델 로드
+        for p_name in profiles:
+            engine_path = os.path.join(self.model_dir, f"student_{p_name}.engine")
+            # 만약 전용 모델이 없으면 -> default 모델을 공유해서 씀 (메모리 절약)
+            if not os.path.exists(engine_path):
+                if 'default' in self.models:
+                    self.models[p_name] = self.models['default']
+                    print(f"   ⚠️ [{p_name}] 전용 모델 없음 -> Default 모델 공유")
+                continue
+                
+            model = self._load_model(p_name, engine_path)
+            if model:
+                self.models[p_name] = model
+
+        # 필터
         self.filter = OneEuroFilter(time.time(), min_cutoff=0.5, beta=0.2, d_cutoff=1.0)
+        self.latest_mask = None
+        self.last_log_time = time.time()
+
+    def _load_model(self, name, path):
+        if not TRT_AVAILABLE:
+            print("   ❌ TensorRT 모듈 없음. PyTorch 모드로 대체합니다.")
+            return StudentInference() # PyTorch (Single Model only for now)
+
+        try:
+            print(f"   Load '{name}' <- {os.path.basename(path)} ...", end=" ")
+            model = StudentInferenceTRT(engine_path=path)
+            if model.is_ready:
+                print("✅ Success")
+                return model
+            else:
+                print("❌ Failed (Not Ready)")
+                return None
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            return None
+
+    def set_profile(self, profile_name):
+        """활성 모델 변경 (Instant Switch)"""
+        if profile_name in self.models:
+            if self.active_profile != profile_name:
+                self.active_profile = profile_name
+                self.active_model = self.models[profile_name]
+                print(f"🧠 [BodyTracker] Model Switched to: {profile_name}")
+                # 필터 초기화 (위치가 확 바뀌므로 튀는거 방지)
+                self.filter = OneEuroFilter(time.time(), min_cutoff=0.5, beta=0.2, d_cutoff=1.0)
+            return True
+        else:
+            print(f"⚠️ [BodyTracker] Profile '{profile_name}' model not found.")
+            return False
 
     def process(self, frame_bgr):
-        """
-        :return: keypoints numpy array (17, 3) -> [x, y, conf]
-        """
-        if not self.engine_ready or frame_bgr is None:
+        if self.active_model is None or frame_bgr is None:
             return None
         
-        # 1. Student 추론 실행 (Mask + Pose)
-        mask, raw_keypoints = self.model.infer(frame_bgr)
+        # 추론
+        mask, raw_keypoints = self.active_model.infer(frame_bgr)
         
-        if raw_keypoints is None:
-            return None
+        if raw_keypoints is None: return None
             
-        # [Important] 마스크 저장 (나중에 렌더러가 가져갈 수 있게)
         self.latest_mask = mask
 
-        # 2. [Core] OneEuro Filter 적용 (Pose Jitter 제거)
+        # 필터링
         curr_time = time.time()
-        coords = raw_keypoints[:, :2] # (17, 2)
-        confs = raw_keypoints[:, 2:3] # (17, 1)
-        
-        # 필터링 수행
+        coords = raw_keypoints[:, :2]
+        confs = raw_keypoints[:, 2:3]
         smoothed_coords = self.filter(curr_time, coords)
-        
-        # 다시 합치기
         smoothed_keypoints = np.hstack([smoothed_coords, confs])
 
-        # [Log] 2초에 한 번씩만 상태 출력
-        if curr_time - self.last_log_time > 2.0:
-            max_conf = np.max(confs)
-            print(f"🔍 [BodyTracker] Tracking ({self.mode}): Conf={max_conf:.2f}")
+        # 로그
+        if curr_time - self.last_log_time > 5.0: # 5초마다
+            print(f"   [Tracker] Active: {self.active_profile}")
             self.last_log_time = curr_time
         
         return smoothed_keypoints
 
     def get_mask(self):
-        """최신 프레임의 배경 제거 마스크 반환"""
         return self.latest_mask
 
     def draw_debug(self, frame, keypoints):
         """
-        [Visual Check] 뼈대 그리기 (기존 로직 유지)
+        [Visual Check] 뼈대 그리기 (기존 로직 유지 + 복원)
         """
         if keypoints is None:
             return frame

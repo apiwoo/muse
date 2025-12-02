@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# Optimized V12.1: Self-Healing & Manual Reset Support
+# Optimized V13.1: Multi-Background Profile Support + Auto-Save
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -13,7 +13,6 @@ try:
     import cupy as cp
     import cupyx.scipy.ndimage
     HAS_CUDA = True
-    print("✅ [BeautyEngine] GPU Acceleration Enabled (CuPy + Native CUDA)")
 except ImportError:
     HAS_CUDA = False
     print("⚠️ [BeautyEngine] CuPy not found. Fallback to CPU Mode.")
@@ -80,16 +79,15 @@ void warp_kernel(
 
 # ==============================================================================
 # [CUDA Kernel 2] Background Updater (Self-Healing)
-# 현재 프레임의 배경(Mask=0)을 배경 버퍼에 학습시킴
 # ==============================================================================
 UPDATE_BG_KERNEL_CODE = r'''
 extern "C" __global__
 void update_bg_kernel(
-    const unsigned char* current_frame, // Live Input (BGR)
-    const unsigned char* mask,          // Segmentation Mask (0=BG, 255=Person)
-    unsigned char* bg_buffer,           // Persistent Background Buffer (Update Target)
+    const unsigned char* current_frame, 
+    const unsigned char* mask,          
+    unsigned char* bg_buffer,           
     int width, int height,
-    float learning_rate                 // 0.0 ~ 1.0 (How fast to adapt)
+    float learning_rate                 
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -97,20 +95,15 @@ void update_bg_kernel(
     if (x >= width || y >= height) return;
 
     int idx = y * width + x;
-    int stride = width;
     int pixel_idx = idx * 3;
 
     // Check Mask (0 is Background)
-    // We update only if it is SURELY background.
     if (mask[idx] < 10) { 
         for (int c = 0; c < 3; ++c) {
             float old_bg = (float)bg_buffer[pixel_idx + c];
             float new_bg = (float)current_frame[pixel_idx + c];
             
-            // Linear Interpolation (Moving Average)
-            // bg = bg * (1 - lr) + new * lr
             float updated = old_bg * (1.0f - learning_rate) + new_bg * learning_rate;
-            
             bg_buffer[pixel_idx + c] = (unsigned char)updated;
         }
     }
@@ -198,14 +191,13 @@ void composite_kernel(
 '''
 
 class BeautyEngine:
-    def __init__(self):
+    def __init__(self, profiles=[]):
         """
-        [Mode A] Real-time Beauty Engine (GPU Edition V12.1)
-        - V12.1: Manual Background Reset Support
-        - V12.0: Self-Healing Background (Dynamic Update)
-        - V11.0: Zero Distortion
+        [BeautyEngine V13.1] Multi-Background Profile Support
+        - profiles: 프로파일 이름 리스트
+        - 각 프로파일의 background.jpg를 미리 GPU에 로드합니다.
         """
-        print("💄 [BeautyEngine] GPU 엔진 V12.1 (Self-Healing & Reset)")
+        print("💄 [BeautyEngine] GPU 엔진 V13.1 (Multi-Profile BG + AutoSave)")
         
         self.map_scale = 0.25 
         
@@ -218,67 +210,111 @@ class BeautyEngine:
         self.prev_gpu_dx = None
         self.prev_gpu_dy = None
         
-        self.bg_gpu = None
+        # [Multi-BG System]
+        self.bg_buffers = {} # {'front': {'cpu': img, 'gpu': ptr}, ...}
+        self.active_profile = 'default'
+        self.bg_gpu = None # 현재 활성 GPU 배경 버퍼 포인터
         self.has_bg = False
         self.bg_learning_rate = 0.05
         
-        # [V10.1] 움직임 속도 추적
+        # Smooth Motion
         self.prev_face_center = None
         self.prev_body_center = None 
         self.current_alpha = 0.85
 
         self.warp_params = [] 
         
+        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
+        
         if HAS_CUDA:
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.update_bg_kernel = cp.RawKernel(UPDATE_BG_KERNEL_CODE, 'update_bg_kernel')
             
-            self._auto_load_background()
+            # 초기화 시 모든 배경 로드
+            self._load_all_backgrounds(profiles)
 
-    def _auto_load_background(self):
-        try:
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            data_dir = os.path.join(root_dir, "recorded_data")
-            sessions = sorted(glob.glob(os.path.join(data_dir, "*")), reverse=True)
+    def _load_all_backgrounds(self, profiles):
+        if not HAS_CUDA: return
+        
+        print(f"🖼️ [BeautyEngine] 배경 프리로딩 시작: {profiles}")
+        for p in profiles:
+            bg_path = os.path.join(self.data_dir, p, "background.jpg")
+            if os.path.exists(bg_path):
+                img = cv2.imread(bg_path)
+                if img is not None:
+                    # CPU 메모리에 로드해두고, 해상도가 확정되면 GPU로 올림
+                    self.bg_buffers[p] = {'cpu': img, 'gpu': None}
+                    # print(f"   -> [{p}] Loaded (CPU)")
+            else:
+                self.bg_buffers[p] = {'cpu': None, 'gpu': None}
+
+    def set_profile(self, profile_name):
+        """배경 버퍼 교체 (Instant Switch)"""
+        if profile_name in self.bg_buffers:
+            self.active_profile = profile_name
             
-            for session in sessions:
-                bg_path = os.path.join(session, "background.jpg")
-                if os.path.exists(bg_path):
-                    print(f"🖼️ [BeautyEngine] 초기 배경 로드: {os.path.basename(session)}")
-                    bg_img = cv2.imread(bg_path)
-                    if bg_img is not None:
-                        self.bg_cpu_raw = bg_img
-                        self.has_bg = True
-                        return
+            # 이미 GPU 버퍼가 생성되어 있다면 포인터 교체
+            if self.bg_buffers[profile_name]['gpu'] is not None:
+                self.bg_gpu = self.bg_buffers[profile_name]['gpu']
+                self.has_bg = True
+            else:
+                # 아직 초기화 안됨 (process에서 처리)
+                self.has_bg = False
             
-            print("⚠️ [BeautyEngine] 저장된 배경이 없습니다. 실시간 학습으로 시작합니다.")
-            self.has_bg = True
-            self.bg_cpu_raw = None 
-            
-        except Exception as e:
-            print(f"❌ [BeautyEngine] 배경 로드 중 오류: {e}")
+            print(f"🖼️ [BeautyEngine] BG Switched to: {profile_name}")
+        else:
+            # 새로운 프로파일이면 추가
+            self.active_profile = profile_name
+            self.bg_buffers[profile_name] = {'cpu': None, 'gpu': None}
             self.has_bg = False
 
     def reset_background(self, frame):
         """
-        [New] 현재 프레임으로 배경을 강제 초기화합니다.
+        [New] 현재 프레임으로 배경을 강제 초기화하고, 파일로도 저장합니다.
         방송 중 조명이 바뀌거나 카메라가 이동했을 때 호출됩니다.
         """
         if not HAS_CUDA or frame is None: return
         
-        print("🔄 [BeautyEngine] 배경 버퍼 강제 리셋 (Instant Reset)")
+        print(f"🔄 [BeautyEngine] 배경 강제 리셋 ({self.active_profile})")
         
-        if hasattr(frame, 'device'):
-            # 이미 GPU에 있는 경우
-            cp.copyto(self.bg_gpu, frame)
+        # 1. GPU 버퍼 갱신
+        if self.bg_gpu is not None:
+             # GPU to GPU or CPU to GPU
+             cp.copyto(self.bg_gpu, cp.asarray(frame) if not hasattr(frame, 'device') else frame)
         else:
-            # CPU에서 온 경우
-            frame_gpu = cp.asarray(frame)
-            if self.bg_gpu is not None and self.bg_gpu.shape == frame_gpu.shape:
-                cp.copyto(self.bg_gpu, frame_gpu)
+            # 새로 할당
+            new_bg_gpu = cp.array(frame) if not hasattr(frame, 'device') else cp.copy(frame)
+            self.bg_gpu = new_bg_gpu
+            
+            if self.active_profile not in self.bg_buffers:
+                self.bg_buffers[self.active_profile] = {'cpu': None, 'gpu': None}
+            self.bg_buffers[self.active_profile]['gpu'] = new_bg_gpu
+            
+        self.has_bg = True
+
+        # 2. [Auto-Save] 파일로 저장 (영구 반영)
+        # GPU -> CPU Download needed for saving
+        try:
+            if hasattr(frame, 'device'):
+                frame_cpu = cp.asnumpy(frame)
             else:
-                self.bg_gpu = frame_gpu # 크기가 다르면 교체
+                frame_cpu = frame
+                
+            # 해당 프로파일 폴더 경로
+            save_path = os.path.join(self.data_dir, self.active_profile, "background.jpg")
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            
+            cv2.imwrite(save_path, frame_cpu)
+            print(f"   💾 배경 파일 저장 완료: {save_path}")
+            
+            # CPU 캐시도 업데이트
+            if self.active_profile in self.bg_buffers:
+                self.bg_buffers[self.active_profile]['cpu'] = frame_cpu
+                
+        except Exception as e:
+            print(f"   ⚠️ 배경 파일 저장 실패: {e}")
 
     def process(self, frame, faces, body_landmarks=None, params=None, mask=None):
         if frame is None: return frame
@@ -287,8 +323,8 @@ class BeautyEngine:
         is_gpu_input = HAS_CUDA and hasattr(frame, 'device')
         
         if is_gpu_input:
-            h, w = frame.shape[:2]
             frame_gpu = frame 
+            h, w = frame.shape[:2]
         else:
             h, w = frame.shape[:2]
             if HAS_CUDA:
@@ -296,7 +332,7 @@ class BeautyEngine:
             else:
                 return frame 
 
-        # 그리드/버퍼 초기화
+        # 그리드/버퍼 초기화 (해상도 변경 시)
         if self.cache_w != w or self.cache_h != h:
             self.cache_w, self.cache_h = w, h
             self.gpu_initialized = False
@@ -305,20 +341,8 @@ class BeautyEngine:
             self.prev_face_center = None
             self.prev_body_center = None
             
-            # [V12.0] 배경 버퍼 초기화
-            if self.has_bg:
-                if self.bg_cpu_raw is not None:
-                    # 파일이 있으면 그걸로 시작
-                    bg_resized = cv2.resize(self.bg_cpu_raw, (w, h))
-                    self.bg_gpu = cp.asarray(bg_resized)
-                else:
-                    # 파일이 없으면 현재 프레임으로 시작
-                    print("⚡ [BeautyEngine] 배경 파일 없음 -> 현재 프레임으로 초기화")
-                    self.bg_gpu = cp.array(frame_gpu)
-            else:
-                self.bg_gpu = cp.zeros_like(frame_gpu)
-                
-            print(f"⚡ [BeautyEngine] Grid Cache Rebuilt: {w}x{h}")
+            # 해상도가 확정되었으므로 배경 버퍼 GPU 할당
+            self._init_bg_buffers(w, h, frame_gpu)
 
         sw, sh = int(w * self.map_scale), int(h * self.map_scale)
         
@@ -326,6 +350,19 @@ class BeautyEngine:
             self.gpu_dx = cp.zeros((sh, sw), dtype=cp.float32)
             self.gpu_dy = cp.zeros((sh, sw), dtype=cp.float32)
             self.gpu_initialized = True
+
+        # 현재 프로파일의 배경 버퍼 가져오기 (없으면 프레임 복사)
+        if self.bg_gpu is None:
+             if self.active_profile in self.bg_buffers and self.bg_buffers[self.active_profile]['gpu'] is not None:
+                 self.bg_gpu = self.bg_buffers[self.active_profile]['gpu']
+                 self.has_bg = True
+             else:
+                 # 없으면 현재 프레임으로 초기화
+                 self.bg_gpu = cp.copy(frame_gpu)
+                 if self.active_profile not in self.bg_buffers:
+                     self.bg_buffers[self.active_profile] = {'cpu':None, 'gpu':None}
+                 self.bg_buffers[self.active_profile]['gpu'] = self.bg_gpu
+                 self.has_bg = True
 
         self.warp_params.clear() 
         has_deformation = False
@@ -344,7 +381,6 @@ class BeautyEngine:
 
         # =================================================================
         # [V12.0 Core] Self-Healing Background Update
-        # 워핑하기 전에, 현재 프레임의 배경 부분을 학습합니다.
         # =================================================================
         if use_bg == 1:
             block_dim = (32, 32)
@@ -357,7 +393,7 @@ class BeautyEngine:
             )
 
         # =================================================================
-        # Smart Smooth Logic (V10.2)
+        # Smart Smooth Logic
         # =================================================================
         max_velocity = 0.0
         
@@ -399,6 +435,8 @@ class BeautyEngine:
 
         self.current_alpha = self.current_alpha * 0.8 + target_alpha * 0.2
             
+        # =================================================================
+        # Parameter Collection
         # =================================================================
         
         # Body Reshaping
@@ -473,8 +511,23 @@ class BeautyEngine:
         else:
             return frame_gpu if is_gpu_input else frame
 
+    def _init_bg_buffers(self, w, h, frame_template):
+        """해상도가 확정되었을 때 CPU 버퍼들을 GPU로 업로드"""
+        for p, data in self.bg_buffers.items():
+            if data['gpu'] is None and data['cpu'] is not None:
+                # Resize if needed
+                if data['cpu'].shape[1] != w or data['cpu'].shape[0] != h:
+                    resized = cv2.resize(data['cpu'], (w, h))
+                else:
+                    resized = data['cpu']
+                data['gpu'] = cp.asarray(resized)
+            elif data['gpu'] is None:
+                # 파일도 없으면 빈 버퍼 생성 (나중에 채워짐)
+                data['gpu'] = cp.zeros_like(frame_template)
+        print(f"🖼️ [BeautyEngine] GPU BG Buffers Initialized ({len(self.bg_buffers)} profiles)")
+
     # ==========================================================
-    # [Reshaping Helpers] (동일함)
+    # [Reshaping Helpers]
     # ==========================================================
     def _collect_shoulder_params(self, keypoints, strength):
         l_sh, r_sh = keypoints[5], keypoints[6]

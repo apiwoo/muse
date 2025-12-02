@@ -1,5 +1,5 @@
 # Project MUSE - beauty_panel.py
-# Clean Version: No Capture Button
+# Clean Version: No Capture Button, Auto-Sync Support
 # (C) 2025 MUSE Corp. All rights reserved.
 
 from PySide6.QtWidgets import (
@@ -40,10 +40,10 @@ class BeautyPanel(QWidget):
         layout.setContentsMargins(10, 20, 10, 20)
 
         # 타이틀
-        title = QLabel("MUSE ENGINE")
-        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; margin-bottom: 10px;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        self.title_label = QLabel("MUSE ENGINE")
+        self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; margin-bottom: 10px;")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.title_label)
 
         # 탭 위젯 생성
         tabs = QTabWidget()
@@ -136,10 +136,10 @@ class BeautyPanel(QWidget):
         layout.addWidget(tabs)
 
         layout.addStretch()
-        info_label = QLabel("Mode A: Visual Supremacy (MediaPipe)")
-        info_label.setStyleSheet("color: #555; font-size: 10px;")
-        info_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(info_label)
+        self.info_label = QLabel("Mode: Default")
+        self.info_label.setStyleSheet("color: #555; font-size: 10px;")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.info_label)
 
         self.setLayout(layout)
 
@@ -162,4 +162,55 @@ class BeautyPanel(QWidget):
 
     def _update_param(self, key, value):
         self.current_params[key] = value
+        self.paramChanged.emit(self.current_params)
+
+    def set_profile_info(self, profile_name):
+        self.title_label.setText(f"MUSE: {profile_name.upper()}")
+        self.info_label.setText(f"Active Profile: {profile_name}")
+
+    def update_sliders_from_config(self, params):
+        """
+        [New] 외부 설정값(JSON)을 슬라이더에 반영
+        - 중요: 슬라이더 값 변경 시 _update_param이 호출되어 다시 시그널을 보내는 것을 방지해야 함.
+        - blockSignals를 사용하여 조용히 UI만 업데이트.
+        """
+        # 시그널 차단 (루프 방지)
+        self.blockSignals(True)
+        self.slider_eye.blockSignals(True)
+        self.slider_chin.blockSignals(True)
+        self.slider_head.blockSignals(True)
+        self.slider_shoulder.blockSignals(True)
+        self.slider_ribcage.blockSignals(True)
+        self.slider_waist.blockSignals(True)
+        self.slider_hip.blockSignals(True)
+        self.chk_body_debug.blockSignals(True)
+
+        # 값 설정
+        if 'eye_scale' in params: self.slider_eye.set_value(params['eye_scale'])
+        if 'face_v' in params: self.slider_chin.set_value(params['face_v'])
+        if 'head_scale' in params: self.slider_head.set_value(params['head_scale'])
+        
+        if 'shoulder_narrow' in params: self.slider_shoulder.set_value(params['shoulder_narrow'])
+        if 'ribcage_slim' in params: self.slider_ribcage.set_value(params['ribcage_slim'])
+        if 'waist_slim' in params: self.slider_waist.set_value(params['waist_slim'])
+        if 'hip_widen' in params: self.slider_hip.set_value(params['hip_widen'])
+        
+        if 'show_body_debug' in params: 
+            self.chk_body_debug.setChecked(bool(params['show_body_debug']))
+
+        # 내부 변수 동기화
+        self.current_params.update(params)
+
+        # 차단 해제
+        self.chk_body_debug.blockSignals(False)
+        self.slider_hip.blockSignals(False)
+        self.slider_waist.blockSignals(False)
+        self.slider_ribcage.blockSignals(False)
+        self.slider_shoulder.blockSignals(False)
+        self.slider_head.blockSignals(False)
+        self.slider_chin.blockSignals(False)
+        self.slider_eye.blockSignals(False)
+        self.blockSignals(False)
+        
+        # 워커에게 "설정값 바뀌었어"라고 한번 알려주는게 좋음
         self.paramChanged.emit(self.current_params)

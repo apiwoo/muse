@@ -71,3 +71,11 @@ class ModernSlider(QWidget):
 
     def value(self):
         return self.slider.value() / 100.0
+
+    def set_value(self, float_val):
+        """[New] 외부에서 값을 강제로 변경 (라벨 업데이트 포함)"""
+        # 시그널 루프 방지는 부모(Panel)에서 처리하거나 여기서 blockSignals 사용
+        # 여기서는 단순히 값만 바꿈
+        int_val = int(max(0.0, min(1.0, float_val)) * 100)
+        self.slider.setValue(int_val)
+        self.value_label.setText(f"{float_val:.2f}")
