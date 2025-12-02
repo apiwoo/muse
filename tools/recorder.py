@@ -16,8 +16,9 @@ try:
     HAS_PYGRABBER = True
 except ImportError:
     HAS_PYGRABBER = False
-    print("⚠️ 'pygrabber' 모듈이 없습니다. 카메라 이름 대신 ID만 표시됩니다.")
-    print("   (설치 권장: pip install pygrabber)")
+    print("\n⚠️ [경고] 'pygrabber' 모듈이 설치되지 않았습니다.")
+    print("   -> 현재 카메라가 'Camera Device 0'과 같이 숫자로만 표시됩니다.")
+    print("   -> 실제 이름(예: Logitech C920)을 보려면 'pip install pygrabber'를 설치하세요.")
 
 class DataRecorder:
     def __init__(self, output_dir="recorded_data"):
@@ -111,6 +112,9 @@ class DataRecorder:
         
         # pygrabber가 없거나 실패한 경우, 단순 ID 스캔 (0~5번 시도)
         if not cameras:
+            if not HAS_PYGRABBER:
+                print("\n💡 [Info] 카메라 이름이 안 보이나요? 'pip install pygrabber'를 해보세요.")
+                
             for i in range(5):
                 cap = cv2.VideoCapture(i)
                 if cap.isOpened():

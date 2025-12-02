@@ -3,13 +3,14 @@ import subprocess
 import os
 
 # ==============================================================================
-# [Project MUSE] Environment Setup Script (v7.0 Integrated: Fix_Env + Distillation)
+# [Project MUSE] Environment Setup Script (v7.1 Integrated: Camera Name Support)
 # 
 # Target Hardware: NVIDIA RTX 3060 (12GB) or Higher
 # Core Philosophy: "Visual Supremacy on Mode A"
 #
-# v7.0 Update:
-# - [Critical] Merged 'tools/fix_env.py' logic into setup.
+# v7.1 Update:
+# - Added 'pygrabber' for Windows Camera Device Name Detection.
+# - Merged 'tools/fix_env.py' logic into setup.
 # - Enforced strict version pinning for TensorRT (10.0.1) & ONNXRuntime (1.16.0).
 # - Added 'segment-anything' for Teacher Model Pipeline.
 # ==============================================================================
@@ -52,7 +53,7 @@ def install_pytorch_cuda():
 
 def main():
     print("============================================================")
-    print("   Project MUSE - Environment Setup (v7.0 Final)")
+    print("   Project MUSE - Environment Setup (v7.1 Final)")
     print("============================================================")
     
     # 1. 기존 충돌 패키지 정리 (fix_env.py 로직 반영)
@@ -81,6 +82,9 @@ def main():
         "pyqtdarktheme",
         "nvidia-cudnn-cu12", # cuDNN 9.x Support
         
+        # [New] Windows Camera Name Detection (For Recorder)
+        "pygrabber",
+
         # [Fix_Env Reflection] Strict Versions for Stability
         # fix_env.py에서 검증된 버전들을 강제합니다.
         "onnx==1.14.0",
