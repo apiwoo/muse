@@ -9,13 +9,14 @@ import math
 import os
 
 # [Change] Smart Import: Try TensorRT first, then PyTorch
+# 'src.' prefix removed for compatibility when running from src/main.py
 try:
-    from src.ai.distillation.student.inference_trt import StudentInferenceTRT
+    from ai.distillation.student.inference_trt import StudentInferenceTRT
     TRT_AVAILABLE = True
 except ImportError:
     TRT_AVAILABLE = False
 
-from src.ai.distillation.student.inference import StudentInference
+from ai.distillation.student.inference import StudentInference
 
 # ==============================================================================
 # [Core Algorithm] OneEuro Filter Implementation

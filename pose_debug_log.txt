@@ -1,0 +1,18 @@
+=== Final COCO Pose Log ===
+0    Nose       1262   0      IN
+1    L-Eye      1334   0      IN
+2    R-Eye      1226   0      IN
+3    L-Ear      1407   0      IN
+4    R-Ear      1153   0      IN
+5    L-Shldr    1552   326    IN
+6    R-Shldr    1008   299    IN
+7    L-Elbow    1624   788    IN
+8    R-Elbow    972    843    IN
+9    L-Wrist    1624   1196   IN
+10   R-Wrist    972    1223   IN
+11   L-Hip      1443   1115   IN
+12   R-Hip      1117   1115   IN
+13   L-Knee     1443   1686   IN
+14   R-Knee     1117   1686   IN
+15   L-Ankle    1368   1523   IN
+16   R-Ankle    1214   1536   IN

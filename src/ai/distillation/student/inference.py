@@ -11,7 +11,8 @@ import sys
 # 프로젝트 루트 경로 확보
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
 
-from src.ai.distillation.student.model_arch import MuseStudentModel
+# [Change] 'src.' prefix removed
+from ai.distillation.student.model_arch import MuseStudentModel
 
 class StudentInference:
     def __init__(self, model_path=None):
