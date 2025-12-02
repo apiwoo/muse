@@ -1,24 +1,43 @@
-Project MUSE - File Structure (v7.0 TRT Optimized)
+Project MUSE - File Structure (v8.0 Multi-Cam Support)
 
 MUSE_Project/
+├── recorded_data/              # [Data Lake]
+│   └── personal_data/          # [Root Session] (고정 경로)
+│       ├── front/              # [Profile 1: 정면 캠]
+│       │   ├── background.jpg
+│       │   ├── train_video_01.mp4
+│       │   ├── images/
+│       │   ├── masks/
+│       │   └── labels/
+│       │
+│       ├── top/                # [Profile 2: 항공 캠]
+│       │   ├── background.jpg
+│       │   ├── train_video_01.mp4
+│       │   └── ...
+│       │
+│       └── ... (사용자 정의 프로파일)
+│
 ├── assets/                     # [Resource Layer]
 │   ├── models/
-│   │   ├── tracking/           # [Teacher B] ViTPose-Huge (TRT Engine)
-│   │   ├── segment_anything/   # [Teacher A] SAM ViT-Huge (Original Weights)
-│   │   ├── personal/           # [Student] 학습된 모델 (.pth) 및 최적화된 엔진 (.engine)
-│   │   └── tensorrt_cache/     # RTX 3060용 최적화 엔진 캐시
+│   │   ├── tracking/           # [Teacher] ViTPose (Common)
+│   │   ├── segment_anything/   # [Teacher] SAM (Common)
+│   │   ├── personal/           # [Student] 개인화 모델 저장소
+│   │   │   ├── student_front.pth     # 정면용 모델
+│   │   │   ├── student_front.engine  # 정면용 엔진 (TRT)
+│   │   │   ├── student_top.pth       # 항공용 모델
+│   │   │   ├── student_top.engine    # 항공용 엔진 (TRT)
+│   │   │   └── backup/               # 모델 백업 보관소
+│   │   │
+│   │   └── tensorrt_cache/
 │   │
-│   ├── shaders/                # [Visual Core]
-│   │   ├── core/               # YUV->RGB 변환
-│   │   ├── beauty/             # [Main] 뷰티 & 왜곡 보정 엔진
-│   │   │   ├── relighting.glsl       # 3D 조명
-│   │   │   ├── warping.glsl          # [Key] 마스크 기반 격자 성형
-│   │   │   ├── skin_smooth.glsl      # 피부 보정
-│   │   │   └── background_fill.glsl  # [Key] 빈 배경 채우기 (Inpainting)
-│   │   └── post/               # [Post] Upscaling
-│   │
-│   ├── textures/               # 4K Normal Maps, LUTs
-│   └── presets/                # 사용자별 프리셋
+│   └── shaders/                # [Visual Core]
+│       ├── core/               # YUV->RGB 변환
+│       ├── beauty/             # [Main] 뷰티 & 왜곡 보정 엔진
+│       │   ├── relighting.glsl       # 3D 조명
+│       │   ├── warping.glsl          # [Key] 마스크 기반 격자 성형
+│       │   ├── skin_smooth.glsl      # 피부 보정
+│       │   └── background_fill.glsl  # [Key] 빈 배경 채우기 (Inpainting)
+│       └── post/               # [Post] Upscaling
 │
 ├── src/                        # [Source Code]
 │   ├── main.py                 # 앱 엔트리 (배경 리셋 키 'B' 연결)
@@ -44,7 +63,7 @@ MUSE_Project/
 │   │       │   ├── inference.py      # PyTorch 추론 (Fallback용)
 │   │       │   └── inference_trt.py  # [New] TensorRT 초고속 추론 (Main)
 │   │       │
-│   │       └── trainer.py      # 학습 루프
+│   │       └── trainer.py      # [Updated] 다중 프로파일 학습 지원
 │   │
 │   ├── graphics/               # [Visuals Layer]
 │   │   ├── renderer.py         # OpenGL Context
@@ -62,15 +81,15 @@ MUSE_Project/
 │       └── config.py
 │
 ├── tools/                      # [Utilities]
-│   ├── convert_student_to_trt.py # [New] Student 모델 최적화 (.pth -> .engine)
+│   ├── convert_student_to_trt.py # [Updated] 다중 모델 변환기 (예정)
 │   ├── download_models.py      # 모델 다운로더
-│   ├── recorder.py             # [Data] 데이터 수집기
+│   ├── recorder.py             # [Updated] 프로파일 및 카메라 선택, 백업
 │   ├── test_sam.py             # [Test] SAM 테스트
 │   ├── trt_converter.py        # [Teacher] ViTPose TRT 변환
 │   ├── fix_env.py              # 환경 복구
 │   │
 │   └── auto_labeling/          # [Pipeline]
-│       ├── run_labeling.py     # 배치 작업 실행
+│       ├── run_labeling.py     # [Updated] 프로파일별 일괄 처리
 │       └── verify_data.py      # 데이터 검수
 │
 ├── libs/                       # [Portable] NVIDIA DLLs (cudnn, etc.)
