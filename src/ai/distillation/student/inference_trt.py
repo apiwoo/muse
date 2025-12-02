@@ -89,7 +89,7 @@ class StudentInferenceTRT:
                 binding_info = {
                     'name': name,
                     'mem': gpu_mem,
-                    'shape': shape
+                    'shape': shape # [Modification] Shape 정보 저장
                 }
             else:
                 # Fallback implementation omitted for brevity, assuming CuPy exists as per check_gpu
@@ -138,15 +138,42 @@ class StudentInferenceTRT:
             seg_mem = None
             pose_mem = None
             
+            seg_shape = (1, 512, 512) # Default shape
+            pose_shape = (17, 128, 128) # Default shape
+
             for out in self.outputs:
-                if 'seg' in out['name']: seg_mem = out['mem']
-                elif 'pose' in out['name']: pose_mem = out['mem']
+                if 'seg' in out['name']: 
+                    seg_mem = out['mem']
+                    seg_shape = out['shape']
+                elif 'pose' in out['name']: 
+                    pose_mem = out['mem']
+                    pose_shape = out['shape']
             
-            if seg_mem is None: seg_mem = self.outputs[0]['mem']
-            if pose_mem is None: pose_mem = self.outputs[1]['mem']
+            if seg_mem is None: 
+                seg_mem = self.outputs[0]['mem']
+                seg_shape = self.outputs[0]['shape']
+            if pose_mem is None: 
+                pose_mem = self.outputs[1]['mem']
+                pose_shape = self.outputs[1]['shape']
 
             # --- Segmentation ---
-            seg_logits = seg_mem.reshape(1, 512, 512)
+            # [Modification] 하드코딩 제거: 실제 텐서 크기 기반으로 reshape
+            # TensorRT Shape (Batch, Channel, Height, Width) or similar
+            # Assuming standard layout, we use the stored shape.
+            # remove batch dimension if present (e.g. (1, 1, 512, 512) -> (1, 512, 512))
+            
+            # Simple fallback reshape logic if tuple has batch dim
+            valid_seg_shape = []
+            for s in seg_shape:
+                if s > 1 or (s == 1 and len(valid_seg_shape) < 3): 
+                   valid_seg_shape.append(s)
+            
+            # Ensure it matches expected logic (CHW)
+            if len(valid_seg_shape) == 3:
+                seg_logits = seg_mem.reshape(valid_seg_shape)
+            else:
+                seg_logits = seg_mem.reshape(1, 512, 512) # Fallback
+
             # Sigmoid using CuPy
             mask_prob = 1.0 / (1.0 + cp.exp(-seg_logits))
             mask_bin = (mask_prob > 0.5).astype(cp.uint8) * 255
@@ -156,7 +183,17 @@ class StudentInferenceTRT:
             mask_final = cv2.resize(mask_cpu, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
 
             # --- Pose ---
-            heatmaps = pose_mem.reshape(17, 128, 128)
+            # Remove Batch dim
+            valid_pose_shape = []
+            for s in pose_shape:
+                if s > 1 or (s == 1 and len(valid_pose_shape) < 3):
+                    valid_pose_shape.append(s)
+
+            if len(valid_pose_shape) == 3:
+                 heatmaps = pose_mem.reshape(valid_pose_shape)
+            else:
+                 heatmaps = pose_mem.reshape(17, 128, 128) # Fallback
+
             # Heatmaps are still on GPU, need to find max location
             # For simplicity, download heatmaps to CPU for parsing (Parsing is cheap)
             heatmaps_cpu = cp.asnumpy(heatmaps)

@@ -11,7 +11,7 @@ import signal
 
 # [PySide6 GUI Framework]
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QThread, Signal, Slot, Qt
+from PySide6.QtCore import QThread, Signal, Slot, Qt, QMutex, QMutexLocker
 import qdarktheme
 
 # [System Path Setup]
@@ -49,6 +49,7 @@ class BeautyWorker(QThread):
         super().__init__()
         self.running = True
         self.should_reset_bg = False
+        self.param_mutex = QMutex() # [Safety] 데이터 경쟁 방지용 뮤텍스
         
         # 1. Profile System 초기화
         self.profile_mgr = ProfileManager()
@@ -112,7 +113,8 @@ class BeautyWorker(QThread):
             self.beauty_engine.set_profile(self.current_profile_name)
             
             # UI에 초기 슬라이더 값 전송
-            self.slider_sync_requested.emit(self.params)
+            with QMutexLocker(self.param_mutex):
+                self.slider_sync_requested.emit(self.params)
             
         except Exception as e:
             print(f"❌ [Worker] 초기화 중 치명적 오류: {e}")
@@ -154,10 +156,15 @@ class BeautyWorker(QThread):
             # Body Tracking (Student Model)
             body_landmarks = self.body_tracker.process(frame_cpu_ai) if self.body_tracker else None
 
+            # [Safety] 파라미터 복사 (렌더링 중 변경 방지)
+            current_params = {}
+            with QMutexLocker(self.param_mutex):
+                current_params = self.params.copy()
+
             # [Step 3] Rendering (GPU)
             if self.beauty_engine:
                 frame_out_gpu = self.beauty_engine.process(
-                    frame_gpu, faces, body_landmarks, self.params, 
+                    frame_gpu, faces, body_landmarks, current_params, 
                     mask=self.body_tracker.get_mask()
                 )
             else:
@@ -172,7 +179,7 @@ class BeautyWorker(QThread):
             frame_out_cpu = frame_out_gpu.get() if hasattr(frame_out_gpu, 'get') else frame_out_gpu
             
             # 디버그: 뼈대 그리기 옵션이 켜져있으면 그리기
-            if self.params.get('show_body_debug', False) and self.body_tracker:
+            if current_params.get('show_body_debug', False) and self.body_tracker:
                 frame_out_cpu = self.body_tracker.draw_debug(frame_out_cpu, body_landmarks)
             
             self.frame_processed.emit(frame_out_cpu)
@@ -213,13 +220,15 @@ class BeautyWorker(QThread):
 
     def save_current_config(self):
         """현재 활성화된 프로파일의 설정을 JSON에 저장"""
-        self.profile_mgr.update_params(self.current_profile_name, self.params)
+        with QMutexLocker(self.param_mutex):
+            self.profile_mgr.update_params(self.current_profile_name, self.params)
         print(f"💾 [{self.current_profile_name}] 설정 저장됨.")
 
     @Slot(dict)
     def update_params(self, new_params):
         """UI 슬라이더가 움직일 때마다 호출되어 파라미터 갱신"""
-        self.params = new_params.copy()
+        with QMutexLocker(self.param_mutex):
+            self.params = new_params.copy()
 
     @Slot()
     def reset_background(self):
@@ -253,8 +262,11 @@ class BeautyWorker(QThread):
         
         # 3. 새 설정 로드
         new_config = self.profile_mgr.get_config(target_profile)
-        self.params = new_config.get("params", {}).copy()
+        
         target_cam_id = new_config.get("camera_id", 0)
+        
+        with QMutexLocker(self.param_mutex):
+            self.params = new_config.get("params", {}).copy()
         
         # 4. 컴포넌트 스위칭 (Instant Switch)
         self.input_mgr.select_camera(target_cam_id)
@@ -262,7 +274,8 @@ class BeautyWorker(QThread):
         self.beauty_engine.set_profile(target_profile)
         
         # 5. UI 동기화 요청 (역방향 시그널) -> 슬라이더가 자동으로 움직임
-        self.slider_sync_requested.emit(self.params)
+        with QMutexLocker(self.param_mutex):
+            self.slider_sync_requested.emit(self.params)
 
     def stop(self):
         self.running = False
@@ -325,10 +338,11 @@ def main():
     # 앱 루프 실행
     app.exec()
     
-    # 종료 처리
+    # [Safety] 종료 절차 개선
+    print("🛑 [Main] Stopping worker thread...")
     worker.stop()
-    worker.wait(2000)
-    os._exit(0)
+    worker.wait() # 스레드가 완전히 종료될 때까지 대기
+    print("✅ [Main] Worker stopped. Exiting.")
 
 if __name__ == "__main__":
     main()

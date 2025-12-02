@@ -12,9 +12,11 @@ try:
     import cupy as cp
     HAS_CUDA = True
 except ImportError:
+    # [Safety] 강제 종료 대신 예외 발생
     print("[Critical] CuPy not found. GPU acceleration unavailable.")
     HAS_CUDA = False
-    sys.exit(1)
+    # sys.exit(1) -> raise RuntimeError
+    raise RuntimeError("CuPy library not found. Please run 'pip install cupy-cuda12x'.")
 
 class InputManager:
     def __init__(self, camera_indices=[0], width=1920, height=1080, fps=30):
@@ -51,6 +53,7 @@ class InputManager:
                 print("❌ Failed")
 
         if not self.caps:
+            # [Safety] 강제 종료 대신 예외 발생
             raise RuntimeError("❌ 연결된 카메라가 하나도 없습니다.")
 
         print(f"✨ [InputManager] 활성 카메라: ID {self.active_id}")

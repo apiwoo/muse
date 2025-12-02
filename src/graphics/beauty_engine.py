@@ -530,6 +530,7 @@ class BeautyEngine:
     # [Reshaping Helpers]
     # ==========================================================
     def _collect_shoulder_params(self, keypoints, strength):
+        if len(keypoints) < 17: return # [Safety] 인덱스 초과 방지
         l_sh, r_sh = keypoints[5], keypoints[6]
         width = np.linalg.norm(l_sh - r_sh)
         if width < 3: return
@@ -540,6 +541,7 @@ class BeautyEngine:
         self._add_param(r_sh, radius, s, mode=1, vector=(center-r_sh))
 
     def _collect_ribcage_params(self, keypoints, strength):
+        if len(keypoints) < 17: return # [Safety] 인덱스 초과 방지
         l_sh, r_sh = keypoints[5], keypoints[6]
         l_hip, r_hip = keypoints[11], keypoints[12]
         l_rib = l_sh * 0.65 + l_hip * 0.35
@@ -553,6 +555,7 @@ class BeautyEngine:
         self._add_param(r_rib, radius, s, mode=1, vector=(center-r_rib))
 
     def _collect_waist_params(self, keypoints, strength):
+        if len(keypoints) < 17: return # [Safety] 인덱스 초과 방지
         l_sh, r_sh = keypoints[5], keypoints[6]
         l_hip, r_hip = keypoints[11], keypoints[12]
         l_waist = l_sh * 0.4 + l_hip * 0.6
@@ -566,6 +569,7 @@ class BeautyEngine:
         self._add_param(r_waist, radius, s, mode=1, vector=(center-r_waist))
 
     def _collect_hip_params(self, keypoints, strength):
+        if len(keypoints) < 17: return # [Safety] 인덱스 초과 방지
         l_hip, r_hip = keypoints[11], keypoints[12]
         width = np.linalg.norm(l_hip - r_hip)
         if width < 3: return
