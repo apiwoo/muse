@@ -1,5 +1,5 @@
 # Project MUSE - train_student.py
-# Multi-Profile Training Engine (High-Fidelity Edition)
+# Multi-Profile Training Engine (High-Fidelity & Robust Overfitting & Distillation)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -8,6 +8,7 @@ import json
 import glob
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import cv2
 import numpy as np
@@ -15,15 +16,77 @@ import shutil
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
+# [Plan A] Robust Overfitting: Augmentation Library
+try:
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
+    HAS_ALBUMENTATIONS = True
+except ImportError:
+    HAS_ALBUMENTATIONS = False
+    print("⚠️ [Trainer] 'albumentations' 라이브러리가 없습니다. 데이터 증강이 비활성화됩니다.")
+    print("   -> pip install albumentations")
+
 # [MUSE Modules]
 # Ensure path is added for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 from src.ai.distillation.student.model_arch import MuseStudentModel
 
-class MuseDataset(Dataset):
-    def __init__(self, profile_dir, input_size=(960, 544), heatmap_size=(960, 544)):
+# [Plan A] Custom Dice Loss for Boundary Precision
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        # pred: sigmoid가 적용된 확률값 (B, 1, H, W)
+        # target: 0 or 1 (B, 1, H, W)
+        pred = pred.contiguous()
+        target = target.contiguous()
+
+        intersection = (pred * target).sum(dim=2).sum(dim=2)
+        
+        loss = (1 - ((2. * intersection + self.smooth) / (pred.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + self.smooth)))
+        return loss.mean()
+
+# [Quality Upgrade] Knowledge Distillation Loss (Soft Labeling)
+class DistillationLoss(nn.Module):
+    def __init__(self, alpha=0.5, temperature=1.0):
         """
-        [High-Fidelity Dataset]
+        :param alpha: Soft Label의 가중치 (0.0 ~ 1.0)
+        :param temperature: Softening 강도 (높을수록 분포가 평탄해짐)
+        """
+        super(DistillationLoss, self).__init__()
+        self.alpha = alpha
+        self.T = temperature
+        self.bce_soft = nn.BCEWithLogitsLoss() # For Soft Targets (0~1)
+        self.bce_hard = nn.BCEWithLogitsLoss() # For Hard Targets (0 or 1)
+        self.mse = nn.MSELoss() # For Heatmaps
+
+    def forward(self, student_seg, student_pose, soft_mask, hard_mask, soft_heatmap):
+        """
+        Segmentation: Soft Label(Blur) + Hard Label(Binary) 혼합 학습
+        Pose: Confidence가 반영된 Soft Heatmap 학습 (MSE)
+        """
+        # 1. Segmentation Loss
+        # Hard Loss: 정답을 맞추는 능력
+        loss_seg_hard = self.bce_hard(student_seg, hard_mask)
+        
+        # Soft Loss: 경계면의 불확실성(Gradient)을 배우는 능력
+        # Teacher의 Logits 대신 Smoothed Mask를 Soft Target으로 사용
+        loss_seg_soft = self.bce_soft(student_seg, soft_mask)
+        
+        loss_seg_total = self.alpha * loss_seg_soft + (1.0 - self.alpha) * loss_seg_hard
+
+        # 2. Pose Loss (Regression)
+        # Heatmap은 이미 Confidence가 반영된 Soft Target이므로 MSE 사용
+        loss_pose = self.mse(student_pose, soft_heatmap) * 10000.0 # Scale Up
+
+        return loss_seg_total + loss_pose
+
+class MuseDataset(Dataset):
+    def __init__(self, profile_dir, input_size=(960, 544), heatmap_size=(960, 544), is_train=True):
+        """
+        [High-Fidelity Dataset with Augmentation & Soft Labels]
         - Input: 960x544 (Half-HD, 16:9)
         - Heatmap: 960x544 (1:1 Scale for ResNet-UNet)
         """
@@ -32,9 +95,41 @@ class MuseDataset(Dataset):
         self.label_dir = os.path.join(profile_dir, "labels")
         self.input_size = input_size
         self.heatmap_size = heatmap_size
+        self.is_train = is_train
         
         self.img_files = sorted(glob.glob(os.path.join(self.img_dir, "*.jpg")))
         print(f"   📂 [Dataset] 로드된 샘플 수: {len(self.img_files)}장 (Res: {input_size})")
+
+        # [Plan A] Define Augmentation Pipeline
+        # 강건한 개인화 모델을 위해 형태적 특징은 유지하되 픽셀값 변화를 줌
+        if HAS_ALBUMENTATIONS and self.is_train:
+            self.transform = A.Compose([
+                # 1. 색상 변화 (옷 색깔이 미세하게 바뀔 때 대응)
+                A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.5),
+                
+                # 2. 밝기/대비 (조명 변화 대응)
+                A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.5),
+                
+                # 3. 미세한 기하학적 변형 (자세 틀어짐 대응)
+                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=10, p=0.5, border_mode=cv2.BORDER_CONSTANT),
+                
+                # 4. 노이즈 (웹캠 화질 저하 대응)
+                A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+                
+                # 5. 최종 리사이즈 (항상 마지막에)
+                A.Resize(height=input_size[1], width=input_size[0]),
+                
+                # 6. 텐서 변환 및 정규화
+                A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+                ToTensorV2()
+            ], additional_targets={'mask': 'image', 'keypoints': 'keypoints'})
+        else:
+            # 검증용 혹은 라이브러리 없을 때: 단순 리사이즈만
+            self.transform = A.Compose([
+                A.Resize(height=input_size[1], width=input_size[0]),
+                A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+                ToTensorV2()
+            ], additional_targets={'mask': 'image', 'keypoints': 'keypoints'})
 
     def __len__(self):
         return len(self.img_files)
@@ -45,7 +140,7 @@ class MuseDataset(Dataset):
         mask_path = os.path.join(self.mask_dir, f"{basename}.png")
         label_path = os.path.join(self.label_dir, f"{basename}.json")
 
-        # 1. Image Load & Resize
+        # 1. Image Load
         img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h_orig, w_orig = img.shape[:2]
@@ -57,45 +152,88 @@ class MuseDataset(Dataset):
             mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
 
         # 3. Keypoints Load
-        keypoints = []
+        # Albumentations requires format: list of [x, y]
+        kpts_coord = []
+        kpts_conf = []
+        
         if os.path.exists(label_path):
-            with open(label_path, 'r') as f:
+             with open(label_path, 'r') as f:
                 data = json.load(f)
-                keypoints = np.array(data['keypoints'])
+                for kp in data['keypoints']:
+                    kpts_coord.append([kp[0], kp[1]])
+                    kpts_conf.append(kp[2])
         
-        # 4. Resize (High Quality Cubic for Image, Nearest for Mask)
-        img_resized = cv2.resize(img, self.input_size, interpolation=cv2.INTER_LINEAR)
-        mask_resized = cv2.resize(mask, self.input_size, interpolation=cv2.INTER_NEAREST)
-        
-        # 5. To Tensor & Normalize
-        img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        img_tensor = (img_tensor - mean) / std
+        try:
+            if HAS_ALBUMENTATIONS:
+                transformed = self.transform(
+                    image=img, 
+                    mask=mask, 
+                    keypoints=kpts_coord
+                )
+                img_tensor = transformed['image']
+                
+                # Mask Processing
+                raw_mask = transformed['mask'] # (H, W) uint8
+                
+                # Hard Mask (Binary)
+                mask_tensor = raw_mask.float().unsqueeze(0) / 255.0
+                hard_mask_tensor = (mask_tensor > 0.5).float()
+                
+                # [Quality] Soft Mask (Label Smoothing)
+                # 경계면을 부드럽게 만들어 Teacher의 'Soft Label' 효과를 냄
+                # Gaussian Blur 적용 후 Tensor 변환
+                soft_mask_cv = cv2.GaussianBlur(raw_mask.numpy(), (5, 5), 0)
+                soft_mask_tensor = torch.from_numpy(soft_mask_cv).float().unsqueeze(0) / 255.0
+                
+                transformed_kpts = transformed['keypoints']
+            else:
+                # Fallback implementation (Manual Resize)
+                img_resized = cv2.resize(img, self.input_size)
+                mask_resized = cv2.resize(mask, self.input_size, interpolation=cv2.INTER_NEAREST)
+                
+                img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
+                mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                img_tensor = (img_tensor - mean) / std
+                
+                mask_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0) / 255.0
+                hard_mask_tensor = (mask_tensor > 0.5).float()
+                soft_mask_tensor = mask_tensor # No blur fallback
+                
+                scale_x = self.input_size[0] / w_orig
+                scale_y = self.input_size[1] / h_orig
+                transformed_kpts = []
+                for kp in kpts_coord:
+                    transformed_kpts.append([kp[0] * scale_x, kp[1] * scale_y])
 
-        mask_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0) / 255.0
-        mask_tensor = (mask_tensor > 0.5).float() # Binary Mask
-
-        # 6. Generate Heatmaps (High-Res)
-        # ResNet-UNet outputs 1/1 scale heatmaps now
-        heatmaps = np.zeros((17, self.heatmap_size[1], self.heatmap_size[0]), dtype=np.float32)
-        
-        if len(keypoints) > 0:
-            scale_x = self.heatmap_size[0] / w_orig
-            scale_y = self.heatmap_size[1] / h_orig
+            # 4. Generate Confidence-Aware Heatmaps (High-Res)
+            # Soft Labeling: Use confidence as peak value
+            heatmaps = np.zeros((17, self.heatmap_size[1], self.heatmap_size[0]), dtype=np.float32)
             
-            # Sigma should be larger for high-res heatmaps to be visible/trainable
-            target_sigma = 3.0 
+            num_kpts = min(len(transformed_kpts), len(kpts_conf))
             
-            for k_idx, (x, y, conf) in enumerate(keypoints):
-                if conf > 0.4:
-                    hx, hy = int(x * scale_x), int(y * scale_y)
-                    self._add_gaussian(heatmaps[k_idx], hx, hy, sigma=target_sigma)
+            for i in range(num_kpts):
+                x, y = transformed_kpts[i]
+                conf = kpts_conf[i]
+                
+                # Check bounds
+                if conf > 0.2 and 0 <= x < self.heatmap_size[0] and 0 <= y < self.heatmap_size[1]:
+                    # [Quality] Peak를 1.0이 아닌 conf로 설정하여 '확신' 정도를 학습
+                    self._add_gaussian(heatmaps[i], int(x), int(y), sigma=3.0, peak=conf)
 
-        heatmap_tensor = torch.from_numpy(heatmaps)
-        return img_tensor, mask_tensor, heatmap_tensor
+            heatmap_tensor = torch.from_numpy(heatmaps)
+            return img_tensor, soft_mask_tensor, hard_mask_tensor, heatmap_tensor
 
-    def _add_gaussian(self, heatmap, x, y, sigma=3):
+        except Exception as e:
+            # Augmentation 실패 시 안전 리턴
+            # print(f"⚠️ Augmentation Error at {basename}: {e}")
+            empty_img = torch.zeros((3, self.input_size[1], self.input_size[0]))
+            empty_mask = torch.zeros((1, self.input_size[1], self.input_size[0]))
+            empty_hm = torch.zeros((17, self.heatmap_size[1], self.heatmap_size[0]))
+            return empty_img, empty_mask, empty_mask, empty_hm
+
+
+    def _add_gaussian(self, heatmap, x, y, sigma=3, peak=1.0):
         h, w = heatmap.shape
         tmp_size = sigma * 3
         mu_x = int(x + 0.5)
@@ -110,8 +248,10 @@ class MuseDataset(Dataset):
         y_vec = x_vec[:, np.newaxis]
         x0 = y0 = size // 2
         
-        # Vectorized Gaussian generation
         g = np.exp(- ((x_vec - x0) ** 2 + (y_vec - y0) ** 2) / (2 * sigma ** 2))
+        
+        # [Quality] Apply Confidence Peak
+        g = g * peak
         
         g_x = max(0, -ul[0]), min(br[0], w) - ul[0]
         g_y = max(0, -ul[1]), min(br[1], h) - ul[1]
@@ -153,8 +293,12 @@ class Trainer:
         
         self.epochs = epochs
         self.batch_size = batch_size
-        self.bce_loss = nn.BCEWithLogitsLoss()
-        self.mse_loss = nn.MSELoss()
+        
+        # [Plan A] Combined Loss Function
+        # DiceLoss for boundary precision
+        self.dice_loss = DiceLoss() 
+        # [Quality] Distillation Loss for Soft Learning
+        self.distill_loss = DistillationLoss(alpha=0.5, temperature=1.0)
 
     def train_all_profiles(self):
         if not self.profiles:
@@ -177,7 +321,7 @@ class Trainer:
         
         # Dataset & Dataloader
         try:
-            dataset = MuseDataset(profile_dir) # Uses new defaults 960x544
+            dataset = MuseDataset(profile_dir, is_train=True) # Uses new defaults 960x544
             if len(dataset) == 0:
                 print(f"   ⚠️ 데이터가 없어 건너뜁니다.")
                 return
@@ -185,7 +329,7 @@ class Trainer:
                 dataset, 
                 batch_size=self.batch_size, 
                 shuffle=True, 
-                num_workers=4, # Increased workers for high-res IO
+                num_workers=4, 
                 pin_memory=True
             )
         except Exception as e:
@@ -218,21 +362,29 @@ class Trainer:
             running_loss = 0.0
             pbar = tqdm(dataloader, desc=f"Ep {epoch+1}/{self.epochs}", leave=False)
             
-            for imgs, masks, heatmaps in pbar:
+            for imgs, soft_masks, hard_masks, heatmaps in pbar:
                 imgs = imgs.to(self.device)
-                masks = masks.to(self.device)
+                soft_masks = soft_masks.to(self.device)
+                hard_masks = hard_masks.to(self.device)
                 heatmaps = heatmaps.to(self.device)
                 
                 optimizer.zero_grad()
                 with torch.cuda.amp.autocast():
                     pred_seg, pred_pose = model(imgs)
                     
-                    # Loss Calculation
-                    loss_seg = self.bce_loss(pred_seg, masks)
-                    # MSE scale is smaller with larger maps, boost it
-                    loss_pose = self.mse_loss(pred_pose, heatmaps) * 10000 
+                    # [Quality] 1. Distillation Loss (Soft+Hard)
+                    loss_distill = self.distill_loss(
+                        pred_seg, pred_pose, 
+                        soft_masks, hard_masks, 
+                        heatmaps # heatmaps는 이미 Soft Target(Confidence 반영됨)
+                    )
                     
-                    total_loss = loss_seg + loss_pose
+                    # [Quality] 2. Dice Loss (Shape Consistency)
+                    # Dice는 Binary Mask와 비교하는 것이 형태 학습에 유리
+                    pred_seg_sigmoid = torch.sigmoid(pred_seg)
+                    loss_dice = self.dice_loss(pred_seg_sigmoid, hard_masks)
+                    
+                    total_loss = loss_distill + loss_dice
 
                 scaler.scale(total_loss).backward()
                 scaler.step(optimizer)
@@ -246,7 +398,6 @@ class Trainer:
             
             # Simple epoch summary
             avg_loss = running_loss / len(dataloader)
-            # print(f"   -> Ep {epoch+1} Loss: {avg_loss:.4f}")
 
         # Save
         if os.path.exists(model_path):

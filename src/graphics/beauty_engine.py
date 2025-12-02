@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# Optimized V13.1: Multi-Background Profile Support + Auto-Save
+# Optimized V14.0: Async Graphics (CUDA Stream) + Plan C
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -193,11 +193,11 @@ void composite_kernel(
 class BeautyEngine:
     def __init__(self, profiles=[]):
         """
-        [BeautyEngine V13.1] Multi-Background Profile Support
+        [BeautyEngine V14.0] Multi-Background + Async Graphics
         - profiles: 프로파일 이름 리스트
-        - 각 프로파일의 background.jpg를 미리 GPU에 로드합니다.
+        - [Plan C] CUDA Stream 도입으로 CPU/GPU 비동기 처리
         """
-        print("💄 [BeautyEngine] GPU 엔진 V13.1 (Multi-Profile BG + AutoSave)")
+        print("💄 [BeautyEngine] GPU 엔진 V14.0 (Async Stream Activated)")
         
         self.map_scale = 0.25 
         
@@ -228,6 +228,9 @@ class BeautyEngine:
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
         
         if HAS_CUDA:
+            # [Plan C] CUDA Stream 생성
+            self.stream = cp.cuda.Stream(non_blocking=True)
+            
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.update_bg_kernel = cp.RawKernel(UPDATE_BG_KERNEL_CODE, 'update_bg_kernel')
@@ -279,23 +282,28 @@ class BeautyEngine:
         
         print(f"🔄 [BeautyEngine] 배경 강제 리셋 ({self.active_profile})")
         
-        # 1. GPU 버퍼 갱신
-        if self.bg_gpu is not None:
-             # GPU to GPU or CPU to GPU
-             cp.copyto(self.bg_gpu, cp.asarray(frame) if not hasattr(frame, 'device') else frame)
-        else:
-            # 새로 할당
-            new_bg_gpu = cp.array(frame) if not hasattr(frame, 'device') else cp.copy(frame)
-            self.bg_gpu = new_bg_gpu
-            
-            if self.active_profile not in self.bg_buffers:
-                self.bg_buffers[self.active_profile] = {'cpu': None, 'gpu': None}
-            self.bg_buffers[self.active_profile]['gpu'] = new_bg_gpu
-            
-        self.has_bg = True
+        # [Plan C] Stream 동기화 (리셋은 중요하므로)
+        with self.stream:
+            # 1. GPU 버퍼 갱신
+            if self.bg_gpu is not None:
+                # GPU to GPU or CPU to GPU
+                cp.copyto(self.bg_gpu, cp.asarray(frame) if not hasattr(frame, 'device') else frame)
+            else:
+                # 새로 할당
+                new_bg_gpu = cp.array(frame) if not hasattr(frame, 'device') else cp.copy(frame)
+                self.bg_gpu = new_bg_gpu
+                
+                if self.active_profile not in self.bg_buffers:
+                    self.bg_buffers[self.active_profile] = {'cpu': None, 'gpu': None}
+                self.bg_buffers[self.active_profile]['gpu'] = new_bg_gpu
+                
+            self.has_bg = True
 
         # 2. [Auto-Save] 파일로 저장 (영구 반영)
         # GPU -> CPU Download needed for saving
+        # 스트림 대기 후 다운로드
+        self.stream.synchronize()
+        
         try:
             if hasattr(frame, 'device'):
                 frame_cpu = cp.asnumpy(frame)
@@ -322,194 +330,202 @@ class BeautyEngine:
 
         is_gpu_input = HAS_CUDA and hasattr(frame, 'device')
         
-        if is_gpu_input:
-            frame_gpu = frame 
-            h, w = frame.shape[:2]
-        else:
-            h, w = frame.shape[:2]
-            if HAS_CUDA:
+        # [Plan C] Stream Context
+        # GPU 연산들을 스트림에 태워서 비동기 실행
+        if not HAS_CUDA:
+            return frame
+
+        with self.stream:
+            if is_gpu_input:
+                frame_gpu = frame 
+                h, w = frame.shape[:2]
+            else:
+                h, w = frame.shape[:2]
                 frame_gpu = cp.asarray(frame)
+
+            # 그리드/버퍼 초기화 (해상도 변경 시)
+            if self.cache_w != w or self.cache_h != h:
+                self.cache_w, self.cache_h = w, h
+                self.gpu_initialized = False
+                self.prev_gpu_dx = None 
+                self.prev_gpu_dy = None
+                self.prev_face_center = None
+                self.prev_body_center = None
+                
+                # 해상도가 확정되었으므로 배경 버퍼 GPU 할당
+                self._init_bg_buffers(w, h, frame_gpu)
+
+            sw, sh = int(w * self.map_scale), int(h * self.map_scale)
+            
+            if not self.gpu_initialized:
+                self.gpu_dx = cp.zeros((sh, sw), dtype=cp.float32)
+                self.gpu_dy = cp.zeros((sh, sw), dtype=cp.float32)
+                self.gpu_initialized = True
+
+            # 현재 프로파일의 배경 버퍼 가져오기 (없으면 프레임 복사)
+            if self.bg_gpu is None:
+                if self.active_profile in self.bg_buffers and self.bg_buffers[self.active_profile]['gpu'] is not None:
+                    self.bg_gpu = self.bg_buffers[self.active_profile]['gpu']
+                    self.has_bg = True
+                else:
+                    # 없으면 현재 프레임으로 초기화
+                    self.bg_gpu = cp.copy(frame_gpu)
+                    if self.active_profile not in self.bg_buffers:
+                        self.bg_buffers[self.active_profile] = {'cpu':None, 'gpu':None}
+                    self.bg_buffers[self.active_profile]['gpu'] = self.bg_gpu
+                    self.has_bg = True
+
+            self.warp_params.clear() 
+            has_deformation = False
+            
+            # [V12.0] 마스크 준비 (GPU)
+            mask_gpu = None
+            use_bg = 0
+            if self.has_bg and mask is not None:
+                if hasattr(mask, 'device'): 
+                    mask_gpu = mask
+                else:
+                    mask_gpu = cp.asarray(mask)
+                use_bg = 1
             else:
-                return frame 
+                mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
 
-        # 그리드/버퍼 초기화 (해상도 변경 시)
-        if self.cache_w != w or self.cache_h != h:
-            self.cache_w, self.cache_h = w, h
-            self.gpu_initialized = False
-            self.prev_gpu_dx = None 
-            self.prev_gpu_dy = None
-            self.prev_face_center = None
-            self.prev_body_center = None
+            # =================================================================
+            # [V12.0 Core] Self-Healing Background Update
+            # =================================================================
+            if use_bg == 1:
+                block_dim = (32, 32)
+                grid_dim = ((w + block_dim[0] - 1) // block_dim[0], 
+                            (h + block_dim[1] - 1) // block_dim[1])
+                
+                self.update_bg_kernel(
+                    grid_dim, block_dim,
+                    (frame_gpu, mask_gpu, self.bg_gpu, w, h, self.bg_learning_rate)
+                )
+
+            # =================================================================
+            # Smart Smooth Logic
+            # =================================================================
+            # Note: Velocity calculation happens on CPU side (using landmarks)
+            # This part is light enough to stay sync, or we accept CPU wait.
+            # Landmarks are on CPU anyway.
+            max_velocity = 0.0
             
-            # 해상도가 확정되었으므로 배경 버퍼 GPU 할당
-            self._init_bg_buffers(w, h, frame_gpu)
+            # Face Velocity
+            current_face_center = None
+            if faces:
+                current_face_center = np.mean(faces[0].landmarks, axis=0)
+                if self.prev_face_center is not None:
+                    face_vel = np.linalg.norm(current_face_center - self.prev_face_center)
+                    max_velocity = max(max_velocity, face_vel)
+            
+            # Body Velocity
+            current_body_center = None
+            body_cpu = None
+            if body_landmarks is not None:
+                if hasattr(body_landmarks, 'get'): body_cpu = body_landmarks.get()
+                else: body_cpu = body_landmarks
+                valid_points = []
+                for idx in [5, 6, 11, 12]:
+                    if idx < len(body_cpu) and body_cpu[idx][2] > 0.4:
+                        valid_points.append(body_cpu[idx][:2])
+                if valid_points:
+                    current_body_center = np.mean(valid_points, axis=0)
+                    if self.prev_body_center is not None:
+                        body_vel = np.linalg.norm(current_body_center - self.prev_body_center)
+                        max_velocity = max(max_velocity, body_vel)
 
-        sw, sh = int(w * self.map_scale), int(h * self.map_scale)
-        
-        if not self.gpu_initialized:
-            self.gpu_dx = cp.zeros((sh, sw), dtype=cp.float32)
-            self.gpu_dy = cp.zeros((sh, sw), dtype=cp.float32)
-            self.gpu_initialized = True
-
-        # 현재 프로파일의 배경 버퍼 가져오기 (없으면 프레임 복사)
-        if self.bg_gpu is None:
-             if self.active_profile in self.bg_buffers and self.bg_buffers[self.active_profile]['gpu'] is not None:
-                 self.bg_gpu = self.bg_buffers[self.active_profile]['gpu']
-                 self.has_bg = True
-             else:
-                 # 없으면 현재 프레임으로 초기화
-                 self.bg_gpu = cp.copy(frame_gpu)
-                 if self.active_profile not in self.bg_buffers:
-                     self.bg_buffers[self.active_profile] = {'cpu':None, 'gpu':None}
-                 self.bg_buffers[self.active_profile]['gpu'] = self.bg_gpu
-                 self.has_bg = True
-
-        self.warp_params.clear() 
-        has_deformation = False
-        
-        # [V12.0] 마스크 준비 (GPU)
-        mask_gpu = None
-        use_bg = 0
-        if self.has_bg and mask is not None:
-            if hasattr(mask, 'device'): 
-                mask_gpu = mask
+            self.prev_face_center = current_face_center
+            self.prev_body_center = current_body_center
+            
+            min_vel, max_vel = 0.5, 6.0
+            max_alpha, min_alpha = 0.96, 0.15
+            target_alpha = max_alpha
+            if max_velocity <= min_vel: target_alpha = max_alpha
+            elif max_velocity >= max_vel: target_alpha = min_alpha
             else:
-                mask_gpu = cp.asarray(mask)
-            use_bg = 1
-        else:
-            mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
+                ratio = (max_velocity - min_vel) / (max_vel - min_vel)
+                target_alpha = max_alpha - ratio * (max_alpha - min_alpha)
 
-        # =================================================================
-        # [V12.0 Core] Self-Healing Background Update
-        # =================================================================
-        if use_bg == 1:
-            block_dim = (32, 32)
-            grid_dim = ((w + block_dim[0] - 1) // block_dim[0], 
-                        (h + block_dim[1] - 1) // block_dim[1])
+            self.current_alpha = self.current_alpha * 0.8 + target_alpha * 0.2
+                
+            # =================================================================
+            # Parameter Collection
+            # =================================================================
             
-            self.update_bg_kernel(
-                grid_dim, block_dim,
-                (frame_gpu, mask_gpu, self.bg_gpu, w, h, self.bg_learning_rate)
-            )
+            # Body Reshaping
+            if body_cpu is not None:
+                scaled_body = body_cpu[:, :2] * self.map_scale
+                for key in ['shoulder_narrow', 'ribcage_slim', 'waist_slim', 'hip_widen']:
+                    val = params.get(key, 0)
+                    if val > 0:
+                        if key == 'shoulder_narrow': self._collect_shoulder_params(scaled_body, val)
+                        elif key == 'ribcage_slim': self._collect_ribcage_params(scaled_body, val)
+                        elif key == 'waist_slim': self._collect_waist_params(scaled_body, val)
+                        elif key == 'hip_widen': self._collect_hip_params(scaled_body, val)
+                        has_deformation = True
 
-        # =================================================================
-        # Smart Smooth Logic
-        # =================================================================
-        max_velocity = 0.0
-        
-        # Face Velocity
-        current_face_center = None
-        if faces:
-            current_face_center = np.mean(faces[0].landmarks, axis=0)
-            if self.prev_face_center is not None:
-                face_vel = np.linalg.norm(current_face_center - self.prev_face_center)
-                max_velocity = max(max_velocity, face_vel)
-        
-        # Body Velocity
-        current_body_center = None
-        body_cpu = None
-        if body_landmarks is not None:
-            if hasattr(body_landmarks, 'get'): body_cpu = body_landmarks.get()
-            else: body_cpu = body_landmarks
-            valid_points = []
-            for idx in [5, 6, 11, 12]:
-                if idx < len(body_cpu) and body_cpu[idx][2] > 0.4:
-                    valid_points.append(body_cpu[idx][:2])
-            if valid_points:
-                current_body_center = np.mean(valid_points, axis=0)
-                if self.prev_body_center is not None:
-                    body_vel = np.linalg.norm(current_body_center - self.prev_body_center)
-                    max_velocity = max(max_velocity, body_vel)
+            # Face Reshaping
+            if faces:
+                face_v = params.get('face_v', 0)
+                eye_scale = params.get('eye_scale', 0)
+                head_scale = params.get('head_scale', 0) 
+                for face in faces:
+                    lm_small = face.landmarks * self.map_scale
+                    if face_v > 0: self._collect_face_contour_params(lm_small, face_v)
+                    if eye_scale > 0: self._collect_eyes_params(lm_small, eye_scale)
+                    if head_scale != 0: self._collect_head_params(lm_small, head_scale)
 
-        self.prev_face_center = current_face_center
-        self.prev_body_center = current_body_center
-        
-        min_vel, max_vel = 0.5, 6.0
-        max_alpha, min_alpha = 0.96, 0.15
-        target_alpha = max_alpha
-        if max_velocity <= min_vel: target_alpha = max_alpha
-        elif max_velocity >= max_vel: target_alpha = min_alpha
-        else:
-            ratio = (max_velocity - min_vel) / (max_vel - min_vel)
-            target_alpha = max_alpha - ratio * (max_alpha - min_alpha)
-
-        self.current_alpha = self.current_alpha * 0.8 + target_alpha * 0.2
-            
-        # =================================================================
-        # Parameter Collection
-        # =================================================================
-        
-        # Body Reshaping
-        if body_cpu is not None:
-            scaled_body = body_cpu[:, :2] * self.map_scale
-            for key in ['shoulder_narrow', 'ribcage_slim', 'waist_slim', 'hip_widen']:
-                val = params.get(key, 0)
-                if val > 0:
-                    if key == 'shoulder_narrow': self._collect_shoulder_params(scaled_body, val)
-                    elif key == 'ribcage_slim': self._collect_ribcage_params(scaled_body, val)
-                    elif key == 'waist_slim': self._collect_waist_params(scaled_body, val)
-                    elif key == 'hip_widen': self._collect_hip_params(scaled_body, val)
+                if face_v > 0 or eye_scale > 0 or head_scale != 0:
                     has_deformation = True
 
-        # Face Reshaping
-        if faces:
-            face_v = params.get('face_v', 0)
-            eye_scale = params.get('eye_scale', 0)
-            head_scale = params.get('head_scale', 0) 
-            for face in faces:
-                lm_small = face.landmarks * self.map_scale
-                if face_v > 0: self._collect_face_contour_params(lm_small, face_v)
-                if eye_scale > 0: self._collect_eyes_params(lm_small, eye_scale)
-                if head_scale != 0: self._collect_head_params(lm_small, head_scale)
+            self.gpu_dx.fill(0)
+            self.gpu_dy.fill(0)
 
-            if face_v > 0 or eye_scale > 0 or head_scale != 0:
-                has_deformation = True
+            # Warp Vector
+            if has_deformation and self.warp_params:
+                params_arr = np.array(self.warp_params, dtype=np.float32)
+                params_gpu = cp.asarray(params_arr) # Async copy
+                num_points = len(self.warp_params)
+                
+                block_dim = (16, 16)
+                grid_dim = ((sw + block_dim[0] - 1) // block_dim[0], 
+                            (sh + block_dim[1] - 1) // block_dim[1])
+                
+                self.warp_kernel(
+                    grid_dim, block_dim, 
+                    (self.gpu_dx, self.gpu_dy, params_gpu, num_points, sw, sh)
+                )
 
-        self.gpu_dx.fill(0)
-        self.gpu_dy.fill(0)
-
-        # Warp Vector
-        if has_deformation and self.warp_params:
-            params_arr = np.array(self.warp_params, dtype=np.float32)
-            params_gpu = cp.asarray(params_arr)
-            num_points = len(self.warp_params)
-            
-            block_dim = (16, 16)
-            grid_dim = ((sw + block_dim[0] - 1) // block_dim[0], 
-                        (sh + block_dim[1] - 1) // block_dim[1])
-            
-            self.warp_kernel(
-                grid_dim, block_dim, 
-                (self.gpu_dx, self.gpu_dy, params_gpu, num_points, sw, sh)
-            )
-
-        # Smoothing & Compositing
-        if has_deformation or (self.prev_gpu_dx is not None):
-            self._apply_temporal_smoothing_fast(self.current_alpha)
-            
-            cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
-            cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=5, output=self.gpu_dy)
-            
-            result_gpu = cp.empty_like(frame_gpu)
-            
-            block_dim = (32, 32)
-            grid_dim = ((w + block_dim[0] - 1) // block_dim[0], 
-                        (h + block_dim[1] - 1) // block_dim[1])
-            
-            scale = int(1.0 / self.map_scale) 
-            
-            self.composite_kernel(
-                grid_dim, block_dim,
-                (frame_gpu, mask_gpu, self.bg_gpu, result_gpu, self.gpu_dx, self.gpu_dy, 
-                 w, h, sw, sh, scale, use_bg)
-            )
-            
-            if is_gpu_input:
-                return result_gpu
+            # Smoothing & Compositing
+            if has_deformation or (self.prev_gpu_dx is not None):
+                self._apply_temporal_smoothing_fast(self.current_alpha)
+                
+                cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
+                cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=5, output=self.gpu_dy)
+                
+                result_gpu = cp.empty_like(frame_gpu)
+                
+                block_dim = (32, 32)
+                grid_dim = ((w + block_dim[0] - 1) // block_dim[0], 
+                            (h + block_dim[1] - 1) // block_dim[1])
+                
+                scale = int(1.0 / self.map_scale) 
+                
+                self.composite_kernel(
+                    grid_dim, block_dim,
+                    (frame_gpu, mask_gpu, self.bg_gpu, result_gpu, self.gpu_dx, self.gpu_dy, 
+                     w, h, sw, sh, scale, use_bg)
+                )
+                
+                if is_gpu_input:
+                    # Return GPU array (future)
+                    return result_gpu
+                else:
+                    # Return CPU array (sync needed)
+                    return result_gpu.get()
             else:
-                return result_gpu.get()
-        else:
-            return frame_gpu if is_gpu_input else frame
+                return frame_gpu if is_gpu_input else frame
 
     def _init_bg_buffers(self, w, h, frame_template):
         """해상도가 확정되었을 때 CPU 버퍼들을 GPU로 업로드"""

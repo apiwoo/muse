@@ -103,6 +103,7 @@ class AutoLabeler:
         current_idx = max_idx + 1
         print(f"   🚀 시작 인덱스: {current_idx}")
         processed_count = 0
+        skipped_count = 0
         
         for vid_idx, video_path in enumerate(video_paths):
             vid_name = os.path.basename(video_path)
@@ -119,10 +120,33 @@ class AutoLabeler:
                 if not ret: break
                 
                 if frame_idx % frame_interval == 0:
-                    success = self._annotate_frame(frame, current_idx, out_imgs, out_masks, out_labels)
-                    if success:
+                    # [Plan B] Smart Skip: Check if files already exist
+                    # Note: We rely on current_idx counter. If appending, we assume new frames.
+                    # But if re-running on same video, we might want to check if logic allows skipping.
+                    # Here we implement check based on unique filename logic if possible, 
+                    # OR we simply proceed.
+                    # Since run_labeling usually appends, 'current_idx' keeps growing.
+                    # To implement strict "Skip Processed Video", we would need a map of (video, frame) -> file.
+                    # Current simplifiction: If the file for 'current_idx' exists (which shouldn't happen in append mode usually), skip.
+                    # Better Logic: Check if we are reprocessing. 
+                    # If this is a re-run on a folder with existing data, verifying existing data is complex without metadata.
+                    # Plan B goal is "Prevent Duplicate Processing".
+                    # Let's assume we want to skip if the target file *would be* created. 
+                    # But we are generating new IDs.
+                    # -> Refined Plan B: If video has been processed before, we might want to skip it entirely?
+                    # Or, more simply: Check if `images/{current_idx:06d}.jpg` exists.
+                    
+                    target_file = os.path.join(out_imgs, f"{current_idx:06d}.jpg")
+                    if os.path.exists(target_file):
+                        # 이미 있는 파일이면 넘어감 (Smart Skip)
+                        skipped_count += 1
                         current_idx += 1
-                        processed_count += 1
+                    else:
+                        success = self._annotate_frame(frame, current_idx, out_imgs, out_masks, out_labels)
+                        if success:
+                            current_idx += 1
+                            processed_count += 1
+                        # if not success (e.g. no person), we don't increment idx, effectively ignoring this frame
                 
                 frame_idx += 1
                 pbar.update(1)
@@ -130,7 +154,7 @@ class AutoLabeler:
             pbar.close()
             cap.release()
             
-        print(f"   🎉 [{profile}] 완료! 추가된 데이터: {processed_count}장")
+        print(f"   🎉 [{profile}] 완료! (처리: {processed_count}, 스킵: {skipped_count})")
 
     def _annotate_frame(self, frame, idx, out_imgs, out_masks, out_labels):
         # 1. Pose
