@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QFrame, QDialog, QMessageBox, QComboBox, QSizePolicy, QProgressBar, QTextEdit
 )
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QThread
 from PySide6.QtGui import QPixmap, QImage
 
 # Import other studio modules
@@ -238,6 +238,130 @@ class Page2_CameraConnect(QWidget):
 # ==============================================================================
 # [PAGE 3] Data Collection
 # ==============================================================================
+
+# [New] Dedicated Recorder Thread (Imitating recorder.py's 'while True' loop)
+class RecorderWorker(QThread):
+    # Signals to update UI safely
+    time_updated = Signal(float)  # current_total_time
+    bg_status_updated = Signal(bool) # True if BG captured
+    
+    def __init__(self, cap, profile_dir, window_name):
+        super().__init__()
+        self.cap = cap
+        self.profile_dir = profile_dir
+        self.window_name = window_name
+        self.running = True
+        
+        # State Flags (Thread-safe controls)
+        self.is_recording = False
+        self.req_bg_capture = False
+        
+        # Logic variables
+        self.video_writer = None
+        self.current_start_time = 0
+        self.accumulated_time = 0.0
+        
+        # Init duration calc
+        self.accumulated_time = self._calc_existing_duration(profile_dir)
+
+    def _calc_existing_duration(self, folder):
+        total = 0.0
+        # Quick scan
+        files = glob.glob(os.path.join(folder, "train_video_*.mp4"))
+        # Estimating duration might be slow, so we just count or assume 0 for speed if needed
+        # But let's try to be accurate like recorder.py
+        for f in files:
+            try:
+                cap = cv2.VideoCapture(f)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    if fps > 0: total += (frames / fps)
+                cap.release()
+            except: pass
+        return total
+
+    def start_recording(self):
+        self.is_recording = True
+        self.current_start_time = time.time()
+        
+        # Setup Video Writer
+        timestamp = int(time.time())
+        path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
+        w, h = int(self.cap.get(3)), int(self.cap.get(4))
+        self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (w, h))
+
+    def stop_recording(self):
+        self.is_recording = False
+        if self.video_writer:
+            self.video_writer.release()
+            self.video_writer = None
+        # Add elapsed time
+        self.accumulated_time += (time.time() - self.current_start_time)
+
+    def trigger_bg_capture(self):
+        self.req_bg_capture = True
+
+    def run(self):
+        """The 'recorder.py' style infinite loop"""
+        cv2.namedWindow(self.window_name)
+        
+        while self.running and self.cap.isOpened():
+            # 1. Read Frame (Blocking is okay here, it's a separate thread!)
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.01)
+                continue
+            
+            display = frame.copy()
+            
+            # 2. Handle BG Capture Request
+            if self.req_bg_capture:
+                bg_path = os.path.join(self.profile_dir, "background.jpg")
+                cv2.imwrite(bg_path, frame)
+                self.bg_status_updated.emit(True)
+                self.req_bg_capture = False
+                
+            # 3. Handle Recording
+            total_time = self.accumulated_time
+            
+            if self.is_recording:
+                elapsed = time.time() - self.current_start_time
+                total_time += elapsed
+                
+                # Write to file
+                if self.video_writer:
+                    self.video_writer.write(frame)
+                
+                # UI Indicators
+                cv2.circle(display, (30, 30), 10, (0, 0, 255), -1)
+                cv2.putText(display, "REC", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            else:
+                # Ready Indicators
+                cv2.putText(display, "READY", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            # 4. Native Display (Fastest)
+            cv2.imshow(self.window_name, display)
+            
+            # 5. Native Key Events (Like 'B' for Background)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('b'):
+                self.req_bg_capture = True
+            
+            # 6. Update UI Labels (Emit signal)
+            self.time_updated.emit(total_time)
+
+        # Cleanup when loop ends
+        if self.video_writer:
+            self.video_writer.release()
+        try:
+            cv2.destroyWindow(self.window_name)
+        except: pass
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
 class Page3_DataCollection(QWidget):
     go_home = Signal()
     go_train = Signal()
@@ -246,13 +370,11 @@ class Page3_DataCollection(QWidget):
         super().__init__()
         self.output_dir = output_dir
         self.cap = None
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)
+        self.recorder_thread = None
         self.current_profile_dir = ""
-        self.is_recording = False
-        self.video_writer = None
-        self.start_time = 0
-        self.accumulated_time = 0.0
+        
+        # [Recorder Style] Native OpenCV Window Name
+        self.window_name = "MUSE Data Studio (Native Preview)"
         
         self.init_ui()
 
@@ -261,13 +383,15 @@ class Page3_DataCollection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Left: Preview (Full Height)
-        self.lbl_camera = QLabel("Camera Preview")
+        # Left: Placeholder (Video will be in Popup)
+        self.lbl_camera = QLabel(
+            "🎥\n\nNATIVE CAMERA ACTIVE\n\n"
+            "Performance Mode Enabled.\n"
+            "Checking camera feed in popup window...\n\n"
+            "(Zero Latency / No Frame Drops)"
+        )
         self.lbl_camera.setAlignment(Qt.AlignCenter)
-        self.lbl_camera.setStyleSheet("background-color: #000;")
-        
-        # [Fix] Expanding -> Ignored
-        self.lbl_camera.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.lbl_camera.setStyleSheet("background-color: #000; color: #666; font-size: 16px; font-weight: bold;")
         
         layout.addWidget(self.lbl_camera, stretch=3)
 
@@ -303,7 +427,7 @@ class Page3_DataCollection(QWidget):
         sb_layout.addWidget(self.status_card)
 
         # Buttons
-        self.btn_bg = QPushButton("📸  Capture Background")
+        self.btn_bg = QPushButton("📸  Capture Background (B)")
         self.btn_bg.setProperty("class", "card")
         self.btn_bg.setCursor(Qt.PointingHandCursor)
         self.btn_bg.clicked.connect(self.capture_background)
@@ -336,58 +460,49 @@ class Page3_DataCollection(QWidget):
         layout.addWidget(sidebar)
 
     def setup_session(self, cap, profile_name, profile_dir):
+        """
+        Initialize the Recorder Thread here.
+        Now the loop runs in a separate thread, just like recorder.py
+        """
         self.cap = cap
         self.current_profile_dir = profile_dir
         
+        # Check initial BG status
         bg_path = os.path.join(profile_dir, "background.jpg")
         if os.path.exists(bg_path):
-            self.lbl_bg_status.setText("✅ Background Ready")
-            self.lbl_bg_status.setStyleSheet("color: #00ADB5; font-weight: bold; font-size: 14px; border:none;")
-            self.btn_record.setEnabled(True)
+            self.on_bg_captured(True)
         else:
             self.lbl_bg_status.setText("⚠️ Missing Background")
             self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border:none;")
             self.btn_record.setEnabled(False)
             
-        self.accumulated_time = self._calc_existing_duration(profile_dir)
-        self.update_time_label(0)
-        self.timer.start(30)
-
-    def _calc_existing_duration(self, folder):
-        total = 0.0
-        for f in glob.glob(os.path.join(folder, "train_video_*.mp4")):
-            try:
-                cap = cv2.VideoCapture(f)
-                if cap.isOpened():
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    if fps > 0: total += cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps
-                cap.release()
-            except: pass
-        return total
+        # Start Worker Thread
+        self.recorder_thread = RecorderWorker(self.cap, self.current_profile_dir, self.window_name)
+        self.recorder_thread.time_updated.connect(self.update_time_label)
+        self.recorder_thread.bg_status_updated.connect(self.on_bg_captured)
+        self.recorder_thread.start()
 
     def capture_background(self):
-        if self.cap:
-            ret, frame = self.cap.read()
-            if ret:
-                cv2.imwrite(os.path.join(self.current_profile_dir, "background.jpg"), frame)
-                self.lbl_bg_status.setText("✅ Background Captured")
-                self.lbl_bg_status.setStyleSheet("color: #00ADB5; font-weight: bold; font-size: 14px; border:none;")
-                self.btn_record.setEnabled(True)
+        if self.recorder_thread:
+            self.recorder_thread.trigger_bg_capture()
+
+    def on_bg_captured(self, success):
+        if success:
+            self.lbl_bg_status.setText("✅ Background Ready")
+            self.lbl_bg_status.setStyleSheet("color: #00ADB5; font-weight: bold; font-size: 14px; border:none;")
+            self.btn_record.setEnabled(True)
 
     def toggle_record(self):
+        if not self.recorder_thread: return
+
         if self.btn_record.isChecked():
-            timestamp = int(time.time())
-            path = os.path.join(self.current_profile_dir, f"train_video_{timestamp}.mp4")
-            w, h = int(self.cap.get(3)), int(self.cap.get(4))
-            self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (w, h))
-            self.is_recording = True
-            self.start_time = time.time()
+            # Start
+            self.recorder_thread.start_recording()
             self.btn_record.setText("⏹  STOP RECORDING")
             self.btn_record.setStyleSheet("background-color: #FF5252; color: white; border-radius: 12px; font-weight: bold; font-size: 16px; border: none;")
         else:
-            self.is_recording = False
-            if self.video_writer: self.video_writer.release()
-            self.accumulated_time += (time.time() - self.start_time)
+            # Stop
+            self.recorder_thread.stop_recording()
             self.btn_record.setText("🔴  Start Recording")
             self.btn_record.setProperty("class", "card")
             self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
@@ -395,26 +510,8 @@ class Page3_DataCollection(QWidget):
             self.btn_record.style().unpolish(self.btn_record)
             self.btn_record.style().polish(self.btn_record)
 
-    def update_frame(self):
-        if not self.cap: return
-        ret, frame = self.cap.read()
-        if not ret: return
-        
-        if self.is_recording:
-            self.update_time_label(time.time() - self.start_time)
-            cv2.circle(frame, (30, 30), 10, (0, 0, 255), -1)
-            if self.video_writer: self.video_writer.write(frame)
-        else:
-            self.update_time_label(0)
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        self.lbl_camera.setPixmap(QPixmap.fromImage(QImage(rgb.data, w, h, ch*w, QImage.Format_RGB888)).scaled(
-            self.lbl_camera.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        ))
-
-    def update_time_label(self, current):
-        total = int(self.accumulated_time + current)
+    def update_time_label(self, total_seconds):
+        total = int(total_seconds)
         self.lbl_time.setText(f"{total//60:02d}:{total%60:02d}")
 
     def on_train_click(self):
@@ -422,10 +519,11 @@ class Page3_DataCollection(QWidget):
     def on_home_click(self):
         self._stop(); self.go_home.emit()
     def _stop(self):
-        self.is_recording = False
-        self.timer.stop()
-        if self.cap: self.cap.release()
-        if self.video_writer: self.video_writer.release()
+        if self.recorder_thread:
+            self.recorder_thread.stop()
+            self.recorder_thread = None
+        if self.cap: 
+            self.cap.release()
 
 # ==============================================================================
 # [PAGE 4] AI Training
