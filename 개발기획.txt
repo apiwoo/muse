@@ -1,6 +1,6 @@
 [Project MUSE] Master Plan: The Visual Singularity
 
-Version: 10.0 (The Multi-Cam Broadcasting Station)
+Version: 10.1 (Deployment Strategy Added)
 
 Target:
 Training Environment: RTX 4090 (Offline / Night Time)
@@ -8,7 +8,7 @@ Streaming Environment: RTX 3060 ~ 4060 Ti (Real-time Broadcasting)
 
 Core Philosophy: "Hyper-Scale Performance on Consumer Hardware. Zero Server Cost."
 
-1. 프로젝트 개요 (Executive Summary)
+프로젝트 개요 (Executive Summary)
 
 1.1 프로젝트 정의
 MUSE는 단순한 보정 툴이 아닌, 개인 PC 한 대로 방송국 중계차 수준의 **'멀티 캠 가상 스튜디오'**를 구축하는 솔루션입니다.
@@ -37,7 +37,7 @@ GPU: RTX 3060 12GB 이상
 
 역할: 경량화된 Student Model 추론 (Inference), OBS 송출
 
-2. 핵심 파이프라인: Profile-Based Learning
+핵심 파이프라인: Profile-Based Learning
 
 2.1 Data Acquisition (Recorder v2.0)
 
@@ -59,7 +59,7 @@ Multi-Model Loader: 방송 시작 시 정의된 모든 엔진을 VRAM에 프리�
 
 Context Switching: 사용자가 카메라를 전환하면 Input Source, AI Model, Background Buffer가 한 세트로 즉시 교체됩니다.
 
-3. 단계별 상세 기능 명세 (Detailed Roadmap)
+단계별 상세 기능 명세 (Detailed Roadmap)
 
 [Phase 1] MUSE v1.0 : Multi-Cam Foundation
 목표: "카메라를 바꿔도 AI가 따라오는 방송 환경 구축"
@@ -100,7 +100,7 @@ Logic: 카메라가 바뀔 때마다 해당 앵글의 Clean Plate를 즉시 로�
 
 연동: Multi-ControlNet을 활용하여 각 카메라 앵글에 맞는 이미지 생성.
 
-4. 기술 스택 (Updated)
+기술 스택 (Updated)
 
 4.1 Core & AI
 
@@ -122,7 +122,7 @@ Graphics: OpenGL 4.6 (ModernGL) & CUDA (CuPy) Direct Processing
 
 I/O: NVIDIA Video Codec SDK (NVDEC/NVENC)
 
-5. 초기 개발 마일스톤 (Revised)
+초기 개발 마일스톤 (Revised)
 
 Week 1: [Data & Pipeline]
 
@@ -145,3 +145,34 @@ Week 3: [Inference & UX]
 Week 4: [Integration]
 
 최종 통합 테스트 및 성능 최적화 (Memory Leak Check)
+
+배포 및 패키징 계획 (Deployment Strategy) - [Updated]
+
+6.1 배포 철학: "Pro-Level UX & Self-Contained"
+
+목표: 최종 사용자는 Setup.exe 실행만으로 모든 환경(Python, CUDA Libs 등)이 자동 구성됨.
+
+방식: Portable 엔진을 인스톨러(Installer)로 감싸서 배포.
+
+6.2 설치 구조 (Installed Structure)
+C:/Program Files/MUSE_Studio/
+├── MUSE.exe          # 메인 실행 파일 (Launcher)
+├── uninstall.exe     # 제거 프로그램
+├── _internal/        # Python 런타임 및 라이브러리 (PyTorch, Numpy 등)
+├── assets/           # AI 모델(.engine), 쉐이더(.glsl), 설정 파일
+└── libs/             # [Core] NVIDIA 핵심 DLL 모음 (cuDNN, TensorRT)
+
+6.3 빌드 프로세스 (Build Pipeline)
+Step 1. DLL 수집: tools/collect_libs.py 실행 -> 시스템 내 흩어진 NVIDIA DLL을 libs/로 수집.
+Step 2. 코드 프리징: PyInstaller를 사용하여 Python 스크립트를 단일 폴더 방식의 .exe로 변환.
+Step 3. 리소스 병합: assets 및 libs 폴더를 빌드 결과물에 포함.
+Step 4. 인스톨러 생성: Inno Setup 스크립트(.iss)를 컴파일하여 MUSE_Setup_v1.0.exe 생성.
+- 기능: 바탕화면 바로가기 생성, 시작 메뉴 등록, 관리자 권한 요청.
+
+6.4 실행 메커니즘 (Runtime Logic)
+
+src/utils/cuda_helper.py가 프로그램 시작 시 libs/ 폴더를 감지.
+
+시스템 환경 변수(PATH)의 최우선 순위로 libs/를 등록.
+
+외부 환경(사용자의 잘못된 CUDA 버전 등)에 영향받지 않고 내장된 라이브러리로 구동.
