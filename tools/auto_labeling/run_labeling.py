@@ -1,5 +1,6 @@
 # Project MUSE - run_labeling.py
-# The Teacher's Workshop: Multi-Profile Automatic Data Annotation
+# The Teacher's Workshop: Auto-Labeling with SAM 2 & ViTPose
+# Update: Video Propagation Logic
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -11,195 +12,149 @@ import json
 import glob
 from tqdm import tqdm
 
-# 프로젝트 루트 경로 추가
+# 프로젝트 루트 경로 확보
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# [Teachers]
-from ai.tracking.vitpose_trt import VitPoseTrt # Teacher B
-try:
-    from segment_anything import sam_model_registry, SamPredictor # Teacher A
-except ImportError:
-    print("❌ 'segment_anything' 모듈이 없습니다.")
-    sys.exit(1)
+from ai.tracking.vitpose_trt import VitPoseTrt
+from ai.distillation.teacher.sam_wrapper import Sam2VideoWrapper
 
 class AutoLabeler:
     def __init__(self, root_session="personal_data"):
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.root_data_dir = os.path.join(self.root_dir, "recorded_data", root_session)
-        
-        # [Multi-Profile Search]
-        # personal_data/ 아래에 있는 모든 하위 폴더(프로파일)를 찾습니다.
-        if not os.path.exists(self.root_data_dir):
-            print(f"❌ 데이터 폴더를 찾을 수 없습니다: {self.root_data_dir}")
-            sys.exit(1)
-            
-        self.profiles = [
-            d for d in os.listdir(self.root_data_dir) 
-            if os.path.isdir(os.path.join(self.root_data_dir, d))
-        ]
-        
-        if not self.profiles:
-            print(f"❌ 프로파일 폴더가 없습니다. recorder.py를 먼저 실행하세요.")
-            sys.exit(1)
-            
-        print(f"📂 발견된 프로파일: {', '.join(self.profiles)}")
+        self.profiles = [d for d in os.listdir(self.root_data_dir) if os.path.isdir(os.path.join(self.root_data_dir, d))]
 
-        # Teacher Load
-        print("👨‍🏫 [Teacher B] ViTPose(Keypoints) 로딩 중...")
-        try:
-            self.pose_model = VitPoseTrt(engine_path=os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine"))
-        except Exception as e:
-            print(f"❌ ViTPose 로드 실패: {e}")
-            sys.exit(1)
+        # 1. Load Teacher B (ViTPose) - Frame by Frame
+        print("👨‍🏫 [Teacher B] ViTPose (Keypoints) Loading...")
+        self.pose_model = VitPoseTrt(engine_path=os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine"))
 
-        print("👩‍🏫 [Teacher A] SAM(Segmentation) 로딩 중...")
-        sam_checkpoint = os.path.join(self.root_dir, "assets/models/segment_anything/sam_vit_h_4b8939.pth")
-        if not os.path.exists(sam_checkpoint):
-            print(f"❌ SAM 모델 없음: {sam_checkpoint}")
-            sys.exit(1)
-            
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        sam = sam_model_registry["vit_h"](checkpoint=sam_checkpoint)
-        sam.to(device=device)
-        self.sam_predictor = SamPredictor(sam)
-        
-        print("✅ 선생님들 준비 완료.")
+        # 2. Load Teacher A (SAM 2) - Video Batch
+        print("👩‍🏫 [Teacher A] SAM 2 (Video Segmentation) Loading...")
+        self.sam_wrapper = Sam2VideoWrapper(model_root=os.path.join(self.root_dir, "assets/models/segment_anything"))
 
-    def process_all_profiles(self, frame_interval=5):
-        """모든 프로파일을 순회하며 라벨링을 수행합니다."""
+    def process_all_profiles(self):
         for profile in self.profiles:
             print(f"\n==================================================")
-            print(f"   Running Labeling for Profile: [{profile}]")
+            print(f"   Labeling Profile: [{profile}]")
             print(f"==================================================")
-            self._process_single_profile(profile, frame_interval)
+            self._process_single_profile(profile)
 
-    def _process_single_profile(self, profile, frame_interval):
+    def _process_single_profile(self, profile):
         profile_dir = os.path.join(self.root_data_dir, profile)
-        video_paths = sorted(glob.glob(os.path.join(profile_dir, "*.mp4")))
+        video_paths = sorted(glob.glob(os.path.join(profile_dir, "train_video_*.mp4")))
         
-        if not video_paths:
-            print(f"   ⚠️ 경고: '{profile}' 프로파일에 영상이 없습니다. 스킵합니다.")
-            return
-
-        # 출력 디렉토리 (프로파일 폴더 내부)
         out_imgs = os.path.join(profile_dir, "images")
         out_masks = os.path.join(profile_dir, "masks")
         out_labels = os.path.join(profile_dir, "labels")
-        
-        for d in [out_imgs, out_masks, out_labels]:
-            os.makedirs(d, exist_ok=True)
+        for d in [out_imgs, out_masks, out_labels]: os.makedirs(d, exist_ok=True)
 
-        # [Append Logic] 기존 인덱스 확인
-        existing_imgs = glob.glob(os.path.join(out_imgs, "*.jpg"))
-        max_idx = -1
-        if existing_imgs:
-            for p in existing_imgs:
-                try:
-                    name = os.path.splitext(os.path.basename(p))[0]
-                    idx = int(name)
-                    if idx > max_idx: max_idx = idx
-                except: pass
+        global_idx = self._get_next_index(out_imgs)
         
-        current_idx = max_idx + 1
-        print(f"   🚀 시작 인덱스: {current_idx}")
-        processed_count = 0
-        skipped_count = 0
-        
-        for vid_idx, video_path in enumerate(video_paths):
-            vid_name = os.path.basename(video_path)
+        for video_path in video_paths:
+            print(f"   🎥 Processing Video: {os.path.basename(video_path)}")
+            
+            # 1. Initialize SAM 2 Session
+            try:
+                self.sam_wrapper.init_state(video_path)
+            except Exception as e:
+                print(f"      ❌ SAM Init Failed: {e}")
+                continue
+
+            # 2. Keyframe Analysis (First Frame)
             cap = cv2.VideoCapture(video_path)
+            ret, first_frame = cap.read()
+            if not ret:
+                cap.release()
+                continue
+            
+            # Pose Detection on First Frame
+            keypoints = self.pose_model.inference(first_frame)
+            if keypoints is None:
+                print("      ⚠️ No pose detected in first frame. Skipping video.")
+                cap.release()
+                self.sam_wrapper.reset()
+                continue
+
+            valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
+            if len(valid_kpts) < 3:
+                print("      ⚠️ Not enough keypoints. Skipping.")
+                cap.release()
+                self.sam_wrapper.reset()
+                continue
+
+            # 3. Prompting SAM 2
+            # Use points from ViTPose as positive prompts
+            points = np.array(valid_kpts, dtype=np.float32)
+            labels = np.ones(len(points), dtype=np.int32)
+            
+            self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
+
+            # 4. Propagation & Saving
+            print("      🌊 Propagating masks...")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            
+            # Map frame_idx -> Mask
+            video_masks = {}
+            for frame_idx, obj_ids, mask_logits in self.sam_wrapper.propagate():
+                # mask_logits: (1, H, W) -> binary mask
+                mask = (mask_logits[0] > 0.0).cpu().numpy().astype(np.uint8)
+                video_masks[frame_idx] = mask
+
+            # 5. Save Data Loop
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            pbar = tqdm(total=total_frames, leave=False, desc="Saving")
             
-            print(f"   [{vid_idx+1}/{len(video_paths)}] {vid_name} ({total_frames} frames)")
-            
-            frame_idx = 0
-            pbar = tqdm(total=total_frames, leave=False)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            curr_f_idx = 0
             
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
                 
-                if frame_idx % frame_interval == 0:
-                    # [Plan B] Smart Skip: Check if files already exist
-                    # Note: We rely on current_idx counter. If appending, we assume new frames.
-                    # But if re-running on same video, we might want to check if logic allows skipping.
-                    # Here we implement check based on unique filename logic if possible, 
-                    # OR we simply proceed.
-                    # Since run_labeling usually appends, 'current_idx' keeps growing.
-                    # To implement strict "Skip Processed Video", we would need a map of (video, frame) -> file.
-                    # Current simplifiction: If the file for 'current_idx' exists (which shouldn't happen in append mode usually), skip.
-                    # Better Logic: Check if we are reprocessing. 
-                    # If this is a re-run on a folder with existing data, verifying existing data is complex without metadata.
-                    # Plan B goal is "Prevent Duplicate Processing".
-                    # Let's assume we want to skip if the target file *would be* created. 
-                    # But we are generating new IDs.
-                    # -> Refined Plan B: If video has been processed before, we might want to skip it entirely?
-                    # Or, more simply: Check if `images/{current_idx:06d}.jpg` exists.
+                # Pose for current frame (Teacher B needs to run every frame for labels)
+                kpts = self.pose_model.inference(frame)
+                
+                # Get Mask from SAM Propagation
+                mask = video_masks.get(curr_f_idx, None)
+                
+                if kpts is not None and mask is not None:
+                    # Save
+                    fname = f"{global_idx:06d}"
+                    cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
+                    cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
                     
-                    target_file = os.path.join(out_imgs, f"{current_idx:06d}.jpg")
-                    if os.path.exists(target_file):
-                        # 이미 있는 파일이면 넘어감 (Smart Skip)
-                        skipped_count += 1
-                        current_idx += 1
+                    # Compute Box from Mask for label
+                    y_indices, x_indices = np.where(mask > 0)
+                    if len(x_indices) > 0:
+                        box = [int(np.min(x_indices)), int(np.min(y_indices)), 
+                               int(np.max(x_indices)), int(np.max(y_indices))]
                     else:
-                        success = self._annotate_frame(frame, current_idx, out_imgs, out_masks, out_labels)
-                        if success:
-                            current_idx += 1
-                            processed_count += 1
-                        # if not success (e.g. no person), we don't increment idx, effectively ignoring this frame
+                        box = [0, 0, 0, 0]
+
+                    label_data = {"keypoints": kpts.tolist(), "box": box}
+                    with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
+                        json.dump(label_data, f)
+                    
+                    global_idx += 1
                 
-                frame_idx += 1
+                curr_f_idx += 1
                 pbar.update(1)
-                
+
             pbar.close()
             cap.release()
-            
-        print(f"   🎉 [{profile}] 완료! (처리: {processed_count}, 스킵: {skipped_count})")
+            self.sam_wrapper.reset()
 
-    def _annotate_frame(self, frame, idx, out_imgs, out_masks, out_labels):
-        # 1. Pose
-        keypoints = self.pose_model.inference(frame)
-        if keypoints is None: return False
-
-        valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
-        if len(valid_kpts) < 3: return False
-
-        # 2. SAM
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        self.sam_predictor.set_image(frame_rgb)
-        
-        input_points = np.array(valid_kpts)
-        input_labels = np.ones(len(input_points))
-        
-        x_min, y_min = np.min(input_points, axis=0)
-        x_max, y_max = np.max(input_points, axis=0)
-        h, w = frame.shape[:2]
-        pad = 20
-        box = np.array([
-            max(0, x_min - pad), max(0, y_min - pad),
-            min(w, x_max + pad), min(h, y_max + pad)
-        ])
-
-        masks, _, _ = self.sam_predictor.predict(
-            point_coords=input_points,
-            point_labels=input_labels,
-            box=box[None, :],
-            multimask_output=False
-        )
-        final_mask = masks[0]
-
-        # 3. Save
-        filename = f"{idx:06d}"
-        cv2.imwrite(os.path.join(out_imgs, f"{filename}.jpg"), frame)
-        cv2.imwrite(os.path.join(out_masks, f"{filename}.png"), (final_mask * 255).astype(np.uint8))
-        
-        label_data = {"keypoints": keypoints.tolist(), "box": box.tolist()}
-        with open(os.path.join(out_labels, f"{filename}.json"), "w") as f:
-            json.dump(label_data, f)
-            
-        return True
+    def _get_next_index(self, dir_path):
+        files = glob.glob(os.path.join(dir_path, "*.jpg"))
+        max_idx = -1
+        for f in files:
+            try:
+                idx = int(os.path.splitext(os.path.basename(f))[0])
+                if idx > max_idx: max_idx = idx
+            except: pass
+        return max_idx + 1
 
 if __name__ == "__main__":
     session = sys.argv[1] if len(sys.argv) > 1 else "personal_data"
     labeler = AutoLabeler(session)
-    labeler.process_all_profiles(frame_interval=5)
+    labeler.process_all_profiles()
