@@ -11,9 +11,16 @@ import shutil
 import subprocess
 import numpy as np
 
-# [Log Fix] OpenCV 로그 레벨 조정 (불필요한 에러 억제)
+# [Log Fix] OpenCV 로그 레벨 조정
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+
+# [New] PyGrabber Check
+try:
+    from pygrabber.dshow_graph import FilterGraph
+    HAS_PYGRABBER = True
+except ImportError:
+    HAS_PYGRABBER = False
 
 # PySide6 Imports
 from PySide6.QtWidgets import (
@@ -22,7 +29,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QProgressBar, QMessageBox, QGroupBox, QScrollArea,
     QCheckBox, QDialog, QDialogButtonBox, QInputDialog, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QProcess
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QProcess, QSize
 from PySide6.QtGui import QImage, QPixmap, QIcon, QFont
 
 # [Theme Setup]
@@ -32,13 +39,120 @@ except ImportError:
     qdarktheme = None
 
 # ==============================================================================
-# [TAB 1] Recorder Widget (Camera Capture & Data Mgmt)
+# [Helper Classes] Thread & Dialog
+# ==============================================================================
+
+class CameraLoader(QThread):
+    """
+    [Background Worker] 카메라 연결 시 UI 멈춤 방지용 스레드
+    """
+    finished = Signal(object, int) # cap_obj, camera_index
+    error = Signal(str)
+
+    def __init__(self, camera_index):
+        super().__init__()
+        self.camera_index = camera_index
+
+    def run(self):
+        try:
+            # 실제 카메라 연결 시도 (시간이 걸리는 작업)
+            cap = cv2.VideoCapture(self.camera_index)
+            
+            # 해상도 설정
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            if cap.isOpened():
+                # 연결 성공 시 객체 반환
+                self.finished.emit(cap, self.camera_index)
+            else:
+                self.error.emit("카메라를 열 수 없습니다.")
+        except Exception as e:
+            self.error.emit(f"연결 중 오류 발생: {e}")
+
+class ProfileActionDialog(QDialog):
+    """
+    [Custom Dialog] 버튼 크기를 키운 작업 선택창
+    """
+    def __init__(self, profile_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("작업 유형 선택")
+        self.resize(500, 350) # 넉넉한 크기
+        self.setStyleSheet("background-color: #2b2b2b; color: #ffffff;")
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        # 안내 문구
+        lbl_title = QLabel(f"프로파일 [{profile_name}]이(가) 이미 존재합니다.")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #00ADB5; margin-bottom: 5px;")
+        layout.addWidget(lbl_title)
+        
+        lbl_desc = QLabel("어떤 작업을 진행하시겠습니까?")
+        lbl_desc.setAlignment(Qt.AlignCenter)
+        lbl_desc.setStyleSheet("font-size: 14px; color: #aaa; margin-bottom: 20px;")
+        layout.addWidget(lbl_desc)
+        
+        # 버튼 1: Append
+        self.btn_append = QPushButton("이어서 학습 (Append)\n[추가 촬영 데이터 수집]")
+        self.btn_append.setMinimumHeight(70)
+        self.btn_append.setCursor(Qt.PointingHandCursor)
+        self.btn_append.setStyleSheet("""
+            QPushButton {
+                font-size: 15px; font-weight: bold; 
+                background-color: #2196F3; color: white; 
+                border-radius: 10px; border: 1px solid #1976D2;
+            }
+            QPushButton:hover { background-color: #42A5F5; }
+        """)
+        
+        # 버튼 2: Reset
+        self.btn_reset = QPushButton("처음부터 다시 (Reset)\n[기존 데이터 백업 후 초기화]")
+        self.btn_reset.setMinimumHeight(70)
+        self.btn_reset.setCursor(Qt.PointingHandCursor)
+        self.btn_reset.setStyleSheet("""
+            QPushButton {
+                font-size: 15px; font-weight: bold; 
+                background-color: #F44336; color: white; 
+                border-radius: 10px; border: 1px solid #D32F2F;
+            }
+            QPushButton:hover { background-color: #EF5350; }
+        """)
+        
+        # 버튼 3: Cancel
+        self.btn_cancel = QPushButton("취소")
+        self.btn_cancel.setMinimumHeight(40)
+        self.btn_cancel.setCursor(Qt.PointingHandCursor)
+        self.btn_cancel.setStyleSheet("""
+            QPushButton {
+                font-size: 13px;
+                background-color: #555; color: white; 
+                border-radius: 5px;
+            }
+            QPushButton:hover { background-color: #666; }
+        """)
+        
+        layout.addWidget(self.btn_append)
+        layout.addWidget(self.btn_reset)
+        layout.addSpacing(10)
+        layout.addWidget(self.btn_cancel)
+        
+        # 결과 코드: 1=Append, 2=Reset, 0=Cancel
+        self.btn_append.clicked.connect(lambda: self.done(1))
+        self.btn_reset.clicked.connect(lambda: self.done(2))
+        self.btn_cancel.clicked.connect(lambda: self.done(0))
+
+# ==============================================================================
+# [TAB 1] Recorder Widget
 # ==============================================================================
 class RecorderTab(QWidget):
     def __init__(self, output_dir, model_dir):
         super().__init__()
         self.output_dir = output_dir
-        self.model_dir = model_dir # 모델 백업을 위해 필요
+        self.model_dir = model_dir
         self.personal_data_dir = os.path.join(output_dir, "personal_data")
         
         self.cap = None
@@ -50,6 +164,8 @@ class RecorderTab(QWidget):
         self.clean_plate = None
         self.current_profile_dir = ""
         self.current_profile_name = ""
+        
+        self.loader_thread = None # 카메라 로더 스레드
 
         self.init_ui()
         self.refresh_camera_list()
@@ -60,12 +176,10 @@ class RecorderTab(QWidget):
 
         # --- Left: Preview Area ---
         preview_layout = QVBoxLayout()
-        self.lbl_camera = QLabel("카메라를 먼저 연결해주세요.")
+        self.lbl_camera = QLabel("카메라 연결 대기 중...")
         self.lbl_camera.setAlignment(Qt.AlignCenter)
         self.lbl_camera.setStyleSheet("background-color: #000; border: 2px solid #333; color: #666;")
         self.lbl_camera.setMinimumSize(640, 360)
-        
-        # [Fix] setSizePolicy Error -> Use QSizePolicy.Expanding
         self.lbl_camera.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         preview_layout.addWidget(self.lbl_camera)
@@ -87,14 +201,15 @@ class RecorderTab(QWidget):
         cam_box = QHBoxLayout()
         cam_box.addWidget(self.combo_camera)
         
-        btn_cam_refresh = QPushButton("R")
-        btn_cam_refresh.setFixedWidth(30)
-        btn_cam_refresh.clicked.connect(self.refresh_camera_list)
-        cam_box.addWidget(btn_cam_refresh)
+        self.btn_cam_refresh = QPushButton("R")
+        self.btn_cam_refresh.setFixedWidth(40) # 크기 증가
+        self.btn_cam_refresh.setStyleSheet("font-weight: bold; color: #00ADB5; border: 1px solid #444;")
+        self.btn_cam_refresh.clicked.connect(self.refresh_camera_list)
+        cam_box.addWidget(self.btn_cam_refresh)
         ctrl_layout.addLayout(cam_box)
 
         self.btn_connect = QPushButton("카메라 켜기")
-        self.btn_connect.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
+        self.btn_connect.setStyleSheet("background-color: #2196F3; color: white; padding: 10px; font-weight: bold; border-radius: 5px;")
         self.btn_connect.clicked.connect(self.toggle_camera)
         ctrl_layout.addWidget(self.btn_connect)
 
@@ -106,18 +221,18 @@ class RecorderTab(QWidget):
         ctrl_layout.addWidget(QLabel("2. 프로파일(앵글) 선택"))
         
         self.combo_profile = QComboBox()
-        self.combo_profile.setEditable(True) # 직접 입력 가능
+        self.combo_profile.setEditable(True)
         self.combo_profile.setPlaceholderText("예: front, side, top...")
         ctrl_layout.addWidget(self.combo_profile)
         
         self.btn_load_profile = QPushButton("프로파일 확정 및 작업 시작")
-        self.btn_load_profile.setStyleSheet("background-color: #009688; color: white; padding: 10px; font-weight: bold;")
+        self.btn_load_profile.setStyleSheet("background-color: #009688; color: white; padding: 12px; font-weight: bold; font-size: 13px; border-radius: 5px;")
         self.btn_load_profile.clicked.connect(self.on_profile_decision)
-        self.btn_load_profile.setEnabled(False) # 카메라 켜야 활성
+        # self.btn_load_profile.setEnabled(False) -> [Change] 항상 활성화 (사용자가 원함)
         ctrl_layout.addWidget(self.btn_load_profile)
         
-        self.lbl_profile_info = QLabel("대기 중...")
-        self.lbl_profile_info.setStyleSheet("color: #AAA; font-size: 11px;")
+        self.lbl_profile_info = QLabel("프로파일을 입력하고 확정하세요.")
+        self.lbl_profile_info.setStyleSheet("color: #888; font-size: 11px;")
         ctrl_layout.addWidget(self.lbl_profile_info)
 
         ctrl_layout.addSpacing(10)
@@ -127,16 +242,28 @@ class RecorderTab(QWidget):
         # 3. Recording
         ctrl_layout.addWidget(QLabel("3. 데이터 수집"))
         self.btn_bg = QPushButton("배경 촬영 (Clean Plate)")
-        self.btn_bg.setStyleSheet("background-color: #FF9800; color: white; padding: 10px;")
+        self.btn_bg.setStyleSheet("background-color: #FF9800; color: white; padding: 10px; font-weight: bold; border-radius: 5px;")
         self.btn_bg.clicked.connect(self.capture_background)
         self.btn_bg.setEnabled(False)
         ctrl_layout.addWidget(self.btn_bg)
 
-        self.btn_record = QPushButton("녹화 시작 (REC)")
+        # [Change] 녹화 버튼 강조 및 텍스트 변경
+        self.btn_record = QPushButton("녹화")
+        self.btn_record.setMinimumHeight(60)
         self.btn_record.setStyleSheet("""
-            QPushButton { background-color: #444; color: #888; padding: 15px; font-size: 16px; font-weight: bold; border-radius: 5px; }
-            QPushButton:enabled { background-color: #F44336; color: white; }
-            QPushButton:checked { background-color: #B71C1C; }
+            QPushButton { 
+                background-color: #333; color: #666; 
+                font-size: 20px; font-weight: bold; 
+                border-radius: 10px; border: 2px solid #222;
+            }
+            QPushButton:enabled { 
+                background-color: #D32F2F; color: white; 
+                border-color: #B71C1C;
+            }
+            QPushButton:checked { 
+                background-color: #FFEB3B; color: black; 
+                border-color: #FBC02D;
+            }
         """)
         self.btn_record.setCheckable(True)
         self.btn_record.clicked.connect(self.toggle_record)
@@ -151,13 +278,22 @@ class RecorderTab(QWidget):
 
     def refresh_camera_list(self):
         self.combo_camera.clear()
-        # [Fix] Reverted to default backend (same as recorder.py)
-        for i in range(5):
-            # CAP_DSHOW 제거
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                self.combo_camera.addItem(f"Camera Device {i}", i)
-                cap.release()
+        
+        if not HAS_PYGRABBER:
+            self.combo_camera.addItem("⚠️ 설치 필요: pygrabber")
+            self.btn_connect.setEnabled(False)
+            return
+        
+        try:
+            self.btn_connect.setEnabled(True)
+            graph = FilterGraph()
+            devices = graph.get_input_devices()
+            for i, name in enumerate(devices):
+                self.combo_camera.addItem(f"[{i}] {name}", i)
+        except Exception as e:
+            self.combo_camera.addItem("❌ 장치 검색 실패")
+            print(f"Camera Scan Error: {e}")
+
         if self.combo_camera.count() == 0:
             self.combo_camera.addItem("카메라 없음")
 
@@ -169,35 +305,57 @@ class RecorderTab(QWidget):
                 self.combo_profile.addItem(p)
 
     def toggle_camera(self):
-        if self.cap is None:
-            idx = self.combo_camera.currentData()
-            if idx is None: return
-            
-            # [Fix] Reverted to default backend
-            self.cap = cv2.VideoCapture(idx)
-            
-            # 해상도 설정 시도
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-            
-            if self.cap.isOpened():
-                self.timer.start(30)
-                self.btn_connect.setText("카메라 끄기")
-                self.btn_load_profile.setEnabled(True)
-            else:
-                QMessageBox.critical(self, "에러", "카메라를 열 수 없습니다.\n다른 카메라를 선택하거나 장치를 확인하세요.")
-        else:
+        # 1. 카메라 끄기 (이미 켜져있을 때)
+        if self.cap is not None:
             self.timer.stop()
             self.cap.release()
             self.cap = None
             self.lbl_camera.setPixmap(QPixmap())
+            self.lbl_camera.setText("카메라 연결 해제됨")
             self.btn_connect.setText("카메라 켜기")
-            self.btn_load_profile.setEnabled(False)
+            self.btn_connect.setStyleSheet("background-color: #2196F3; color: white; padding: 10px; font-weight: bold; border-radius: 5px;")
             self.btn_bg.setEnabled(False)
             self.btn_record.setEnabled(False)
+            return
+
+        # 2. 카메라 켜기 (로더 스레드 시작)
+        idx = self.combo_camera.currentData()
+        if idx is None: return
+
+        if self.loader_thread and self.loader_thread.isRunning():
+            return # 이미 로딩 중
+
+        self.btn_connect.setText("연결 중... ⏳")
+        self.btn_connect.setEnabled(False) # 중복 클릭 방지
+        self.lbl_camera.setText("카메라 초기화 중입니다...\n잠시만 기다려주세요.")
+        
+        self.loader_thread = CameraLoader(idx)
+        self.loader_thread.finished.connect(self.on_camera_loaded)
+        self.loader_thread.error.connect(self.on_camera_error)
+        self.loader_thread.start()
+
+    def on_camera_loaded(self, cap_obj, idx):
+        self.cap = cap_obj
+        self.timer.start(30)
+        self.btn_connect.setText("카메라 끄기")
+        self.btn_connect.setStyleSheet("background-color: #555; color: white; padding: 10px; font-weight: bold; border-radius: 5px;")
+        self.btn_connect.setEnabled(True)
+        self.lbl_camera.setText("")
+        
+        # 프로파일이 이미 로드된 상태라면 버튼 활성화
+        if self.current_profile_dir:
+            self.btn_bg.setEnabled(True)
+            if self.clean_plate is not None:
+                self.btn_record.setEnabled(True)
+
+    def on_camera_error(self, msg):
+        self.btn_connect.setText("카메라 켜기")
+        self.btn_connect.setEnabled(True)
+        self.lbl_camera.setText(f"❌ {msg}")
+        QMessageBox.warning(self, "연결 실패", msg)
 
     def update_frame(self):
+        if not self.cap: return
         ret, frame = self.cap.read()
         if not ret: return
         
@@ -219,9 +377,6 @@ class RecorderTab(QWidget):
             self.lbl_status.setText(f"Recording... {elapsed:.1f}s")
 
     def on_profile_decision(self):
-        """
-        [핵심 로직] 프로파일 결정 및 분기 처리
-        """
         p_name = self.combo_profile.currentText().strip()
         if not p_name:
             QMessageBox.warning(self, "경고", "프로파일 이름을 입력하세요.")
@@ -229,26 +384,22 @@ class RecorderTab(QWidget):
 
         target_dir = os.path.join(self.personal_data_dir, p_name)
         
+        # [Workflow] 카메라가 안 켜져 있으면 자동 연결 시도
+        if self.cap is None:
+            print("💡 카메라 자동 연결 시도...")
+            self.toggle_camera() 
+            # toggle_camera는 비동기이므로, 폴더 설정은 일단 진행하되
+            # 버튼 활성화는 on_camera_loaded에서 처리됨
+
         # 1. 기존 프로파일 존재 여부 확인
         if os.path.exists(target_dir):
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("작업 유형 선택")
-            msg_box.setText(f"이미 존재하는 프로파일입니다: [{p_name}]\n어떤 작업을 진행하시겠습니까?")
+            # [Change] Custom Dialog 사용
+            dlg = ProfileActionDialog(p_name, self)
+            result = dlg.exec() # 1:Append, 2:Reset, 0:Cancel
             
-            # 버튼 커스텀
-            btn_append = msg_box.addButton("이어서 학습 (Append)\n[추가 촬영]", QMessageBox.AcceptRole)
-            btn_reset = msg_box.addButton("처음부터 다시 (Reset)\n[전체 백업 후 초기화]", QMessageBox.DestructiveRole)
-            btn_cancel = msg_box.addButton("취소", QMessageBox.RejectRole)
-            
-            msg_box.exec()
-            
-            if msg_box.clickedButton() == btn_cancel:
-                return
-            elif msg_box.clickedButton() == btn_reset:
-                self._run_reset_logic(p_name, target_dir)
-            elif msg_box.clickedButton() == btn_append:
-                self._run_append_logic(p_name, target_dir)
-        
+            if result == 0: return
+            elif result == 2: self._run_reset_logic(p_name, target_dir)
+            elif result == 1: self._run_append_logic(p_name, target_dir)
         else:
             # 2. 신규 프로파일
             ret = QMessageBox.question(self, "신규 생성", f"새 프로파일 [{p_name}]을 생성하시겠습니까?")
@@ -258,65 +409,54 @@ class RecorderTab(QWidget):
     def _run_reset_logic(self, p_name, target_dir, is_new=False):
         """백업 및 초기화"""
         if not is_new:
-            # Backup
+            # Backup Logic (생략 없이 유지)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             backup_root = os.path.join(self.output_dir, "backup", f"{timestamp}_{p_name}")
             os.makedirs(backup_root, exist_ok=True)
-            
             try:
-                # 1. 데이터 이동
                 shutil.move(target_dir, os.path.join(backup_root, "data"))
-                
-                # 2. 관련 모델 이동
                 model_backup = os.path.join(backup_root, "models")
                 os.makedirs(model_backup, exist_ok=True)
-                
-                # student_front.pth, student_front.engine 등
                 model_patterns = [f"student_{p_name}.*", f"student_{p_name}_*"]
                 for pat in model_patterns:
                     for f in glob.glob(os.path.join(self.model_dir, pat)):
                         shutil.move(f, model_backup)
-                        
-                self.lbl_profile_info.setText(f"초기화 완료 (백업위치: {backup_root})")
-                QMessageBox.information(self, "안내", "기존 데이터와 모델이 백업되었습니다.\n이제 처음부터 촬영을 시작하세요.")
-                
+                self.lbl_profile_info.setText(f"✅ 초기화됨 (백업: {timestamp})")
+                QMessageBox.information(self, "안내", "백업 완료. 촬영을 시작하세요.")
             except Exception as e:
-                QMessageBox.critical(self, "백업 오류", f"백업 중 오류 발생: {e}")
+                QMessageBox.critical(self, "오류", f"백업 실패: {e}")
                 return
 
-        # Re-create empty dir
         os.makedirs(target_dir, exist_ok=True)
         self.current_profile_dir = target_dir
         self.current_profile_name = p_name
-        
-        # Reset State
         self.clean_plate = None
-        self.btn_bg.setEnabled(True)
-        self.btn_record.setEnabled(False)
-        self.combo_profile.setEnabled(False) # 작업 중 변경 금지
+        
+        # 버튼 상태 업데이트
+        if self.cap:
+            self.btn_bg.setEnabled(True)
+            self.btn_record.setEnabled(False)
         self.lbl_status.setText(f"Profile [{p_name}] - Initial Mode")
 
     def _run_append_logic(self, p_name, target_dir):
-        """기존 데이터 유지"""
         self.current_profile_dir = target_dir
         self.current_profile_name = p_name
         
-        # 배경 로드 시도
         bg_path = os.path.join(target_dir, "background.jpg")
         if os.path.exists(bg_path):
             self.clean_plate = cv2.imread(bg_path)
-            self.btn_bg.setEnabled(True) # 다시 찍고 싶을 수도 있으니
-            self.btn_record.setEnabled(True)
-            self.lbl_status.setText(f"Profile [{p_name}] - Append Mode (BG Loaded)")
+            if self.cap:
+                self.btn_bg.setEnabled(True)
+                self.btn_record.setEnabled(True)
+            self.lbl_status.setText(f"Profile [{p_name}] - Append Mode")
             self.lbl_profile_info.setText("기존 데이터에 이어서 녹화합니다.")
         else:
             self.clean_plate = None
-            self.btn_bg.setEnabled(True)
-            self.btn_record.setEnabled(False)
-            self.lbl_status.setText(f"Profile [{p_name}] - Append Mode (BG Missing)")
-            QMessageBox.information(self, "안내", "기존 배경 파일이 없습니다.\n배경을 먼저 촬영해주세요.")
-            
-        self.combo_profile.setEnabled(False)
+            if self.cap:
+                self.btn_bg.setEnabled(True)
+                self.btn_record.setEnabled(False)
+            self.lbl_status.setText(f"Profile [{p_name}] - Append Mode (No BG)")
+            QMessageBox.information(self, "안내", "배경 이미지가 없습니다.\n배경을 먼저 촬영해주세요.")
 
     def capture_background(self):
         if self.cap:
@@ -342,15 +482,29 @@ class RecorderTab(QWidget):
             self.record_start_time = time.time()
             self.btn_record.setText("녹화 중지 (STOP)")
             self.btn_load_profile.setEnabled(False)
+            self.btn_record.setStyleSheet("""
+                QPushButton { 
+                    background-color: #FFEB3B; color: black; 
+                    font-size: 20px; font-weight: bold; 
+                    border-radius: 10px; border: 2px solid #FBC02D;
+                }
+            """)
         else:
             self.is_recording = False
             if self.video_writer:
                 self.video_writer.release()
                 self.video_writer = None
             
-            self.btn_record.setText("녹화 시작 (REC)")
+            self.btn_record.setText("녹화")
             self.lbl_status.setText("Saved.")
-            QMessageBox.information(self, "완료", "녹화가 저장되었습니다.\n추가로 더 찍거나 다음 탭으로 이동하세요.")
+            self.btn_record.setStyleSheet("""
+                QPushButton { 
+                    background-color: #D32F2F; color: white; 
+                    font-size: 20px; font-weight: bold; 
+                    border-radius: 10px; border: 2px solid #B71C1C;
+                }
+            """)
+            QMessageBox.information(self, "완료", "녹화가 저장되었습니다.")
 
 # ==============================================================================
 # [TAB 2] Processing Tab (Labeling -> Training -> Conversion)
