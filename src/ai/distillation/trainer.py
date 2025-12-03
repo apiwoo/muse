@@ -45,8 +45,6 @@ class DistillationLoss(nn.Module):
         self.mse = nn.MSELoss()
 
     def forward(self, student_seg, student_pose, hard_mask, heatmaps):
-        # Segmentation: Dice + BCE
-        # Pose: MSE
         loss_seg = self.bce(student_seg, hard_mask)
         loss_pose = self.mse(student_pose, heatmaps) * 1000.0
         return loss_seg + loss_pose
@@ -105,26 +103,19 @@ class MuseDataset(Dataset):
             mask_tensor = (mask_tensor > 0.5).float()
             transformed_kpts = transformed['keypoints']
         else:
-            # Fallback manual resize logic
             img_resized = cv2.resize(img, self.input_size)
             mask_resized = cv2.resize(mask, self.input_size, interpolation=cv2.INTER_NEAREST)
-            
             img_tensor = torch.from_numpy(img_resized).permute(2,0,1).float() / 255.0
-            # Normalize manually
             mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
             std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
             img_tensor = (img_tensor - mean) / std
-            
             mask_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0) / 255.0
-            
-            # Keypoint Scaling
             scale_x = self.input_size[0] / w_orig
             scale_y = self.input_size[1] / h_orig
             transformed_kpts = []
             for kp in kpts_coord:
                 transformed_kpts.append([kp[0] * scale_x, kp[1] * scale_y])
 
-        # Heatmap Generation
         heatmaps = np.zeros((17, self.input_size[1], self.input_size[0]), dtype=np.float32)
         for i, (x, y) in enumerate(transformed_kpts):
             if i < len(kpts_conf) and kpts_conf[i] > 0.2:
@@ -166,10 +157,12 @@ class Trainer:
         self.dice_loss = DiceLoss()
 
     def train_all_profiles(self):
-        for profile in self.profiles:
-            self._train_single_profile(profile)
+        total_profiles = len(self.profiles)
+        for i, profile in enumerate(self.profiles):
+            print(f"--- Profile ({i+1}/{total_profiles}): {profile} ---")
+            self._train_single_profile(profile, profile_idx=i, total_profiles=total_profiles)
 
-    def _train_single_profile(self, profile):
+    def _train_single_profile(self, profile, profile_idx, total_profiles):
         print(f"\n🔥 Training SegFormer for [{profile}]...")
         dataset = MuseDataset(os.path.join(self.root_data_dir, profile))
         if len(dataset) == 0: return
@@ -177,7 +170,6 @@ class Trainer:
         
         model = MuseStudentModel(num_keypoints=17, pretrained=True).to(self.device)
         
-        # Optimizer tuning for Transformer
         optimizer = optim.AdamW(model.parameters(), lr=6e-5, weight_decay=0.01)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs)
         scaler = torch.cuda.amp.GradScaler()
@@ -185,6 +177,12 @@ class Trainer:
         for epoch in range(self.epochs):
             model.train()
             running_loss = 0.0
+            
+            # [GUI Integration] Progress Calculation
+            # 전체 진행률 = (현재 프로파일 완료율 + 현재 에폭 완료율) / 전체 프로파일 수
+            # 하지만 간단하게: 현재 프로파일 내 에폭 진행률만 표시하거나, 전체 통합 표시
+            # 여기서는 Studio가 단순 파싱하므로 Epoch 단위로 로그를 찍습니다.
+            
             pbar = tqdm(dataloader, desc=f"Ep {epoch+1}/{self.epochs}", leave=False)
             
             for imgs, masks, heatmaps in pbar:
@@ -206,6 +204,16 @@ class Trainer:
                 pbar.set_postfix({'loss': f"{loss_total.item():.4f}"})
             
             scheduler.step()
+            
+            # [GUI Log Format]
+            # 전체 공정 중 현재 위치 계산
+            # step_per_profile = 100 / total_profiles
+            # current_base = step_per_profile * profile_idx
+            # current_progress = current_base + (step_per_profile * (epoch + 1) / self.epochs)
+            
+            current_progress = int(((profile_idx * self.epochs) + (epoch + 1)) / (total_profiles * self.epochs) * 100)
+            print(f"[PROGRESS] {current_progress}")
+            print(f"   Epoch {epoch+1}/{self.epochs} - Loss: {running_loss/len(dataloader):.4f}")
 
         save_path = os.path.join(self.model_save_dir, f"student_{profile}.pth")
         torch.save(model.state_dict(), save_path)

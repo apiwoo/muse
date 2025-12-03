@@ -18,22 +18,35 @@ def convert_all():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_dir = os.path.join(base_dir, "assets", "models", "personal")
     
-    # Scan all .pth files
     pth_files = glob.glob(os.path.join(model_dir, "student_*.pth"))
     
     if not pth_files:
         print("❌ 변환할 모델(.pth)이 없습니다.")
         return
 
-    for pth in pth_files:
-        print(f"\n🔄 Converting: {os.path.basename(pth)}")
+    total = len(pth_files)
+    print(f"🔄 Found {total} models to convert.")
+
+    for i, pth in enumerate(pth_files):
+        print(f"\n[{i+1}/{total}] Processing: {os.path.basename(pth)}")
         onnx_path = pth.replace(".pth", ".onnx")
         engine_path = pth.replace(".pth", ".engine")
         
+        # [GUI Log] 
+        # 변환은 2단계 (ONNX -> Engine)이므로 50%씩 끊어서 표시
+        base_progress = int((i / total) * 100)
+        print(f"[PROGRESS] {base_progress}")
+        
         export_onnx(pth, onnx_path)
+        
+        print(f"[PROGRESS] {base_progress + int(50/total)}")
         build_engine(onnx_path, engine_path)
 
+    print("[PROGRESS] 100")
+    print("\n✅ 모든 모델 변환이 완료되었습니다.")
+
 def export_onnx(pth_path, onnx_path):
+    print("   -> Exporting to ONNX...")
     device = torch.device("cuda")
     model = MuseStudentModel(num_keypoints=17, pretrained=False).to(device)
     model.load_state_dict(torch.load(pth_path))
@@ -41,17 +54,17 @@ def export_onnx(pth_path, onnx_path):
 
     dummy_input = torch.randn(1, 3, TARGET_H, TARGET_W).to(device)
     
-    # SegFormer has complex operations (Reshape, Permute), needs higher opset
     torch.onnx.export(
         model, dummy_input, onnx_path,
         input_names=['input'],
         output_names=['seg', 'pose'],
         dynamic_axes={'input': {0: 'B'}, 'seg': {0: 'B'}, 'pose': {0: 'B'}},
-        opset_version=17 # Important for Transformer
+        opset_version=17 
     )
     print("   ✅ ONNX Exported")
 
 def build_engine(onnx_path, engine_path):
+    print("   -> Building TensorRT Engine (Please wait)...")
     TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
