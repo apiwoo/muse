@@ -16,7 +16,11 @@ class Viewport(QLabel):
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        # [Fix] Expanding -> Ignored
+        # 이미지가 위젯 크기를 강제로 늘리는 피드백 루프 방지
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        
         self.setStyleSheet("background-color: #121212; border: 1px solid #333;")
         self.setText("Waiting for Camera...")
         self.setMinimumSize(640, 360)

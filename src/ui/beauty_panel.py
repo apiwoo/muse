@@ -3,7 +3,7 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGroupBox, QLabel, QTabWidget, QCheckBox
+    QWidget, QVBoxLayout, QGroupBox, QLabel, QTabWidget, QCheckBox, QFrame
 )
 from PySide6.QtCore import Signal, Qt
 from ui.controls.sliders import ModernSlider
@@ -11,24 +11,86 @@ from ui.controls.sliders import ModernSlider
 class BeautyPanel(QWidget):
     """
     [UI Panel] 뷰티 파라미터를 조절하는 우측 사이드바
+    Modern Design Applied
     """
     paramChanged = Signal(dict)
 
     def __init__(self):
         super().__init__()
         
-        self.setStyleSheet("background-color: #1E1E1E;")
-        self.setFixedWidth(320)
+        # Modern Stylesheet for Panel
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #121212;
+                color: #EEEEEE;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QTabWidget::pane {
+                border: none;
+                background: #1E1E1E;
+                border-top: 2px solid #00ADB5; /* Teal Line */
+            }
+            QTabWidget::tab-bar {
+                alignment: center;
+            }
+            QTabBar::tab {
+                background: #121212;
+                color: #888;
+                padding: 10px 30px;
+                font-weight: bold;
+                font-size: 13px;
+                border: none;
+            }
+            QTabBar::tab:selected {
+                color: #00ADB5;
+                background: #1E1E1E; /* Blend with Pane */
+            }
+            QTabBar::tab:hover {
+                color: #FFFFFF;
+            }
+            QGroupBox {
+                border: none;
+                margin-top: 10px;
+                background: #1E1E1E;
+                border-radius: 8px;
+                padding-top: 25px; /* Title Space */
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+                color: #00ADB5; /* Accent Color */
+                font-size: 12px;
+                font-weight: bold;
+                text-transform: uppercase;
+            }
+            QCheckBox {
+                color: #AAA;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 1px solid #555;
+                background: #2D2D2D;
+            }
+            QCheckBox::indicator:checked {
+                background: #00ADB5;
+                border-color: #00ADB5;
+            }
+        """)
+        
+        self.setFixedWidth(350) # Slightly wider
 
-        # [V4.0] 파라미터 리셋 (The Quartet)
         self.current_params = {
             'eye_scale': 0.0,
             'face_v': 0.0,
             'head_scale': 0.0,
-            'shoulder_narrow': 0.0, # [1] 어깨
-            'ribcage_slim': 0.0,    # [2] 흉통
-            'waist_slim': 0.0,      # [3] 허리
-            'hip_widen': 0.0,       # [4] 골반
+            'shoulder_narrow': 0.0,
+            'ribcage_slim': 0.0, 
+            'waist_slim': 0.0,
+            'hip_widen': 0.0,
             'show_body_debug': False
         }
 
@@ -36,156 +98,118 @@ class BeautyPanel(QWidget):
 
     def _init_ui(self):
         layout = QVBoxLayout()
-        layout.setSpacing(10)
-        layout.setContentsMargins(10, 20, 10, 20)
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # 타이틀
+        # 1. Header Area
+        header = QFrame()
+        header.setStyleSheet("background-color: #121212; padding: 20px;")
+        h_layout = QVBoxLayout(header)
+        
         self.title_label = QLabel("MUSE ENGINE")
-        self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #FFFFFF; margin-bottom: 10px;")
+        self.title_label.setStyleSheet("font-size: 22px; font-weight: 800; letter-spacing: 1px; color: #FFF;")
         self.title_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.title_label)
+        h_layout.addWidget(self.title_label)
+        
+        self.info_label = QLabel("ACTIVE PROFILE: DEFAULT")
+        self.info_label.setStyleSheet("color: #666; font-size: 11px; font-weight: bold;")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        h_layout.addWidget(self.info_label)
+        
+        layout.addWidget(header)
 
-        # 탭 위젯 생성
+        # 2. Tabs
         tabs = QTabWidget()
-        tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #333; background: #252525; }
-            QTabBar::tab {
-                background: #1E1E1E; color: #888; padding: 8px 20px;
-                border-top-left-radius: 4px; border-top-right-radius: 4px;
-            }
-            QTabBar::tab:selected { background: #333; color: #00ADB5; font-weight: bold; }
-        """)
 
-        # 1. Face 탭
+        # --- Face Tab ---
         face_tab = QWidget()
         face_layout = QVBoxLayout()
-        face_layout.setSpacing(20)
+        face_layout.setContentsMargins(15, 20, 15, 20)
+        face_layout.setSpacing(25)
         
-        face_warp_group = QGroupBox("Face Reshape")
-        self._style_groupbox(face_warp_group)
-        fw_layout = QVBoxLayout()
+        face_group = QGroupBox("Facial Geometry")
+        f_inner = QVBoxLayout()
+        f_inner.setSpacing(15)
         
-        self.slider_eye = ModernSlider("Eye Size", initial_value=0.0)
+        self.slider_eye = ModernSlider("EYES", 0.0)
         self.slider_eye.valueChanged.connect(lambda v: self._update_param('eye_scale', v))
-        fw_layout.addWidget(self.slider_eye)
+        f_inner.addWidget(self.slider_eye)
 
-        self.slider_chin = ModernSlider("V-Line", initial_value=0.0)
+        self.slider_chin = ModernSlider("V-LINE", 0.0)
         self.slider_chin.valueChanged.connect(lambda v: self._update_param('face_v', v))
-        fw_layout.addWidget(self.slider_chin)
+        f_inner.addWidget(self.slider_chin)
 
-        self.slider_head = ModernSlider("Head Size", initial_value=0.0)
+        self.slider_head = ModernSlider("HEAD", 0.0)
         self.slider_head.valueChanged.connect(lambda v: self._update_param('head_scale', v))
-        fw_layout.addWidget(self.slider_head)
+        f_inner.addWidget(self.slider_head)
         
-        face_warp_group.setLayout(fw_layout)
-        face_layout.addWidget(face_warp_group)
+        face_group.setLayout(f_inner)
+        face_layout.addWidget(face_group)
         face_layout.addStretch()
         face_tab.setLayout(face_layout)
 
-        # 2. Body 탭
+        # --- Body Tab ---
         body_tab = QWidget()
         body_layout = QVBoxLayout()
-        body_layout.setSpacing(20)
+        body_layout.setContentsMargins(15, 20, 15, 20)
+        body_layout.setSpacing(25)
 
-        # Body > Debug Tools
-        debug_group = QGroupBox("Debug Tools")
-        self._style_groupbox(debug_group)
-        debug_layout = QVBoxLayout()
-        
-        self.chk_body_debug = QCheckBox("Show Skeleton (뼈대 보기)")
-        self.chk_body_debug.setStyleSheet("color: #DDD; font-size: 13px;")
+        # Debug
+        debug_group = QGroupBox("Visualization")
+        d_inner = QVBoxLayout()
+        self.chk_body_debug = QCheckBox("Show Skeleton Overlay")
         self.chk_body_debug.toggled.connect(lambda v: self._update_param('show_body_debug', v))
-        debug_layout.addWidget(self.chk_body_debug)
-        
-        debug_group.setLayout(debug_layout)
+        d_inner.addWidget(self.chk_body_debug)
+        debug_group.setLayout(d_inner)
         body_layout.addWidget(debug_group)
 
-        # Body > Reshape Group
-        body_warp_group = QGroupBox("Body Quartet")
-        self._style_groupbox(body_warp_group)
-        bw_layout = QVBoxLayout()
+        # Body Sliders
+        body_group = QGroupBox("Body Morphing")
+        b_inner = QVBoxLayout()
+        b_inner.setSpacing(15)
 
-        # [1] 어깨 (Narrow)
-        self.slider_shoulder = ModernSlider("Shoulder", initial_value=0.0)
+        self.slider_shoulder = ModernSlider("SHOULDERS", 0.0)
         self.slider_shoulder.valueChanged.connect(lambda v: self._update_param('shoulder_narrow', v))
-        bw_layout.addWidget(self.slider_shoulder)
+        b_inner.addWidget(self.slider_shoulder)
 
-        # [2] 흉통 (Ribcage)
-        self.slider_ribcage = ModernSlider("Ribcage", initial_value=0.0)
+        self.slider_ribcage = ModernSlider("RIBCAGE", 0.0)
         self.slider_ribcage.valueChanged.connect(lambda v: self._update_param('ribcage_slim', v))
-        bw_layout.addWidget(self.slider_ribcage)
+        b_inner.addWidget(self.slider_ribcage)
 
-        # [3] 허리 (Waist)
-        self.slider_waist = ModernSlider("Waist", initial_value=0.0)
+        self.slider_waist = ModernSlider("WAIST", 0.0)
         self.slider_waist.valueChanged.connect(lambda v: self._update_param('waist_slim', v))
-        bw_layout.addWidget(self.slider_waist)
+        b_inner.addWidget(self.slider_waist)
 
-        # [4] 골반 (Hip)
-        self.slider_hip = ModernSlider("Hip", initial_value=0.0)
+        self.slider_hip = ModernSlider("HIPS", 0.0)
         self.slider_hip.valueChanged.connect(lambda v: self._update_param('hip_widen', v))
-        bw_layout.addWidget(self.slider_hip)
+        b_inner.addWidget(self.slider_hip)
 
-        body_warp_group.setLayout(bw_layout)
-        body_layout.addWidget(body_warp_group)
+        body_group.setLayout(b_inner)
+        body_layout.addWidget(body_group)
         body_layout.addStretch()
         body_tab.setLayout(body_layout)
 
-        # 탭 추가
         tabs.addTab(face_tab, "FACE")
         tabs.addTab(body_tab, "BODY")
         layout.addWidget(tabs)
 
-        layout.addStretch()
-        self.info_label = QLabel("Mode: Default")
-        self.info_label.setStyleSheet("color: #555; font-size: 10px;")
-        self.info_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.info_label)
-
         self.setLayout(layout)
-
-    def _style_groupbox(self, group):
-        group.setStyleSheet("""
-            QGroupBox {
-                border: 1px solid #444;
-                border-radius: 5px;
-                margin-top: 10px;
-                color: #AAA;
-                font-weight: bold;
-                background: #2A2A2A;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 3px;
-            }
-        """)
 
     def _update_param(self, key, value):
         self.current_params[key] = value
         self.paramChanged.emit(self.current_params)
 
     def set_profile_info(self, profile_name):
-        self.title_label.setText(f"MUSE: {profile_name.upper()}")
-        self.info_label.setText(f"Active Profile: {profile_name}")
+        self.info_label.setText(f"ACTIVE PROFILE: {profile_name.upper()}")
 
     def update_sliders_from_config(self, params):
-        """
-        [New] 외부 설정값(JSON)을 슬라이더에 반영
-        - 중요: 슬라이더 값 변경 시 _update_param이 호출되어 다시 시그널을 보내는 것을 방지해야 함.
-        - blockSignals를 사용하여 조용히 UI만 업데이트.
-        """
-        # 시그널 차단 (루프 방지)
         self.blockSignals(True)
-        self.slider_eye.blockSignals(True)
-        self.slider_chin.blockSignals(True)
-        self.slider_head.blockSignals(True)
-        self.slider_shoulder.blockSignals(True)
-        self.slider_ribcage.blockSignals(True)
-        self.slider_waist.blockSignals(True)
-        self.slider_hip.blockSignals(True)
+        # Block Children Signals
+        for s in [self.slider_eye, self.slider_chin, self.slider_head, 
+                  self.slider_shoulder, self.slider_ribcage, self.slider_waist, self.slider_hip]:
+            s.blockSignals(True)
         self.chk_body_debug.blockSignals(True)
 
-        # 값 설정
         if 'eye_scale' in params: self.slider_eye.set_value(params['eye_scale'])
         if 'face_v' in params: self.slider_chin.set_value(params['face_v'])
         if 'head_scale' in params: self.slider_head.set_value(params['head_scale'])
@@ -198,19 +222,12 @@ class BeautyPanel(QWidget):
         if 'show_body_debug' in params: 
             self.chk_body_debug.setChecked(bool(params['show_body_debug']))
 
-        # 내부 변수 동기화
         self.current_params.update(params)
 
-        # 차단 해제
+        for s in [self.slider_eye, self.slider_chin, self.slider_head, 
+                  self.slider_shoulder, self.slider_ribcage, self.slider_waist, self.slider_hip]:
+            s.blockSignals(False)
         self.chk_body_debug.blockSignals(False)
-        self.slider_hip.blockSignals(False)
-        self.slider_waist.blockSignals(False)
-        self.slider_ribcage.blockSignals(False)
-        self.slider_shoulder.blockSignals(False)
-        self.slider_head.blockSignals(False)
-        self.slider_chin.blockSignals(False)
-        self.slider_eye.blockSignals(False)
         self.blockSignals(False)
         
-        # 워커에게 "설정값 바뀌었어"라고 한번 알려주는게 좋음
         self.paramChanged.emit(self.current_params)
