@@ -27,6 +27,7 @@ class CameraGLWidget(QOpenGLWidget):
         # 렌더링 상태
         self.frame_width = 0
         self.frame_height = 0
+        self.pending_frame = None # [Optimized] 대기 중인 프레임 데이터
         
         # FPS 측정
         self.frame_count = 0
@@ -93,14 +94,39 @@ class CameraGLWidget(QOpenGLWidget):
         """실제 그리기 (Qt에 의해 호출됨)"""
         if not self.ctx: return
 
-        # [Critical Fix] Qt FBO Binding
-        # Qt6는 자체 FBO를 사용하므로, ModernGL이 이를 감지해서 사용해야 함.
-        # 이게 없으면 기본 스크린(0)에 그려서 화면에 안 나옴(검은색).
+        # [Critical Fix 1] Qt FBO 명시적 바인딩
+        # makeCurrent() 없이 호출되므로, 현재 바인딩된 FBO(Qt의 내부 FBO)를 찾아야 합니다.
         try:
-            fbo = self.ctx.detect_framebuffer()
+            fbo_id = self.defaultFramebufferObject()
+            fbo = self.ctx.detect_framebuffer(fbo_id)
             fbo.use()
-        except:
+        except Exception:
+            # 초기화 시점 등에서 실패할 수 있음
             return
+
+        # [Critical Fix 2] 텍스처 업로드를 여기서 수행 (Zero-Overhead)
+        # render()에서 받은 데이터가 있으면 GPU로 올립니다.
+        if self.pending_frame is not None:
+            try:
+                frame = self.pending_frame
+                h, w = frame.shape[:2]
+
+                # 텍스처 생성 (크기 변경 시)
+                if self.texture is None or self.frame_width != w or self.frame_height != h:
+                    print(f"♻️ [GL] Creating Texture: {w}x{h}")
+                    if self.texture: self.texture.release()
+                    self.frame_width, self.frame_height = w, h
+                    self.texture = self.ctx.texture((w, h), 3, dtype='f1')
+                    self.texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+
+                # 데이터 전송 (Zero-Copy)
+                if not frame.flags['C_CONTIGUOUS']:
+                    frame = np.ascontiguousarray(frame)
+                
+                self.texture.write(frame)
+                self.pending_frame = None # 업로드 완료 처리
+            except Exception as e:
+                print(f"⚠️ [GL] Texture Upload Error: {e}")
 
         # FPS 카운트
         self.frame_count += 1
@@ -109,8 +135,9 @@ class CameraGLWidget(QOpenGLWidget):
             self.fps = self.frame_count
             self.frame_count = 0
             self.last_fps_time = now
-            # QPainter 대신 콘솔 로그로 FPS 확인
-            # print(f"🚀 [GL] FPS: {self.fps}")
+            # 로그 출력 (1초에 한 번)
+            if self.frame_width > 0:
+                print(f"✨ [GL] Render OK ({self.frame_width}x{self.frame_height}) | FPS: {self.fps}")
 
         # 1. 뷰포트 계산
         dpr = self.devicePixelRatio()
@@ -143,51 +170,17 @@ class CameraGLWidget(QOpenGLWidget):
                 self.vao.render(mode=moderngl.TRIANGLE_STRIP)
             except Exception as e:
                 pass
-        
-        # [Removed] QPainter overlay removed to prevent context corruption
 
     @Slot(object)
     def render(self, frame):
-        """메인 스레드 데이터 수신 -> GPU 업로드"""
+        """메인 스레드 데이터 수신 -> 화면 갱신 요청"""
+        # [Optimized] makeCurrent() 제거
+        # 비용이 큰 컨텍스트 스위칭 없이 데이터만 넘기고 update() 호출
         if self.ctx is None or frame is None:
             return
 
-        self.makeCurrent()
-        try:
-            h, w = frame.shape[:2]
-
-            # 텍스처 생성 (크기 변경 시)
-            if self.texture is None or self.frame_width != w or self.frame_height != h:
-                print(f"♻️ [GL] Creating Texture: {w}x{h}")
-                if self.texture: self.texture.release()
-                self.frame_width, self.frame_height = w, h
-                self.texture = self.ctx.texture((w, h), 3, dtype='f1')
-                self.texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-
-            # 데이터 전송 (Zero-Copy)
-            if not frame.flags['C_CONTIGUOUS']:
-                frame = np.ascontiguousarray(frame)
-            
-            self.texture.write(frame)
-            
-            # 화면 갱신 요청
-            self.update() 
-            
-            # 로그 출력
-            curr_time = time.time()
-            if curr_time - self.last_log_time > 1.0:
-                print(f"✨ [GL] Render OK ({w}x{h}) | FPS: {self.fps}")
-                self.last_log_time = curr_time
-
-        except Exception as e:
-            print(f"⚠️ [GL] Render Error: {e}")
-            # 복구 로직
-            if self.texture:
-                try: self.texture.release()
-                except: pass
-                self.texture = None
-        finally:
-            self.doneCurrent()
+        self.pending_frame = frame
+        self.update() # -> paintGL() 호출 유도
 
     def cleanup(self):
         self.makeCurrent()

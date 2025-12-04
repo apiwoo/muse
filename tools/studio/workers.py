@@ -23,6 +23,10 @@ class CameraLoader(QThread):
             # 실제 카메라 연결 시도
             cap = cv2.VideoCapture(self.camera_index)
             
+            # [Fix] USB 대역폭 확보를 위해 MJPG 압축 포맷 강제 설정
+            # 1080p 30fps를 YUY2(비압축)로 보내면 USB 2.0 대역폭 초과로 5~6fps로 떨어짐
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
+            
             # 해상도 설정
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)

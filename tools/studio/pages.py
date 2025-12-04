@@ -248,7 +248,8 @@ class RecorderWorker(QThread):
     - Removed 'frame_ready' Signal to prevent Event Loop congestion.
     - Only updates shared memory variable. UI pulls it via Timer.
     - Adds frame_id to allow UI to skip duplicate frames.
-    - Adds msleep(1) to yield GIL and prevent UI starvation.
+    - [Fix] Removed msleep(1) to prevent fps drop due to windows timer resolution.
+    - [Fix] Set buffer size to 1 to reduce latency.
     """
     time_updated = Signal(float)
     bg_status_updated = Signal(bool)
@@ -319,10 +320,13 @@ class RecorderWorker(QThread):
         # [Optimization] Calculate existing duration in background thread
         self.accumulated_time = self._calc_existing_duration(self.profile_dir)
         
+        # [Fix 1] 카메라 버퍼 최소화 - 최신 프레임만 유지
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         print("📸 [Worker] Capture Loop Started (Pull + Deduplication + Yield).")
         while self.running and self.cap.isOpened():
             curr_time = time.time()
-            ret, frame = self.cap.read()
+            ret, frame = self.cap.read() # Blocking call
             
             if curr_time - self.last_log_time > 1.0:
                 status = "OK" if ret else "FAIL"
@@ -332,6 +336,7 @@ class RecorderWorker(QThread):
                 self.last_log_time = curr_time
 
             if not ret:
+                # 읽기 실패 시에만 잠시 대기
                 self.msleep(5)
                 continue
             
@@ -341,9 +346,17 @@ class RecorderWorker(QThread):
                 self.m_frame = frame
                 self.m_frame_id += 1 # [Optimization] Increment Frame ID
             
-            # [Optimization] Anti-Starvation Yield
-            # Worker가 CPU(GIL)를 독점하지 않고 메인 스레드(UI)에 양보
-            self.msleep(1)
+            # [Fix 3] msleep(1) 제거
+            # cap.read()가 이미 프레임 레이트에 맞춰 블로킹되므로 추가 지연 제거.
+            # 녹화 중이 아닐 때만 아주 짧은 양보(선택적)를 고려할 수 있으나, 
+            # 6fps 문제를 확실히 해결하기 위해 우선 제거합니다.
+            if not self.is_recording:
+                # CPU 과점유 방지를 위해 아주 짧은 sleep은 필요할 수 있으나
+                # Windows 타이머 해상도 문제로 1ms도 15ms가 될 수 있음.
+                # 필요하다면 timeBeginPeriod(1) 등을 사용해야 함.
+                # 여기서는 cap.read()가 충분히 블로킹한다고 가정하고 제거.
+                pass 
+                # self.msleep(1) 
             
             # Handle BG Capture
             if self.req_bg_capture:
