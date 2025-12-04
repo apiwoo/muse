@@ -7,10 +7,15 @@ import torch
 import numpy as np
 import cv2
 import sys
+import traceback
 
-# SAM 2 Imports
+# [Fix] SAM 2 Imports with Hydra Handling
 try:
+    import sam2
     from sam2.build_sam import build_sam2_video_predictor
+    import hydra
+    from hydra import initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
 except ImportError:
     print("❌ SAM 2 library not found. Please run 'pip install git+https://github.com/facebookresearch/segment-anything-2.git'")
     sys.exit(1)
@@ -26,20 +31,79 @@ class Sam2VideoWrapper:
 
         # 모델 경로 설정
         checkpoint = os.path.join(model_root, "sam2_hiera_large.pt")
-        # SAM 2 Config는 라이브러리 내부에 있음 (sam2_hiera_l.yaml)
         model_cfg = "sam2_hiera_l.yaml"
 
         if not os.path.exists(checkpoint):
             raise FileNotFoundError(f"❌ SAM 2 Checkpoint not found: {checkpoint}")
 
+        # [Hydra Fix] 기존 설정 초기화
+        if GlobalHydra.instance().is_initialized():
+            GlobalHydra.instance().clear()
+
+        # [Core Logic] Config 경로 찾기 (우선순위 적용)
+        config_dir = self._find_config_dir()
+        if not config_dir:
+            raise FileNotFoundError("❌ SAM 2 Config directory not found.")
+
+        print(f"   📂 Config Dir: {config_dir}")
+
         try:
-            self.predictor = build_sam2_video_predictor(model_cfg, checkpoint, device=self.device)
+            # Hydra Context Manager를 사용하여 안전하게 모델 빌드
+            with initialize_config_dir(config_dir=config_dir, version_base="1.2"):
+                try:
+                    # 1차 시도 (확장자 포함)
+                    self.predictor = build_sam2_video_predictor(model_cfg, checkpoint, device=self.device)
+                except Exception:
+                    # 2차 시도 (확장자 제거 - Hydra 표준)
+                    print("   🔄 Retrying with config name adjustment...")
+                    cfg_name = model_cfg.replace(".yaml", "")
+                    self.predictor = build_sam2_video_predictor(cfg_name, checkpoint, device=self.device)
+            
             print("   ✅ SAM 2 Video Predictor Loaded.")
+            
         except Exception as e:
             print(f"   ❌ SAM 2 Loading Failed: {e}")
+            traceback.print_exc()
             raise e
             
         self.inference_state = None
+
+    def _find_config_dir(self):
+        """
+        설정 파일이 있는 폴더를 찾습니다.
+        Priority 1: 프로젝트 내부 'assets/sam2_configs' (배포용/안정적)
+        Priority 2: 설치된 패키지 내부 (개발용)
+        """
+        # 1. Project Local Asset (Recommended for Deployment)
+        # 현재 파일: src/ai/distillation/teacher/sam_wrapper.py
+        # 루트: src/../../.. -> Project Root
+        current_file = os.path.abspath(__file__)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file)))))
+        local_config = os.path.join(project_root, "assets", "sam2_configs")
+        
+        if os.path.exists(local_config) and os.path.isdir(local_config):
+            # yaml 파일이 실제로 있는지 확인
+            if any(f.endswith(".yaml") for f in os.listdir(local_config)):
+                print("   ✨ Using Local Configs (Deployment Mode)")
+                return local_config
+
+        # 2. Installed Package Search (Development Fallback)
+        sam2_root = os.path.dirname(sam2.__file__)
+        candidates = []
+        
+        # 패키지 내부 검색
+        for root, dirs, files in os.walk(sam2_root):
+            if "sam2_hiera_l.yaml" in files:
+                candidates.append(root)
+        
+        if candidates:
+            # 'configs'가 경로명에 포함된 것을 선호
+            for d in candidates:
+                if "configs" in d:
+                    return d
+            return candidates[0]
+            
+        return None
 
     def init_state(self, video_path):
         """비디오 세션 초기화 (전체 프레임 캐싱)"""
