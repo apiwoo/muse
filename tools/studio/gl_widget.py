@@ -27,15 +27,8 @@ class CameraGLWidget(QOpenGLWidget):
         # 렌더링 상태
         self.frame_width = 0
         self.frame_height = 0
-        self.pending_frame = None # [Optimized] 대기 중인 프레임 데이터
+        self.pending_frame = None 
         
-        # FPS 측정
-        self.frame_count = 0
-        self.fps = 0
-        self.last_fps_time = time.time()
-        self.last_log_time = 0
-
-        # 초기 배경: 검은색
         self.bg_color = (0.0, 0.0, 0.0)
 
     def initializeGL(self):
@@ -94,64 +87,48 @@ class CameraGLWidget(QOpenGLWidget):
         """실제 그리기 (Qt에 의해 호출됨)"""
         if not self.ctx: return
 
-        # [Critical Fix 1] Qt FBO 명시적 바인딩
-        # makeCurrent() 없이 호출되므로, 현재 바인딩된 FBO(Qt의 내부 FBO)를 찾아야 합니다.
+        # [Critical Fix 1] Qt FBO 명시적 바인딩 (검은 화면 해결 핵심)
         try:
             fbo_id = self.defaultFramebufferObject()
             fbo = self.ctx.detect_framebuffer(fbo_id)
             fbo.use()
         except Exception:
-            # 초기화 시점 등에서 실패할 수 있음
             return
 
-        # [Critical Fix 2] 텍스처 업로드를 여기서 수행 (Zero-Overhead)
-        # render()에서 받은 데이터가 있으면 GPU로 올립니다.
+        # [Critical Fix 2] 텍스처 업로드 (Zero-Overhead)
         if self.pending_frame is not None:
             try:
                 frame = self.pending_frame
                 h, w = frame.shape[:2]
 
-                # 텍스처 생성 (크기 변경 시)
                 if self.texture is None or self.frame_width != w or self.frame_height != h:
-                    print(f"♻️ [GL] Creating Texture: {w}x{h}")
                     if self.texture: self.texture.release()
                     self.frame_width, self.frame_height = w, h
                     self.texture = self.ctx.texture((w, h), 3, dtype='f1')
                     self.texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
 
-                # 데이터 전송 (Zero-Copy)
+                # 데이터 전송 (Contiguous Check)
                 if not frame.flags['C_CONTIGUOUS']:
                     frame = np.ascontiguousarray(frame)
                 
                 self.texture.write(frame)
-                self.pending_frame = None # 업로드 완료 처리
+                self.pending_frame = None 
             except Exception as e:
-                print(f"⚠️ [GL] Texture Upload Error: {e}")
+                print(f"⚠️ [GL] Upload Error: {e}")
 
-        # FPS 카운트
-        self.frame_count += 1
-        now = time.time()
-        if now - self.last_fps_time >= 1.0:
-            self.fps = self.frame_count
-            self.frame_count = 0
-            self.last_fps_time = now
-            # 로그 출력 (1초에 한 번)
-            if self.frame_width > 0:
-                print(f"✨ [GL] Render OK ({self.frame_width}x{self.frame_height}) | FPS: {self.fps}")
-
-        # 1. 뷰포트 계산
+        # Viewport Setup
         dpr = self.devicePixelRatio()
         w_widget = int(self.width() * dpr)
         h_widget = int(self.height() * dpr)
         
-        # 전체 클리어
         self.ctx.viewport = (0, 0, w_widget, h_widget)
         self.ctx.clear(*self.bg_color)
 
         if self.texture:
-            target_ratio = self.frame_width / self.frame_height if self.frame_height > 0 else 16/9
+            target_ratio = self.frame_width / self.frame_height if self.frame_height > 0 else 1.77
             widget_ratio = w_widget / h_widget if h_widget > 0 else 1
 
+            # Aspect Ratio Correction (Letterboxing)
             if widget_ratio > target_ratio:
                 view_h = h_widget
                 view_w = int(h_widget * target_ratio)
@@ -164,23 +141,19 @@ class CameraGLWidget(QOpenGLWidget):
                 view_y = int((h_widget - view_h) / 2)
 
             try:
-                # 텍스처 영역만 그리기
                 self.ctx.viewport = (view_x, view_y, view_w, view_h)
                 self.texture.use(0)
                 self.vao.render(mode=moderngl.TRIANGLE_STRIP)
-            except Exception as e:
-                pass
+            except: pass
 
     @Slot(object)
     def render(self, frame):
         """메인 스레드 데이터 수신 -> 화면 갱신 요청"""
-        # [Optimized] makeCurrent() 제거
-        # 비용이 큰 컨텍스트 스위칭 없이 데이터만 넘기고 update() 호출
         if self.ctx is None or frame is None:
             return
 
         self.pending_frame = frame
-        self.update() # -> paintGL() 호출 유도
+        self.update() # -> paintGL() 호출
 
     def cleanup(self):
         self.makeCurrent()

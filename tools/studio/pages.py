@@ -70,29 +70,24 @@ class Page1_ProfileSelect(QWidget):
         self.refresh_profiles()
 
     def refresh_profiles(self):
-        # Clear existing
         for i in reversed(range(self.scroll_layout.count())): 
             self.scroll_layout.itemAt(i).widget().setParent(None)
 
-        # 1. New Profile Button (Primary Action)
         btn_new = QPushButton("+  Create New Profile")
-        btn_new.setProperty("class", "primary") # Apply Primary Style
+        btn_new.setProperty("class", "primary") 
         btn_new.setCursor(Qt.PointingHandCursor)
         btn_new.clicked.connect(self.on_click_new)
         self.scroll_layout.addWidget(btn_new)
 
-        # Separator
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("background-color: #333; margin: 20px 0;")
         self.scroll_layout.addWidget(line)
 
-        # 2. Existing Profiles (Cards)
         if os.path.exists(self.personal_data_dir):
             profiles = sorted([d for d in os.listdir(self.personal_data_dir) 
                                if os.path.isdir(os.path.join(self.personal_data_dir, d))])
             
-            # Prioritize default names
             priority = ['front', 'top', 'under']
             sorted_profiles = []
             for p in priority:
@@ -108,7 +103,7 @@ class Page1_ProfileSelect(QWidget):
 
             for p_name in sorted_profiles:
                 btn = QPushButton(f"📂   {p_name.upper()}")
-                btn.setProperty("class", "card") # Apply Card Style
+                btn.setProperty("class", "card")
                 btn.setCursor(Qt.PointingHandCursor)
                 btn.clicked.connect(lambda checked=False, name=p_name: self.on_click_existing(name))
                 self.scroll_layout.addWidget(btn)
@@ -132,7 +127,7 @@ class Page1_ProfileSelect(QWidget):
 # [PAGE 2] Camera Connection
 # ==============================================================================
 class Page2_CameraConnect(QWidget):
-    camera_ready = Signal(object) # cap object
+    camera_ready = Signal(int) # [Change] Emit Camera Index (int) instead of object
     go_back = Signal()
 
     def __init__(self):
@@ -146,7 +141,6 @@ class Page2_CameraConnect(QWidget):
         layout.setSpacing(30)
         layout.setAlignment(Qt.AlignCenter)
 
-        # Header
         self.lbl_title = QLabel("Connect Camera")
         self.lbl_title.setObjectName("Title")
         self.lbl_title.setAlignment(Qt.AlignCenter)
@@ -157,14 +151,12 @@ class Page2_CameraConnect(QWidget):
         self.lbl_info.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_info)
 
-        # Card Container
         card = QFrame()
         card.setStyleSheet("background-color: #252525; border-radius: 15px; border: 1px solid #333;")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(40, 40, 40, 40)
         card_layout.setSpacing(20)
 
-        # Combo & Refresh
         hbox = QHBoxLayout()
         self.combo_cam = QComboBox()
         self.combo_cam.setMinimumHeight(50)
@@ -177,7 +169,6 @@ class Page2_CameraConnect(QWidget):
         hbox.addWidget(btn_refresh)
         card_layout.addLayout(hbox)
 
-        # Connect Button
         self.btn_connect = QPushButton("Connect Camera")
         self.btn_connect.setProperty("class", "primary")
         self.btn_connect.setCursor(Qt.PointingHandCursor)
@@ -186,7 +177,6 @@ class Page2_CameraConnect(QWidget):
         
         layout.addWidget(card)
 
-        # Back Button
         btn_back = QPushButton("← Back")
         btn_back.setStyleSheet("background: transparent; color: #888; font-size: 14px; border: none;")
         btn_back.setCursor(Qt.PointingHandCursor)
@@ -229,9 +219,14 @@ class Page2_CameraConnect(QWidget):
         self.loader_thread.start()
 
     def on_connected(self, cap, idx):
+        # [Fix] Close the test connection immediately!
+        # If we pass this open 'cap' to another thread, Windows (MSMF) will cause lag.
+        # We release it here, and let the RecorderWorker re-open it natively.
+        cap.release()
+        
         self.btn_connect.setText("Connect Camera")
         self.btn_connect.setEnabled(True)
-        self.camera_ready.emit(cap)
+        self.camera_ready.emit(idx) # Emit INDEX, not OBJECT
 
     def on_error(self, msg):
         self.btn_connect.setText("Connect Camera")
@@ -239,46 +234,36 @@ class Page2_CameraConnect(QWidget):
         QMessageBox.warning(self, "Connection Error", msg)
 
 # ==============================================================================
-# [PAGE 3] Data Collection (Optimized with Frame Deduplication & Anti-Starvation)
+# [PAGE 3] Data Collection (Optimized)
 # ==============================================================================
 
 class RecorderWorker(QThread):
     """
-    [Optimized] Shared Memory Worker (Pull Mode + Deduplication + Yield)
-    - Removed 'frame_ready' Signal to prevent Event Loop congestion.
-    - Only updates shared memory variable. UI pulls it via Timer.
-    - Adds frame_id to allow UI to skip duplicate frames.
-    - [Fix] Removed msleep(1) to prevent fps drop due to windows timer resolution.
-    - [Fix] Set buffer size to 1 to reduce latency.
+    [Optimized] Shared Memory Worker (Self-Contained)
+    - Opens camera INSIDE the thread (Debug Tool Strategy)
+    - Enforces MJPG for 30FPS@1080p
     """
     time_updated = Signal(float)
     bg_status_updated = Signal(bool)
     
-    def __init__(self, cap, profile_dir):
+    def __init__(self, cam_index, profile_dir):
         super().__init__()
-        self.cap = cap
+        self.cam_index = cam_index # Store ID, not Object
         self.profile_dir = profile_dir
         self.running = True
         
-        # [Shared Memory]
+        self.cap = None
         self.m_lock = QMutex()
         self.m_frame = None
-        self.m_frame_id = 0 # [Optimization] Frame Counter
+        self.m_frame_id = 0 
         
-        # State Flags
         self.is_recording = False
         self.req_bg_capture = False
         
         self.video_writer = None
         self.current_start_time = 0
         self.accumulated_time = 0.0
-        
-        # Log Timer
-        self.last_log_time = 0
         self.last_reported_int_time = -1
-        
-        # [Optimization] Moved initialization to run() to prevent UI block
-        # self.accumulated_time = self._calc_existing_duration(profile_dir)
 
     def _calc_existing_duration(self, folder):
         total = 0.0
@@ -295,15 +280,14 @@ class RecorderWorker(QThread):
         return total
 
     def start_recording(self):
+        if not self.cap or not self.cap.isOpened(): return
         self.is_recording = True
         self.current_start_time = time.time()
         timestamp = int(time.time())
         path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
         w, h = int(self.cap.get(3)), int(self.cap.get(4))
-        
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0: fps = 30.0
-            
         self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
 
     def stop_recording(self):
@@ -317,70 +301,54 @@ class RecorderWorker(QThread):
         self.req_bg_capture = True
 
     def run(self):
-        # [Optimization] Calculate existing duration in background thread
         self.accumulated_time = self._calc_existing_duration(self.profile_dir)
         
-        # [Fix 1] 카메라 버퍼 최소화 - 최신 프레임만 유지
+        # [Strategy] Open Camera LOCALLY (Inside Thread)
+        # This matches the 'debug_pipeline.py' architecture that achieved 30 FPS.
+        print(f"📸 [Worker] Opening Camera {self.cam_index} Native...")
+        self.cap = cv2.VideoCapture(self.cam_index)
+        
+        # [Force Settings] Just like the debug tool
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        print("📸 [Worker] Capture Loop Started (Pull + Deduplication + Yield).")
+        print("📸 [Worker] Capture Loop Started (Thread-Local).")
         while self.running and self.cap.isOpened():
-            curr_time = time.time()
-            ret, frame = self.cap.read() # Blocking call
+            ret, frame = self.cap.read() 
             
-            if curr_time - self.last_log_time > 1.0:
-                status = "OK" if ret else "FAIL"
-                shape = frame.shape if frame is not None else "None"
-                brightness = np.mean(frame) if frame is not None else 0
-                print(f"📸 [Worker] Camera Status: {status} | Frame: {shape} | Avg Brightness: {brightness:.1f}")
-                self.last_log_time = curr_time
-
             if not ret:
-                # 읽기 실패 시에만 잠시 대기
                 self.msleep(5)
                 continue
             
-            # [Shared Memory Update]
-            # 데이터를 복사하지 않고 참조만 업데이트 (Lock 보호)
+            # Shared Memory Update
             with QMutexLocker(self.m_lock):
                 self.m_frame = frame
-                self.m_frame_id += 1 # [Optimization] Increment Frame ID
+                self.m_frame_id += 1 
             
-            # [Fix 3] msleep(1) 제거
-            # cap.read()가 이미 프레임 레이트에 맞춰 블로킹되므로 추가 지연 제거.
-            # 녹화 중이 아닐 때만 아주 짧은 양보(선택적)를 고려할 수 있으나, 
-            # 6fps 문제를 확실히 해결하기 위해 우선 제거합니다.
-            if not self.is_recording:
-                # CPU 과점유 방지를 위해 아주 짧은 sleep은 필요할 수 있으나
-                # Windows 타이머 해상도 문제로 1ms도 15ms가 될 수 있음.
-                # 필요하다면 timeBeginPeriod(1) 등을 사용해야 함.
-                # 여기서는 cap.read()가 충분히 블로킹한다고 가정하고 제거.
-                pass 
-                # self.msleep(1) 
-            
-            # Handle BG Capture
             if self.req_bg_capture:
                 bg_path = os.path.join(self.profile_dir, "background.jpg")
                 cv2.imwrite(bg_path, frame)
                 self.bg_status_updated.emit(True)
                 self.req_bg_capture = False
                 
-            # Handle Recording
-            total_time = self.accumulated_time
             if self.is_recording:
                 elapsed = time.time() - self.current_start_time
-                total_time += elapsed
+                total_time = self.accumulated_time + elapsed
+                
                 if self.video_writer:
                     self.video_writer.write(frame)
-            
-            # Throttle Timer Update
-            current_int_time = int(total_time)
-            if current_int_time > self.last_reported_int_time:
-                self.time_updated.emit(total_time)
-                self.last_reported_int_time = current_int_time
+                
+                if int(total_time) > self.last_reported_int_time:
+                    self.time_updated.emit(total_time)
+                    self.last_reported_int_time = int(total_time)
             
         if self.video_writer:
             self.video_writer.release()
+        if self.cap:
+            self.cap.release()
         print("📸 [Worker] Capture Loop Ended.")
 
     def stop(self):
@@ -394,11 +362,11 @@ class Page3_DataCollection(QWidget):
     def __init__(self, output_dir):
         super().__init__()
         self.output_dir = output_dir
-        self.cap = None
+        # self.cap = None # No longer needed
         self.recorder_thread = None
         self.current_profile_dir = ""
-        self.render_timer = QTimer(self) # Render Timer
-        self.last_rendered_id = -1 # [Optimization] To prevent redundant uploads
+        self.render_timer = QTimer(self)
+        self.last_rendered_id = -1
         
         self.init_ui()
 
@@ -407,13 +375,11 @@ class Page3_DataCollection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # [LEFT] OpenGL Viewport
         self.gl_widget = CameraGLWidget()
         self.gl_widget.setMinimumSize(320, 240)
         self.gl_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.gl_widget, stretch=3)
 
-        # [RIGHT] Controls
         sidebar = QFrame()
         sidebar.setStyleSheet("background-color: #1E1E1E; border-left: 1px solid #333;")
         sidebar.setFixedWidth(400)
@@ -422,13 +388,11 @@ class Page3_DataCollection(QWidget):
         sb_layout.setContentsMargins(30, 40, 30, 40)
         sb_layout.setSpacing(20)
 
-        # Title
         lbl_title = QLabel("Data Studio (GPU)")
         lbl_title.setObjectName("Title")
         lbl_title.setStyleSheet("font-size: 24px; border: none;")
         sb_layout.addWidget(lbl_title)
 
-        # Status Card
         self.status_card = QFrame()
         self.status_card.setStyleSheet("background-color: #2D2D2D; border-radius: 10px; padding: 15px;")
         sc_layout = QVBoxLayout(self.status_card)
@@ -444,7 +408,6 @@ class Page3_DataCollection(QWidget):
         
         sb_layout.addWidget(self.status_card)
 
-        # Buttons
         self.btn_bg = QPushButton("📸  Capture Background (B)")
         self.btn_bg.setProperty("class", "card")
         self.btn_bg.setCursor(Qt.PointingHandCursor)
@@ -462,7 +425,6 @@ class Page3_DataCollection(QWidget):
 
         sb_layout.addStretch()
 
-        # Navigation
         self.btn_train = QPushButton("Next: Start AI Training  →")
         self.btn_train.setProperty("class", "primary")
         self.btn_train.setCursor(Qt.PointingHandCursor)
@@ -477,10 +439,10 @@ class Page3_DataCollection(QWidget):
 
         layout.addWidget(sidebar)
 
-    def setup_session(self, cap, profile_name, profile_dir):
-        self.cap = cap
+    def setup_session(self, cam_index, profile_name, profile_dir):
+        # cam_index comes from Page2 signal
         self.current_profile_dir = profile_dir
-        self.last_rendered_id = -1 # [Optimization] Reset frame counter tracker
+        self.last_rendered_id = -1 
         
         bg_path = os.path.join(profile_dir, "background.jpg")
         if os.path.exists(bg_path):
@@ -490,32 +452,27 @@ class Page3_DataCollection(QWidget):
             self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border:none;")
             self.btn_record.setEnabled(False)
             
-        # Start Worker Thread
-        self.recorder_thread = RecorderWorker(self.cap, self.current_profile_dir)
+        # Create Worker with ID, let it open the camera internally
+        self.recorder_thread = RecorderWorker(cam_index, self.current_profile_dir)
         self.recorder_thread.time_updated.connect(self.update_time_label)
         self.recorder_thread.bg_status_updated.connect(self.on_bg_captured)
         self.recorder_thread.start()
         
-        # [Optimization] Start Pull-based Rendering Timer
-        # 16ms interval ~= 60 FPS cap
+        # High Speed Timer
         self.render_timer.timeout.connect(self.update_view)
-        self.render_timer.start(16)
+        self.render_timer.start(1) 
 
     def update_view(self):
-        """Timer Callback: Fetch frame from shared memory and render ONLY if new"""
         if not self.recorder_thread: return
         
         frame = None
         curr_id = -1
 
-        # Lock & Copy Reference + ID
         with QMutexLocker(self.recorder_thread.m_lock):
             if self.recorder_thread.m_frame is not None:
                 frame = self.recorder_thread.m_frame
                 curr_id = self.recorder_thread.m_frame_id
         
-        # Render only if frame ID has changed (Deduplication)
-        # This prevents redundant 6MB texture uploads to GPU on Main Thread
         if frame is not None and curr_id > self.last_rendered_id:
             self.gl_widget.render(frame)
             self.last_rendered_id = curr_id
@@ -560,15 +517,16 @@ class Page3_DataCollection(QWidget):
     def on_home_click(self):
         self._stop(); self.go_home.emit()
     def _stop(self):
-        # Stop Timer First
         if self.render_timer.isActive():
             self.render_timer.stop()
             
         if self.recorder_thread:
             self.recorder_thread.stop()
             self.recorder_thread = None
-        if self.cap: 
-            self.cap.release()
+        
+        # Cap is managed inside worker now
+        # if self.cap: self.cap.release() 
+        
         if self.gl_widget:
             self.gl_widget.cleanup()
 
@@ -588,11 +546,9 @@ class Page4_AiTraining(QWidget):
         layout.setContentsMargins(60, 60, 60, 60)
         layout.setSpacing(25)
 
-        # Header
         layout.addWidget(QLabel("AI Model Generation", objectName="Title"), alignment=Qt.AlignCenter)
         layout.addWidget(QLabel("Processing Pipeline: Labeling -> Training -> Optimization", objectName="Subtitle"), alignment=Qt.AlignCenter)
 
-        # Progress Section
         self.pbar = QProgressBar()
         layout.addWidget(self.pbar)
         
@@ -601,14 +557,12 @@ class Page4_AiTraining(QWidget):
         self.lbl_status.setStyleSheet("color: #00ADB5; font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(self.lbl_status)
 
-        # Start Button
         self.btn_start = QPushButton("Start Pipeline")
         self.btn_start.setProperty("class", "primary")
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self.start_pipeline)
         layout.addWidget(self.btn_start)
 
-        # Console Log
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("""
@@ -620,7 +574,6 @@ class Page4_AiTraining(QWidget):
         """)
         layout.addWidget(self.log_view)
 
-        # Home Button
         self.btn_home = QPushButton("Done. Go Home")
         self.btn_home.setStyleSheet("background: #333; color: white; padding: 15px; border-radius: 8px; border:none;")
         self.btn_home.setVisible(False)
