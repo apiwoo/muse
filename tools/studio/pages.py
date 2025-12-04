@@ -239,18 +239,19 @@ class Page2_CameraConnect(QWidget):
         QMessageBox.warning(self, "Connection Error", msg)
 
 # ==============================================================================
-# [PAGE 3] Data Collection (Optimized)
+# [PAGE 3] Data Collection (Optimized with Frame Deduplication & Anti-Starvation)
 # ==============================================================================
 
 class RecorderWorker(QThread):
     """
-    [Optimized] Shared Memory Worker
-    - Removes heavy data transfer via Signal.
-    - Uses shared variable + Mutex for Zero-Copy access.
+    [Optimized] Shared Memory Worker (Pull Mode + Deduplication + Yield)
+    - Removed 'frame_ready' Signal to prevent Event Loop congestion.
+    - Only updates shared memory variable. UI pulls it via Timer.
+    - Adds frame_id to allow UI to skip duplicate frames.
+    - Adds msleep(1) to yield GIL and prevent UI starvation.
     """
     time_updated = Signal(float)
     bg_status_updated = Signal(bool)
-    frame_ready = Signal() # Lightweight notification (No data payload)
     
     def __init__(self, cap, profile_dir):
         super().__init__()
@@ -261,6 +262,7 @@ class RecorderWorker(QThread):
         # [Shared Memory]
         self.m_lock = QMutex()
         self.m_frame = None
+        self.m_frame_id = 0 # [Optimization] Frame Counter
         
         # State Flags
         self.is_recording = False
@@ -274,7 +276,8 @@ class RecorderWorker(QThread):
         self.last_log_time = 0
         self.last_reported_int_time = -1
         
-        self.accumulated_time = self._calc_existing_duration(profile_dir)
+        # [Optimization] Moved initialization to run() to prevent UI block
+        # self.accumulated_time = self._calc_existing_duration(profile_dir)
 
     def _calc_existing_duration(self, folder):
         total = 0.0
@@ -297,8 +300,6 @@ class RecorderWorker(QThread):
         path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
         w, h = int(self.cap.get(3)), int(self.cap.get(4))
         
-        # [Fix] Use actual camera FPS instead of hardcoded 30.0
-        # If camera doesn't report FPS, fallback to 30.0
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0: fps = 30.0
             
@@ -315,7 +316,10 @@ class RecorderWorker(QThread):
         self.req_bg_capture = True
 
     def run(self):
-        print("📸 [Worker] Capture Loop Started (Shared Memory Mode).")
+        # [Optimization] Calculate existing duration in background thread
+        self.accumulated_time = self._calc_existing_duration(self.profile_dir)
+        
+        print("📸 [Worker] Capture Loop Started (Pull + Deduplication + Yield).")
         while self.running and self.cap.isOpened():
             curr_time = time.time()
             ret, frame = self.cap.read()
@@ -335,9 +339,11 @@ class RecorderWorker(QThread):
             # 데이터를 복사하지 않고 참조만 업데이트 (Lock 보호)
             with QMutexLocker(self.m_lock):
                 self.m_frame = frame
+                self.m_frame_id += 1 # [Optimization] Increment Frame ID
             
-            # 메인 스레드에 "가져가라"고 알림
-            self.frame_ready.emit()
+            # [Optimization] Anti-Starvation Yield
+            # Worker가 CPU(GIL)를 독점하지 않고 메인 스레드(UI)에 양보
+            self.msleep(1)
             
             # Handle BG Capture
             if self.req_bg_capture:
@@ -378,6 +384,8 @@ class Page3_DataCollection(QWidget):
         self.cap = None
         self.recorder_thread = None
         self.current_profile_dir = ""
+        self.render_timer = QTimer(self) # Render Timer
+        self.last_rendered_id = -1 # [Optimization] To prevent redundant uploads
         
         self.init_ui()
 
@@ -459,6 +467,7 @@ class Page3_DataCollection(QWidget):
     def setup_session(self, cap, profile_name, profile_dir):
         self.cap = cap
         self.current_profile_dir = profile_dir
+        self.last_rendered_id = -1 # [Optimization] Reset frame counter tracker
         
         bg_path = os.path.join(profile_dir, "background.jpg")
         if os.path.exists(bg_path):
@@ -472,25 +481,31 @@ class Page3_DataCollection(QWidget):
         self.recorder_thread = RecorderWorker(self.cap, self.current_profile_dir)
         self.recorder_thread.time_updated.connect(self.update_time_label)
         self.recorder_thread.bg_status_updated.connect(self.on_bg_captured)
-        
-        # [Fix] Connect lightweight signal to fetch slot
-        self.recorder_thread.frame_ready.connect(self.update_view)
-        
         self.recorder_thread.start()
+        
+        # [Optimization] Start Pull-based Rendering Timer
+        # 16ms interval ~= 60 FPS cap
+        self.render_timer.timeout.connect(self.update_view)
+        self.render_timer.start(16)
 
     def update_view(self):
-        """Fetch frame from shared memory and render"""
+        """Timer Callback: Fetch frame from shared memory and render ONLY if new"""
         if not self.recorder_thread: return
         
-        # Lock & Copy Reference
         frame = None
+        curr_id = -1
+
+        # Lock & Copy Reference + ID
         with QMutexLocker(self.recorder_thread.m_lock):
             if self.recorder_thread.m_frame is not None:
                 frame = self.recorder_thread.m_frame
+                curr_id = self.recorder_thread.m_frame_id
         
-        # Render (frame is just a reference here, copying happens in texture upload which is fast now)
-        if frame is not None:
+        # Render only if frame ID has changed (Deduplication)
+        # This prevents redundant 6MB texture uploads to GPU on Main Thread
+        if frame is not None and curr_id > self.last_rendered_id:
             self.gl_widget.render(frame)
+            self.last_rendered_id = curr_id
 
     def capture_background(self):
         if self.recorder_thread:
@@ -532,6 +547,10 @@ class Page3_DataCollection(QWidget):
     def on_home_click(self):
         self._stop(); self.go_home.emit()
     def _stop(self):
+        # Stop Timer First
+        if self.render_timer.isActive():
+            self.render_timer.stop()
+            
         if self.recorder_thread:
             self.recorder_thread.stop()
             self.recorder_thread = None
