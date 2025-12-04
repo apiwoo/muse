@@ -22,7 +22,8 @@ class Viewport(QLabel):
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         
         self.setStyleSheet("background-color: #121212; border: 1px solid #333;")
-        self.setText("Waiting for Camera...")
+        # [한글화] 대기 문구
+        self.setText("카메라 신호를 기다리는 중...")
         self.setMinimumSize(640, 360)
 
     def update_image(self, cv_img):

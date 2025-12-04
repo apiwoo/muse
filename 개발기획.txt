@@ -1,6 +1,6 @@
 [Project MUSE] Master Plan: The Visual Singularity
 
-Version: 10.1 (Deployment Strategy Added)
+Version: 10.2 (Localization & UX Update)
 
 Target:
 Training Environment: RTX 4090 (Offline / Night Time)
@@ -23,6 +23,8 @@ Instant Switching: 카메라 전환 시 AI 모델과 배경 데이터도 0.1초 
 On-Device Neural Compression: 고성능 지식 증류를 통해 RTX 3060에서도 2~3개의 모델을 동시에 운용할 수 있습니다.
 
 Zero Distortion: 'Self-Healing Background' 기술로 카메라가 바뀌어도 배경 왜곡이 발생하지 않습니다.
+
+User-Centric Localization: 모든 UI/UX를 직관적인 한국어로 구성하여, 영어를 모르는 사용자도 매뉴얼 없이 즉시 사용할 수 있습니다.
 
 1.3 하드웨어 요구사항 (Dual Track)
 [Track A: Training Machine] (방송 송출용 PC와 같을 수도, 다를 수도 있음)
@@ -64,11 +66,11 @@ Context Switching: 사용자가 카메라를 전환하면 Input Source, AI Model
 [Phase 1] MUSE v1.0 : Multi-Cam Foundation
 목표: "카메라를 바꿔도 AI가 따라오는 방송 환경 구축"
 
-3.1 Smart Recorder
+3.1 Smart Recorder (Studio GUI Integration)
 
-기능: Global Reset / Fine-tune 모드 지원.
+기능: MUSE Studio를 통한 원스톱 녹화 및 관리.
 
-UX: 카메라 장치명 표시 및 직관적인 프로파일 관리.
+UX: 100% 한국어 인터페이스 적용. 복잡한 용어(Append, Reset 등)를 친숙한 표현으로 대체.
 
 Logic: background.jpg (Clean Plate)와 train_video_XX.mp4를 프로파일 폴더에 자동 분류 저장.
 
@@ -116,7 +118,7 @@ Device Control: OpenCV + pygrabber (DirectShow)
 
 Language: Python 3.10
 
-GUI: PySide6 (Modern Dark Theme)
+GUI: PySide6 (Modern Dark Theme) - [Critical] 100% Korean Localization
 
 Graphics: OpenGL 4.6 (ModernGL) & CUDA (CuPy) Direct Processing
 
@@ -167,7 +169,8 @@ Step 1. DLL 수집: tools/collect_libs.py 실행 -> 시스템 내 흩어진 NVID
 Step 2. 코드 프리징: PyInstaller를 사용하여 Python 스크립트를 단일 폴더 방식의 .exe로 변환.
 Step 3. 리소스 병합: assets 및 libs 폴더를 빌드 결과물에 포함.
 Step 4. 인스톨러 생성: Inno Setup 스크립트(.iss)를 컴파일하여 MUSE_Setup_v1.0.exe 생성.
-- 기능: 바탕화면 바로가기 생성, 시작 메뉴 등록, 관리자 권한 요청.
+
+기능: 바탕화면 바로가기 생성, 시작 메뉴 등록, 관리자 권한 요청.
 
 6.4 실행 메커니즘 (Runtime Logic)
 

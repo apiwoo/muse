@@ -35,7 +35,8 @@ from studio.pages import (
 class MuseStudio(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MUSE Studio v3.0 (Modern UI)")
+        # [한글화] 윈도우 타이틀 변경
+        self.setWindowTitle("MUSE 스튜디오 v3.0 (한국어 버전)")
         self.resize(1280, 800)
         
         # [Win32 Native Dark Title Bar]

@@ -43,11 +43,12 @@ class Page1_ProfileSelect(QWidget):
 
         # Header
         header_layout = QVBoxLayout()
-        title = QLabel("Welcome to MUSE Studio")
+        # [한글화] 환영 메시지
+        title = QLabel("MUSE 스튜디오에 오신 것을 환영합니다")
         title.setObjectName("Title")
         title.setAlignment(Qt.AlignCenter)
         
-        subtitle = QLabel("Select a profile to start training your AI persona.")
+        subtitle = QLabel("나만의 AI 모델을 만들기 위해 프로파일을 선택하세요.")
         subtitle.setObjectName("Subtitle")
         subtitle.setAlignment(Qt.AlignCenter)
         
@@ -73,7 +74,8 @@ class Page1_ProfileSelect(QWidget):
         for i in reversed(range(self.scroll_layout.count())): 
             self.scroll_layout.itemAt(i).widget().setParent(None)
 
-        btn_new = QPushButton("+  Create New Profile")
+        # [한글화] 새 프로파일 버튼
+        btn_new = QPushButton("+  새 프로파일 만들기")
         btn_new.setProperty("class", "primary") 
         btn_new.setCursor(Qt.PointingHandCursor)
         btn_new.clicked.connect(self.on_click_new)
@@ -97,7 +99,8 @@ class Page1_ProfileSelect(QWidget):
             sorted_profiles.extend(profiles)
 
             if sorted_profiles:
-                lbl_exist = QLabel("EXISTING PROFILES")
+                # [한글화] 기존 목록 라벨
+                lbl_exist = QLabel("기존 프로파일 목록")
                 lbl_exist.setStyleSheet("color: #666; font-weight: bold; font-size: 12px; margin-bottom: 5px;")
                 self.scroll_layout.addWidget(lbl_exist)
 
@@ -141,12 +144,14 @@ class Page2_CameraConnect(QWidget):
         layout.setSpacing(30)
         layout.setAlignment(Qt.AlignCenter)
 
-        self.lbl_title = QLabel("Connect Camera")
+        # [한글화] 타이틀
+        self.lbl_title = QLabel("카메라 연결하기")
         self.lbl_title.setObjectName("Title")
         self.lbl_title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_title)
         
-        self.lbl_info = QLabel("Target: ???")
+        # [한글화] 서브 타이틀
+        self.lbl_info = QLabel("대상: ???")
         self.lbl_info.setObjectName("Subtitle")
         self.lbl_info.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_info)
@@ -169,7 +174,8 @@ class Page2_CameraConnect(QWidget):
         hbox.addWidget(btn_refresh)
         card_layout.addLayout(hbox)
 
-        self.btn_connect = QPushButton("Connect Camera")
+        # [한글화] 버튼
+        self.btn_connect = QPushButton("카메라 연결")
         self.btn_connect.setProperty("class", "primary")
         self.btn_connect.setCursor(Qt.PointingHandCursor)
         self.btn_connect.clicked.connect(self.connect_camera)
@@ -177,7 +183,8 @@ class Page2_CameraConnect(QWidget):
         
         layout.addWidget(card)
 
-        btn_back = QPushButton("← Back")
+        # [한글화] 뒤로가기 버튼
+        btn_back = QPushButton("← 뒤로 가기")
         btn_back.setStyleSheet("background: transparent; color: #888; font-size: 14px; border: none;")
         btn_back.setCursor(Qt.PointingHandCursor)
         btn_back.clicked.connect(self.go_back.emit)
@@ -185,8 +192,9 @@ class Page2_CameraConnect(QWidget):
 
     def set_target(self, name, mode):
         self.target_profile = name
-        mode_str = "Appending Data" if mode == 'append' else "Reset & New Data"
-        self.lbl_info.setText(f"Profile: {name.upper()}  |  Mode: {mode_str}")
+        # [한글화] 모드 설명
+        mode_str = "데이터 추가 (Append)" if mode == 'append' else "초기화 및 새로 만들기"
+        self.lbl_info.setText(f"프로파일: {name.upper()}  |  모드: {mode_str}")
         self.refresh_cameras()
 
     def refresh_cameras(self):
@@ -198,11 +206,11 @@ class Page2_CameraConnect(QWidget):
                 for i, name in enumerate(devices):
                     self.combo_cam.addItem(f"[{i}] {name}", i)
             except:
-                self.combo_cam.addItem("❌ Camera Search Failed")
+                self.combo_cam.addItem("❌ 카메라 검색 실패")
         else:
-            self.combo_cam.addItem("⚠️ pygrabber missing (Use ID)")
+            self.combo_cam.addItem("⚠️ pygrabber 없음 (ID로 표시)")
             for i in range(5):
-                self.combo_cam.addItem(f"Camera Device {i}", i)
+                self.combo_cam.addItem(f"카메라 장치 {i}", i)
 
     def connect_camera(self):
         idx = self.combo_cam.currentData()
@@ -211,7 +219,7 @@ class Page2_CameraConnect(QWidget):
              else: return
 
         self.btn_connect.setEnabled(False)
-        self.btn_connect.setText("Connecting... ⏳")
+        self.btn_connect.setText("연결 중... ⏳")
         
         self.loader_thread = CameraLoader(idx)
         self.loader_thread.finished.connect(self.on_connected)
@@ -224,14 +232,14 @@ class Page2_CameraConnect(QWidget):
         # We release it here, and let the RecorderWorker re-open it natively.
         cap.release()
         
-        self.btn_connect.setText("Connect Camera")
+        self.btn_connect.setText("카메라 연결")
         self.btn_connect.setEnabled(True)
         self.camera_ready.emit(idx) # Emit INDEX, not OBJECT
 
     def on_error(self, msg):
-        self.btn_connect.setText("Connect Camera")
+        self.btn_connect.setText("카메라 연결")
         self.btn_connect.setEnabled(True)
-        QMessageBox.warning(self, "Connection Error", msg)
+        QMessageBox.warning(self, "연결 오류", msg)
 
 # ==============================================================================
 # [PAGE 3] Data Collection (Optimized)
@@ -388,7 +396,8 @@ class Page3_DataCollection(QWidget):
         sb_layout.setContentsMargins(30, 40, 30, 40)
         sb_layout.setSpacing(20)
 
-        lbl_title = QLabel("Data Studio (GPU)")
+        # [한글화]
+        lbl_title = QLabel("데이터 스튜디오 (GPU)")
         lbl_title.setObjectName("Title")
         lbl_title.setStyleSheet("font-size: 24px; border: none;")
         sb_layout.addWidget(lbl_title)
@@ -397,7 +406,7 @@ class Page3_DataCollection(QWidget):
         self.status_card.setStyleSheet("background-color: #2D2D2D; border-radius: 10px; padding: 15px;")
         sc_layout = QVBoxLayout(self.status_card)
         
-        self.lbl_bg_status = QLabel("❌ Background Missing")
+        self.lbl_bg_status = QLabel("❌ ⚠️ 배경 촬영 필요")
         self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px;")
         sc_layout.addWidget(self.lbl_bg_status)
         
@@ -408,13 +417,15 @@ class Page3_DataCollection(QWidget):
         
         sb_layout.addWidget(self.status_card)
 
-        self.btn_bg = QPushButton("📸  Capture Background (B)")
+        # [한글화]
+        self.btn_bg = QPushButton("📸  빈 배경 촬영하기 (단축키 B)")
         self.btn_bg.setProperty("class", "card")
         self.btn_bg.setCursor(Qt.PointingHandCursor)
         self.btn_bg.clicked.connect(self.capture_background)
         sb_layout.addWidget(self.btn_bg)
 
-        self.btn_record = QPushButton("🔴  Start Recording")
+        # [한글화]
+        self.btn_record = QPushButton("🔴  녹화 시작")
         self.btn_record.setProperty("class", "card")
         self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
         self.btn_record.setCheckable(True)
@@ -425,13 +436,15 @@ class Page3_DataCollection(QWidget):
 
         sb_layout.addStretch()
 
-        self.btn_train = QPushButton("Next: Start AI Training  →")
+        # [한글화]
+        self.btn_train = QPushButton("다음: AI 학습 시작하기  →")
         self.btn_train.setProperty("class", "primary")
         self.btn_train.setCursor(Qt.PointingHandCursor)
         self.btn_train.clicked.connect(self.on_train_click)
         sb_layout.addWidget(self.btn_train)
 
-        self.btn_home = QPushButton("Cancel & Home")
+        # [한글화]
+        self.btn_home = QPushButton("취소하고 홈으로")
         self.btn_home.setStyleSheet("background: transparent; color: #666; margin-top: 10px; border: none;")
         self.btn_home.setCursor(Qt.PointingHandCursor)
         self.btn_home.clicked.connect(self.on_home_click)
@@ -448,7 +461,7 @@ class Page3_DataCollection(QWidget):
         if os.path.exists(bg_path):
             self.on_bg_captured(True)
         else:
-            self.lbl_bg_status.setText("⚠️ Missing Background")
+            self.lbl_bg_status.setText("⚠️ 배경 촬영 필요")
             self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border:none;")
             self.btn_record.setEnabled(False)
             
@@ -485,7 +498,8 @@ class Page3_DataCollection(QWidget):
 
     def on_bg_captured(self, success):
         if success:
-            self.lbl_bg_status.setText("✅ Background Ready")
+            # [한글화]
+            self.lbl_bg_status.setText("✅ 배경 준비 완료")
             self.lbl_bg_status.setStyleSheet("color: #00ADB5; font-weight: bold; font-size: 14px; border:none;")
             self.btn_record.setEnabled(True)
 
@@ -494,11 +508,13 @@ class Page3_DataCollection(QWidget):
 
         if self.btn_record.isChecked():
             self.recorder_thread.start_recording()
-            self.btn_record.setText("⏹  STOP RECORDING")
+            # [한글화]
+            self.btn_record.setText("⏹  녹화 중지")
             self.btn_record.setStyleSheet("background-color: #FF5252; color: white; border-radius: 12px; font-weight: bold; font-size: 16px; border: none;")
         else:
             self.recorder_thread.stop_recording()
-            self.btn_record.setText("🔴  Start Recording")
+            # [한글화]
+            self.btn_record.setText("🔴  녹화 시작")
             self.btn_record.setProperty("class", "card")
             self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
             self.btn_record.style().unpolish(self.btn_record)
@@ -548,18 +564,21 @@ class Page4_AiTraining(QWidget):
         layout.setContentsMargins(60, 60, 60, 60)
         layout.setSpacing(25)
 
-        layout.addWidget(QLabel("AI Model Generation", objectName="Title"), alignment=Qt.AlignCenter)
-        layout.addWidget(QLabel("Processing Pipeline: Labeling -> Training -> Optimization", objectName="Subtitle"), alignment=Qt.AlignCenter)
+        # [한글화]
+        layout.addWidget(QLabel("AI 모델 생성 마법사", objectName="Title"), alignment=Qt.AlignCenter)
+        layout.addWidget(QLabel("진행 과정: 라벨링 → 학습 → 최적화", objectName="Subtitle"), alignment=Qt.AlignCenter)
 
         self.pbar = QProgressBar()
         layout.addWidget(self.pbar)
         
-        self.lbl_status = QLabel("Ready to start.")
+        # [한글화]
+        self.lbl_status = QLabel("시작할 준비가 되었습니다.")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("color: #00ADB5; font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(self.lbl_status)
 
-        self.btn_start = QPushButton("Start Pipeline")
+        # [한글화]
+        self.btn_start = QPushButton("학습 시작하기")
         self.btn_start.setProperty("class", "primary")
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self.start_pipeline)
@@ -576,7 +595,8 @@ class Page4_AiTraining(QWidget):
         """)
         layout.addWidget(self.log_view)
 
-        self.btn_home = QPushButton("Done. Go Home")
+        # [한글화]
+        self.btn_home = QPushButton("완료. 홈으로 이동")
         self.btn_home.setStyleSheet("background: #333; color: white; padding: 15px; border-radius: 8px; border:none;")
         self.btn_home.setVisible(False)
         self.btn_home.clicked.connect(self.go_home.emit)
@@ -584,17 +604,19 @@ class Page4_AiTraining(QWidget):
 
     def start_pipeline(self):
         self.btn_start.setEnabled(False)
-        self.btn_start.setText("Processing... Do NOT Close")
+        # [한글화]
+        self.btn_start.setText("작업 중입니다... 창을 닫지 마세요!")
         self.log_view.clear()
         
         self.worker = PipelineWorker(self.root_dir)
         self.worker.log_signal.connect(self.log_view.append)
         self.worker.progress_signal.connect(lambda v, t: (self.pbar.setValue(v), self.lbl_status.setText(t)))
         self.worker.finished_signal.connect(self.on_finished)
-        self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "Error", e))
+        self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "오류 발생", e))
         self.worker.start()
 
     def on_finished(self):
-        self.btn_start.setText("Completed")
-        self.lbl_status.setText("All tasks finished successfully.")
+        # [한글화]
+        self.btn_start.setText("작업 완료")
+        self.lbl_status.setText("모든 학습 과정이 성공적으로 끝났습니다.")
         self.btn_home.setVisible(True)

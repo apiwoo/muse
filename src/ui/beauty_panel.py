@@ -106,12 +106,14 @@ class BeautyPanel(QWidget):
         header.setStyleSheet("background-color: #121212; padding: 20px;")
         h_layout = QVBoxLayout(header)
         
-        self.title_label = QLabel("MUSE ENGINE")
+        # [한글화] 헤더 타이틀
+        self.title_label = QLabel("MUSE 뷰티 엔진")
         self.title_label.setStyleSheet("font-size: 22px; font-weight: 800; letter-spacing: 1px; color: #FFF;")
         self.title_label.setAlignment(Qt.AlignCenter)
         h_layout.addWidget(self.title_label)
         
-        self.info_label = QLabel("ACTIVE PROFILE: DEFAULT")
+        # [한글화] 프로파일 정보
+        self.info_label = QLabel("현재 프로파일: 기본(DEFAULT)")
         self.info_label.setStyleSheet("color: #666; font-size: 11px; font-weight: bold;")
         self.info_label.setAlignment(Qt.AlignCenter)
         h_layout.addWidget(self.info_label)
@@ -127,19 +129,21 @@ class BeautyPanel(QWidget):
         face_layout.setContentsMargins(15, 20, 15, 20)
         face_layout.setSpacing(25)
         
-        face_group = QGroupBox("Facial Geometry")
+        # [한글화] 그룹 타이틀
+        face_group = QGroupBox("얼굴 성형 (Facial Geometry)")
         f_inner = QVBoxLayout()
         f_inner.setSpacing(15)
         
-        self.slider_eye = ModernSlider("EYES", 0.0)
+        # [한글화] 슬라이더 라벨
+        self.slider_eye = ModernSlider("눈 크기", 0.0)
         self.slider_eye.valueChanged.connect(lambda v: self._update_param('eye_scale', v))
         f_inner.addWidget(self.slider_eye)
 
-        self.slider_chin = ModernSlider("V-LINE", 0.0)
+        self.slider_chin = ModernSlider("턱선(V라인)", 0.0)
         self.slider_chin.valueChanged.connect(lambda v: self._update_param('face_v', v))
         f_inner.addWidget(self.slider_chin)
 
-        self.slider_head = ModernSlider("HEAD", 0.0)
+        self.slider_head = ModernSlider("머리 크기", 0.0)
         self.slider_head.valueChanged.connect(lambda v: self._update_param('head_scale', v))
         f_inner.addWidget(self.slider_head)
         
@@ -155,32 +159,34 @@ class BeautyPanel(QWidget):
         body_layout.setSpacing(25)
 
         # Debug
-        debug_group = QGroupBox("Visualization")
+        # [한글화] 디버그 옵션
+        debug_group = QGroupBox("시각화 도구")
         d_inner = QVBoxLayout()
-        self.chk_body_debug = QCheckBox("Show Skeleton Overlay")
+        self.chk_body_debug = QCheckBox("AI 뼈대(관절) 보기")
         self.chk_body_debug.toggled.connect(lambda v: self._update_param('show_body_debug', v))
         d_inner.addWidget(self.chk_body_debug)
         debug_group.setLayout(d_inner)
         body_layout.addWidget(debug_group)
 
         # Body Sliders
-        body_group = QGroupBox("Body Morphing")
+        # [한글화] 그룹 및 슬라이더
+        body_group = QGroupBox("체형 보정 (Body Morphing)")
         b_inner = QVBoxLayout()
         b_inner.setSpacing(15)
 
-        self.slider_shoulder = ModernSlider("SHOULDERS", 0.0)
+        self.slider_shoulder = ModernSlider("어깨 보정", 0.0)
         self.slider_shoulder.valueChanged.connect(lambda v: self._update_param('shoulder_narrow', v))
         b_inner.addWidget(self.slider_shoulder)
 
-        self.slider_ribcage = ModernSlider("RIBCAGE", 0.0)
+        self.slider_ribcage = ModernSlider("흉곽(상체) 줄임", 0.0)
         self.slider_ribcage.valueChanged.connect(lambda v: self._update_param('ribcage_slim', v))
         b_inner.addWidget(self.slider_ribcage)
 
-        self.slider_waist = ModernSlider("WAIST", 0.0)
+        self.slider_waist = ModernSlider("허리 라인", 0.0)
         self.slider_waist.valueChanged.connect(lambda v: self._update_param('waist_slim', v))
         b_inner.addWidget(self.slider_waist)
 
-        self.slider_hip = ModernSlider("HIPS", 0.0)
+        self.slider_hip = ModernSlider("골반 라인", 0.0)
         self.slider_hip.valueChanged.connect(lambda v: self._update_param('hip_widen', v))
         b_inner.addWidget(self.slider_hip)
 
@@ -189,8 +195,9 @@ class BeautyPanel(QWidget):
         body_layout.addStretch()
         body_tab.setLayout(body_layout)
 
-        tabs.addTab(face_tab, "FACE")
-        tabs.addTab(body_tab, "BODY")
+        # [한글화] 탭 이름
+        tabs.addTab(face_tab, "얼굴 (Face)")
+        tabs.addTab(body_tab, "전신 (Body)")
         layout.addWidget(tabs)
 
         self.setLayout(layout)
@@ -200,7 +207,8 @@ class BeautyPanel(QWidget):
         self.paramChanged.emit(self.current_params)
 
     def set_profile_info(self, profile_name):
-        self.info_label.setText(f"ACTIVE PROFILE: {profile_name.upper()}")
+        # [한글화]
+        self.info_label.setText(f"현재 프로파일: {profile_name.upper()}")
 
     def update_sliders_from_config(self, params):
         self.blockSignals(True)

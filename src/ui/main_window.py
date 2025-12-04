@@ -21,7 +21,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Project MUSE: Visual Supremacy (v2.1 GUI)")
+        # [한글화] 윈도우 타이틀
+        self.setWindowTitle("프로젝트 MUSE: AI 방송 시스템 (v2.1 GUI)")
         self.resize(1280, 720)
         self.setStyleSheet("background-color: #121212; color: #F0F0F0;")
 
@@ -33,7 +34,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.viewport)
 
         # 2. 우측 도킹 패널 (뷰티 컨트롤)
-        self.dock_panel = QDockWidget("Controls", self)
+        # [한글화] 패널 타이틀
+        self.dock_panel = QDockWidget("제어판 (Controls)", self)
         self.dock_panel.setAllowedAreas(Qt.RightDockWidgetArea)
         self.dock_panel.setFeatures(QDockWidget.NoDockWidgetFeatures) # 이동 불가, 닫기 불가
         
@@ -43,7 +45,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_panel)
 
         # 상태 표시줄
-        self.status_label = QLabel("Ready. Press 'B' to reset background.")
+        # [한글화] 안내 문구
+        self.status_label = QLabel("준비됨. 배경이 바뀌었다면 'B' 키를 눌러 리셋하세요.")
         self.status_label.setStyleSheet("padding: 5px; color: #888;")
         self.statusBar().addWidget(self.status_label)
 
@@ -72,7 +75,8 @@ class MainWindow(QMainWindow):
         if event.key() == Qt.Key_B:
             print("⌨️ [Key] 'B' Pressed -> Request Background Reset")
             self.request_bg_reset.emit()
-            self.status_label.setText("Background Reset Triggered!")
+            # [한글화] 상태 업데이트
+            self.status_label.setText("배경 리셋 중...")
         else:
             super().keyPressEvent(event)
 
