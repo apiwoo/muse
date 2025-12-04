@@ -10,7 +10,11 @@ import ctypes
 
 # [Log Fix] OpenCV 로그 레벨 조정
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
-os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+
+# [FIX] 30FPS 복구: MSMF 강제 비활성화 코드 제거
+# 이 코드가 있으면 DSHOW 모드로 강제되면서 MJPG 압축이 풀려 6FPS로 떨어지는 현상이 발생합니다.
+# 기본값(MSMF)을 사용하면 Windows가 자동으로 MJPG 코덱을 사용하여 대역폭을 확보합니다.
+# os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 try:

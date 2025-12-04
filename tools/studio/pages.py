@@ -460,7 +460,9 @@ class Page3_DataCollection(QWidget):
         
         # High Speed Timer
         self.render_timer.timeout.connect(self.update_view)
-        self.render_timer.start(1) 
+        # [FIX] UI 렌더링 부하 감소 (1ms -> 16ms, 약 60FPS)
+        # 너무 잦은 UI 갱신 요청은 메인 스레드에 병목을 유발합니다.
+        self.render_timer.start(16)
 
     def update_view(self):
         if not self.recorder_thread: return
