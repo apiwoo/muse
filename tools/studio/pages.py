@@ -1,20 +1,23 @@
 # Project MUSE - pages.py
-# Wizard Pages for Studio
+# Wizard Pages for Studio (OpenGL Integrated + Shared Memory Optimization)
+# (C) 2025 MUSE Corp.
 
 import os
 import cv2
 import glob
 import time
+import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QFrame, QDialog, QMessageBox, QComboBox, QSizePolicy, QProgressBar, QTextEdit
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtGui import QPixmap, QImage
 
 # Import other studio modules
 from studio.widgets import NewProfileDialog, ProfileActionDialog
 from studio.workers import CameraLoader, PipelineWorker
+from studio.gl_widget import CameraGLWidget  # OpenGL Viewport
 
 try:
     from pygrabber.dshow_graph import FilterGraph
@@ -236,40 +239,46 @@ class Page2_CameraConnect(QWidget):
         QMessageBox.warning(self, "Connection Error", msg)
 
 # ==============================================================================
-# [PAGE 3] Data Collection
+# [PAGE 3] Data Collection (Optimized)
 # ==============================================================================
 
-# [New] Dedicated Recorder Thread (Imitating recorder.py's 'while True' loop)
 class RecorderWorker(QThread):
-    # Signals to update UI safely
-    time_updated = Signal(float)  # current_total_time
-    bg_status_updated = Signal(bool) # True if BG captured
+    """
+    [Optimized] Shared Memory Worker
+    - Removes heavy data transfer via Signal.
+    - Uses shared variable + Mutex for Zero-Copy access.
+    """
+    time_updated = Signal(float)
+    bg_status_updated = Signal(bool)
+    frame_ready = Signal() # Lightweight notification (No data payload)
     
-    def __init__(self, cap, profile_dir, window_name):
+    def __init__(self, cap, profile_dir):
         super().__init__()
         self.cap = cap
         self.profile_dir = profile_dir
-        self.window_name = window_name
         self.running = True
         
-        # State Flags (Thread-safe controls)
+        # [Shared Memory]
+        self.m_lock = QMutex()
+        self.m_frame = None
+        
+        # State Flags
         self.is_recording = False
         self.req_bg_capture = False
         
-        # Logic variables
         self.video_writer = None
         self.current_start_time = 0
         self.accumulated_time = 0.0
         
-        # Init duration calc
+        # Log Timer
+        self.last_log_time = 0
+        self.last_reported_int_time = -1
+        
         self.accumulated_time = self._calc_existing_duration(profile_dir)
 
     def _calc_existing_duration(self, folder):
         total = 0.0
-        # Quick scan
         files = glob.glob(os.path.join(folder, "train_video_*.mp4"))
-        # Estimating duration might be slow, so we just count or assume 0 for speed if needed
-        # But let's try to be accurate like recorder.py
         for f in files:
             try:
                 cap = cv2.VideoCapture(f)
@@ -284,79 +293,76 @@ class RecorderWorker(QThread):
     def start_recording(self):
         self.is_recording = True
         self.current_start_time = time.time()
-        
-        # Setup Video Writer
         timestamp = int(time.time())
         path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
         w, h = int(self.cap.get(3)), int(self.cap.get(4))
-        self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (w, h))
+        
+        # [Fix] Use actual camera FPS instead of hardcoded 30.0
+        # If camera doesn't report FPS, fallback to 30.0
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0: fps = 30.0
+            
+        self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
 
     def stop_recording(self):
         self.is_recording = False
         if self.video_writer:
             self.video_writer.release()
             self.video_writer = None
-        # Add elapsed time
         self.accumulated_time += (time.time() - self.current_start_time)
 
     def trigger_bg_capture(self):
         self.req_bg_capture = True
 
     def run(self):
-        """The 'recorder.py' style infinite loop"""
-        cv2.namedWindow(self.window_name)
-        
+        print("📸 [Worker] Capture Loop Started (Shared Memory Mode).")
         while self.running and self.cap.isOpened():
-            # 1. Read Frame (Blocking is okay here, it's a separate thread!)
+            curr_time = time.time()
             ret, frame = self.cap.read()
+            
+            if curr_time - self.last_log_time > 1.0:
+                status = "OK" if ret else "FAIL"
+                shape = frame.shape if frame is not None else "None"
+                brightness = np.mean(frame) if frame is not None else 0
+                print(f"📸 [Worker] Camera Status: {status} | Frame: {shape} | Avg Brightness: {brightness:.1f}")
+                self.last_log_time = curr_time
+
             if not ret:
-                time.sleep(0.01)
+                self.msleep(5)
                 continue
             
-            display = frame.copy()
+            # [Shared Memory Update]
+            # 데이터를 복사하지 않고 참조만 업데이트 (Lock 보호)
+            with QMutexLocker(self.m_lock):
+                self.m_frame = frame
             
-            # 2. Handle BG Capture Request
+            # 메인 스레드에 "가져가라"고 알림
+            self.frame_ready.emit()
+            
+            # Handle BG Capture
             if self.req_bg_capture:
                 bg_path = os.path.join(self.profile_dir, "background.jpg")
                 cv2.imwrite(bg_path, frame)
                 self.bg_status_updated.emit(True)
                 self.req_bg_capture = False
                 
-            # 3. Handle Recording
+            # Handle Recording
             total_time = self.accumulated_time
-            
             if self.is_recording:
                 elapsed = time.time() - self.current_start_time
                 total_time += elapsed
-                
-                # Write to file
                 if self.video_writer:
                     self.video_writer.write(frame)
-                
-                # UI Indicators
-                cv2.circle(display, (30, 30), 10, (0, 0, 255), -1)
-                cv2.putText(display, "REC", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            else:
-                # Ready Indicators
-                cv2.putText(display, "READY", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-            # 4. Native Display (Fastest)
-            cv2.imshow(self.window_name, display)
             
-            # 5. Native Key Events (Like 'B' for Background)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('b'):
-                self.req_bg_capture = True
+            # Throttle Timer Update
+            current_int_time = int(total_time)
+            if current_int_time > self.last_reported_int_time:
+                self.time_updated.emit(total_time)
+                self.last_reported_int_time = current_int_time
             
-            # 6. Update UI Labels (Emit signal)
-            self.time_updated.emit(total_time)
-
-        # Cleanup when loop ends
         if self.video_writer:
             self.video_writer.release()
-        try:
-            cv2.destroyWindow(self.window_name)
-        except: pass
+        print("📸 [Worker] Capture Loop Ended.")
 
     def stop(self):
         self.running = False
@@ -373,9 +379,6 @@ class Page3_DataCollection(QWidget):
         self.recorder_thread = None
         self.current_profile_dir = ""
         
-        # [Recorder Style] Native OpenCV Window Name
-        self.window_name = "MUSE Data Studio (Native Preview)"
-        
         self.init_ui()
 
     def init_ui(self):
@@ -383,19 +386,13 @@ class Page3_DataCollection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Left: Placeholder (Video will be in Popup)
-        self.lbl_camera = QLabel(
-            "🎥\n\nNATIVE CAMERA ACTIVE\n\n"
-            "Performance Mode Enabled.\n"
-            "Checking camera feed in popup window...\n\n"
-            "(Zero Latency / No Frame Drops)"
-        )
-        self.lbl_camera.setAlignment(Qt.AlignCenter)
-        self.lbl_camera.setStyleSheet("background-color: #000; color: #666; font-size: 16px; font-weight: bold;")
-        
-        layout.addWidget(self.lbl_camera, stretch=3)
+        # [LEFT] OpenGL Viewport
+        self.gl_widget = CameraGLWidget()
+        self.gl_widget.setMinimumSize(320, 240)
+        self.gl_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.gl_widget, stretch=3)
 
-        # Right: Controls (Sidebar)
+        # [RIGHT] Controls
         sidebar = QFrame()
         sidebar.setStyleSheet("background-color: #1E1E1E; border-left: 1px solid #333;")
         sidebar.setFixedWidth(400)
@@ -405,7 +402,7 @@ class Page3_DataCollection(QWidget):
         sb_layout.setSpacing(20)
 
         # Title
-        lbl_title = QLabel("Data Studio")
+        lbl_title = QLabel("Data Studio (GPU)")
         lbl_title.setObjectName("Title")
         lbl_title.setStyleSheet("font-size: 24px; border: none;")
         sb_layout.addWidget(lbl_title)
@@ -434,7 +431,7 @@ class Page3_DataCollection(QWidget):
         sb_layout.addWidget(self.btn_bg)
 
         self.btn_record = QPushButton("🔴  Start Recording")
-        self.btn_record.setProperty("class", "card") # Default style
+        self.btn_record.setProperty("class", "card")
         self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
         self.btn_record.setCheckable(True)
         self.btn_record.setEnabled(False)
@@ -451,23 +448,18 @@ class Page3_DataCollection(QWidget):
         self.btn_train.clicked.connect(self.on_train_click)
         sb_layout.addWidget(self.btn_train)
 
-        btn_home = QPushButton("Cancel & Home")
-        btn_home.setStyleSheet("background: transparent; color: #666; margin-top: 10px; border: none;")
-        btn_home.setCursor(Qt.PointingHandCursor)
-        btn_home.clicked.connect(self.on_home_click)
-        sb_layout.addWidget(btn_home)
+        self.btn_home = QPushButton("Cancel & Home")
+        self.btn_home.setStyleSheet("background: transparent; color: #666; margin-top: 10px; border: none;")
+        self.btn_home.setCursor(Qt.PointingHandCursor)
+        self.btn_home.clicked.connect(self.on_home_click)
+        sb_layout.addWidget(self.btn_home)
 
         layout.addWidget(sidebar)
 
     def setup_session(self, cap, profile_name, profile_dir):
-        """
-        Initialize the Recorder Thread here.
-        Now the loop runs in a separate thread, just like recorder.py
-        """
         self.cap = cap
         self.current_profile_dir = profile_dir
         
-        # Check initial BG status
         bg_path = os.path.join(profile_dir, "background.jpg")
         if os.path.exists(bg_path):
             self.on_bg_captured(True)
@@ -477,10 +469,28 @@ class Page3_DataCollection(QWidget):
             self.btn_record.setEnabled(False)
             
         # Start Worker Thread
-        self.recorder_thread = RecorderWorker(self.cap, self.current_profile_dir, self.window_name)
+        self.recorder_thread = RecorderWorker(self.cap, self.current_profile_dir)
         self.recorder_thread.time_updated.connect(self.update_time_label)
         self.recorder_thread.bg_status_updated.connect(self.on_bg_captured)
+        
+        # [Fix] Connect lightweight signal to fetch slot
+        self.recorder_thread.frame_ready.connect(self.update_view)
+        
         self.recorder_thread.start()
+
+    def update_view(self):
+        """Fetch frame from shared memory and render"""
+        if not self.recorder_thread: return
+        
+        # Lock & Copy Reference
+        frame = None
+        with QMutexLocker(self.recorder_thread.m_lock):
+            if self.recorder_thread.m_frame is not None:
+                frame = self.recorder_thread.m_frame
+        
+        # Render (frame is just a reference here, copying happens in texture upload which is fast now)
+        if frame is not None:
+            self.gl_widget.render(frame)
 
     def capture_background(self):
         if self.recorder_thread:
@@ -496,23 +506,26 @@ class Page3_DataCollection(QWidget):
         if not self.recorder_thread: return
 
         if self.btn_record.isChecked():
-            # Start
             self.recorder_thread.start_recording()
             self.btn_record.setText("⏹  STOP RECORDING")
             self.btn_record.setStyleSheet("background-color: #FF5252; color: white; border-radius: 12px; font-weight: bold; font-size: 16px; border: none;")
         else:
-            # Stop
             self.recorder_thread.stop_recording()
             self.btn_record.setText("🔴  Start Recording")
             self.btn_record.setProperty("class", "card")
             self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
-            # Re-polish stylesheet
             self.btn_record.style().unpolish(self.btn_record)
             self.btn_record.style().polish(self.btn_record)
 
     def update_time_label(self, total_seconds):
         total = int(total_seconds)
         self.lbl_time.setText(f"{total//60:02d}:{total%60:02d}")
+    
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_B:
+            self.capture_background()
+        else:
+            super().keyPressEvent(event)
 
     def on_train_click(self):
         self._stop(); self.go_train.emit()
@@ -524,6 +537,8 @@ class Page3_DataCollection(QWidget):
             self.recorder_thread = None
         if self.cap: 
             self.cap.release()
+        if self.gl_widget:
+            self.gl_widget.cleanup()
 
 # ==============================================================================
 # [PAGE 4] AI Training
