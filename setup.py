@@ -4,7 +4,7 @@ import os
 import pkg_resources
 
 # ==============================================================================
-# [Project MUSE] Environment Setup Script (v9.1 Safety First)
+# [Project MUSE] Environment Setup Script (v9.2 Dependency Fix)
 # ==============================================================================
 
 # Critical Versions
@@ -112,6 +112,7 @@ def install_core_dependencies():
         "pygrabber",
         "timm",        
         "transformers",
+        "decord", # [Added] Required for SAM 2 Video Processing
         "git+https://github.com/facebookresearch/segment-anything-2.git"
     ]
 
@@ -154,11 +155,19 @@ def verify_install():
         print("   [ERROR] PyTorch            : Not Installed")
         all_pass = False
 
+    # Check decord explicitly
+    try:
+        import decord
+        print(f"   [OK] decord             : Installed")
+    except ImportError:
+        print("   [ERROR] decord             : Not Installed")
+        all_pass = False
+
     return all_pass
 
 def main():
     print("============================================================")
-    print("   Project MUSE - Environment Setup (v9.1 Safety First)")
+    print("   Project MUSE - Environment Setup (v9.2 Dependency Fix)")
     print("============================================================")
     
     uninstall_conflicts()

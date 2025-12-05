@@ -116,7 +116,15 @@ class AutoLabeler:
             
             video_masks = {}
             for frame_idx, obj_ids, mask_logits in self.sam_wrapper.propagate():
-                mask = (mask_logits[0] > 0.0).cpu().numpy().astype(np.uint8)
+                # [Fix] Ensure mask is 2D (H, W)
+                # mask_logits[0] might be (1, H, W) or (H, W) depending on SAM version/config
+                m_tensor = mask_logits[0]
+                mask = (m_tensor > 0.0).cpu().numpy().astype(np.uint8)
+                
+                # Check dimensions and squeeze if necessary (e.g., remove channel dim 1)
+                if mask.ndim > 2:
+                    mask = np.squeeze(mask)
+                    
                 video_masks[frame_idx] = mask
 
             # Save Data
@@ -131,6 +139,9 @@ class AutoLabeler:
                 mask = video_masks.get(curr_f_idx, None)
                 
                 if kpts is not None and mask is not None:
+                    # [Safety] Double check mask shape before saving
+                    if mask.ndim > 2: mask = np.squeeze(mask)
+                    
                     fname = f"{global_idx:06d}"
                     cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
                     cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
