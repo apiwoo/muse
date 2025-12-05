@@ -25,16 +25,16 @@ class AutoLabeler:
         self.root_data_dir = os.path.join(self.root_dir, "recorded_data", root_session)
         
         if not os.path.exists(self.root_data_dir):
-            print("❌ 데이터 폴더가 없습니다.")
+            print("[Error] 데이터 폴더가 없습니다.")
             self.profiles = []
             return
             
         self.profiles = [d for d in os.listdir(self.root_data_dir) if os.path.isdir(os.path.join(self.root_data_dir, d))]
 
-        print("👨‍🏫 [Teacher B] ViTPose (Keypoints) Loading...")
+        print("[Teacher B] ViTPose (Keypoints) Loading...")
         self.pose_model = VitPoseTrt(engine_path=os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine"))
 
-        print("👩‍🏫 [Teacher A] SAM 2 (Video Segmentation) Loading...")
+        print("[Teacher A] SAM 2 (Video Segmentation) Loading...")
         self.sam_wrapper = Sam2VideoWrapper(model_root=os.path.join(self.root_dir, "assets/models/segment_anything"))
 
     def process_all_profiles(self):
@@ -72,10 +72,10 @@ class AutoLabeler:
             # [Smart Check] 이미 처리된 영상이면 스킵
             if vid_name in processed_videos:
                 # 단, 이미지가 실제로 있는지 확인은 필요할 수 있음 (여기서는 로그 신뢰)
-                print(f"   ⏭️  Skipping processed video: {vid_name}")
+                print(f"   [Skip] Skipping processed video: {vid_name}")
                 continue
 
-            print(f"   🎥 Processing New Video: {vid_name}")
+            print(f"   [Video] Processing New Video: {vid_name}")
             
             # [GUI Log] 비디오 단위 진행률
             current_progress = int(((profile_idx * len(video_paths) + v_idx) / (total_profiles * len(video_paths))) * 100)
@@ -84,7 +84,7 @@ class AutoLabeler:
             try:
                 self.sam_wrapper.init_state(video_path)
             except Exception as e:
-                print(f"      ❌ SAM Init Failed: {e}")
+                print(f"      [Error] SAM Init Failed: {e}")
                 continue
 
             cap = cv2.VideoCapture(video_path)
@@ -95,14 +95,14 @@ class AutoLabeler:
             
             keypoints = self.pose_model.inference(first_frame)
             if keypoints is None:
-                print("      ⚠️ No pose detected in first frame.")
+                print("      [Warn] No pose detected in first frame.")
                 cap.release()
                 self.sam_wrapper.reset()
                 continue
 
             valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
             if len(valid_kpts) < 3:
-                print("      ⚠️ Not enough keypoints.")
+                print("      [Warn] Not enough keypoints.")
                 cap.release()
                 self.sam_wrapper.reset()
                 continue
@@ -112,7 +112,7 @@ class AutoLabeler:
             
             self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
 
-            print("      🌊 Propagating masks...")
+            print("      [SAM] Propagating masks...")
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
             video_masks = {}
@@ -167,9 +167,9 @@ class AutoLabeler:
             processed_videos.extend(newly_processed)
             with open(processed_log_path, "w") as f:
                 json.dump(processed_videos, f, indent=4)
-            print(f"   ✅ Added {len(newly_processed)} videos to processed log.")
+            print(f"   [OK] Added {len(newly_processed)} videos to processed log.")
         else:
-            print("   ✨ No new videos to process.")
+            print("   [Info] No new videos to process.")
 
     def _get_next_index(self, dir_path):
         files = glob.glob(os.path.join(dir_path, "*.jpg"))

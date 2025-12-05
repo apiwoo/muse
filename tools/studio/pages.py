@@ -258,6 +258,7 @@ class RecorderWorker(QThread):
     [Optimized] Shared Memory Worker (Self-Contained)
     - Opens camera INSIDE the thread (Debug Tool Strategy)
     - Enforces MJPG for 30FPS@1080p
+    - [FIX] Thread-Safe Video Writing
     """
     time_updated = Signal(float)
     bg_status_updated = Signal(bool)
@@ -273,7 +274,12 @@ class RecorderWorker(QThread):
         self.m_frame = None
         self.m_frame_id = 0 
         
+        # Internal Recording State
         self.is_recording = False
+        
+        # Command Flags (Thread Safe Control)
+        self.cmd_start_rec = False
+        self.cmd_stop_rec = False
         self.req_bg_capture = False
         
         self.video_writer = None
@@ -296,22 +302,12 @@ class RecorderWorker(QThread):
         return total
 
     def start_recording(self):
-        if not self.cap or not self.cap.isOpened(): return
-        self.is_recording = True
-        self.current_start_time = time.time()
-        timestamp = int(time.time())
-        path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
-        w, h = int(self.cap.get(3)), int(self.cap.get(4))
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0: fps = 30.0
-        self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+        # Trigger flag for loop to handle
+        self.cmd_start_rec = True
 
     def stop_recording(self):
-        self.is_recording = False
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
-        self.accumulated_time += (time.time() - self.current_start_time)
+        # Trigger flag for loop to handle
+        self.cmd_stop_rec = True
 
     def trigger_bg_capture(self):
         self.req_bg_capture = True
@@ -320,11 +316,10 @@ class RecorderWorker(QThread):
         self.accumulated_time = self._calc_existing_duration(self.profile_dir)
         
         # [Strategy] Open Camera LOCALLY (Inside Thread)
-        # This matches the 'debug_pipeline.py' architecture that achieved 30 FPS.
         print(f"📸 [Worker] Opening Camera {self.cam_index} Native...")
         self.cap = cv2.VideoCapture(self.cam_index)
         
-        # [Force Settings] Just like the debug tool
+        # [Force Settings]
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -344,23 +339,62 @@ class RecorderWorker(QThread):
                 self.m_frame = frame
                 self.m_frame_id += 1 
             
+            # --- BACKGROUND CAPTURE ---
             if self.req_bg_capture:
                 bg_path = os.path.join(self.profile_dir, "background.jpg")
+                os.makedirs(self.profile_dir, exist_ok=True)
                 cv2.imwrite(bg_path, frame)
                 self.bg_status_updated.emit(True)
                 self.req_bg_capture = False
-                
+            
+            # --- RECORDING LOGIC (THREAD SAFE) ---
+            
+            # 1. Handle START Command
+            if self.cmd_start_rec:
+                self.cmd_start_rec = False
+                if not self.is_recording:
+                    self.is_recording = True
+                    self.current_start_time = time.time()
+                    
+                    timestamp = int(time.time())
+                    path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
+                    
+                    # [Fix] Use ACTUAL frame size, not property
+                    h, w = frame.shape[:2]
+                    fps = self.cap.get(cv2.CAP_PROP_FPS)
+                    if fps <= 0: fps = 30.0
+                    
+                    os.makedirs(self.profile_dir, exist_ok=True)
+                    self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                    print(f"🎥 [Worker] Recording started: {w}x{h} @ {fps}fps -> {path}")
+
+            # 2. Handle STOP Command
+            if self.cmd_stop_rec:
+                self.cmd_stop_rec = False
+                if self.is_recording:
+                    self.is_recording = False
+                    if self.video_writer:
+                        self.video_writer.release()
+                        self.video_writer = None
+                    self.accumulated_time += (time.time() - self.current_start_time)
+                    print("🎥 [Worker] Recording stopped.")
+
+            # 3. Write Frame
             if self.is_recording:
                 elapsed = time.time() - self.current_start_time
                 total_time = self.accumulated_time + elapsed
                 
-                if self.video_writer:
-                    self.video_writer.write(frame)
+                if self.video_writer and self.video_writer.isOpened():
+                    try:
+                        self.video_writer.write(frame)
+                    except Exception as e:
+                        print(f"❌ [Worker] Write Error: {e}")
                 
                 if int(total_time) > self.last_reported_int_time:
                     self.time_updated.emit(total_time)
                     self.last_reported_int_time = int(total_time)
             
+        # Clean up
         if self.video_writer:
             self.video_writer.release()
         if self.cap:

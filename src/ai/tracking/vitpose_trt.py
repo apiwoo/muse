@@ -25,7 +25,7 @@ class VitPoseTrt:
         - Model: ViT-Huge (COCO 17 Keypoints)
         - V2.0 Update: Letterbox Preprocessing (비율 왜곡 방지)
         """
-        print(f"🚀 [ViTPose] TensorRT 엔진 로딩 중: {os.path.basename(engine_path)}")
+        print(f"[ViTPose] TensorRT 엔진 로딩 중: {os.path.basename(engine_path)}")
         
         self.logger = trt.Logger(trt.Logger.WARNING)
         
