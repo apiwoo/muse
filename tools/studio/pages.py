@@ -9,10 +9,11 @@ import time
 import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QFrame, QDialog, QMessageBox, QComboBox, QSizePolicy, QProgressBar, QTextEdit
+    QFrame, QDialog, QMessageBox, QComboBox, QSizePolicy, QProgressBar, QTextEdit,
+    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread, QMutex, QMutexLocker
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, QMutex, QMutexLocker, QSize
+from PySide6.QtGui import QPixmap, QImage, QIcon
 
 from studio.widgets import NewProfileDialog, ProfileActionDialog
 from studio.workers import CameraLoader, PipelineWorker
@@ -235,7 +236,7 @@ class Page2_CameraConnect(QWidget):
         QMessageBox.warning(self, "연결 오류", msg)
 
 # ==============================================================================
-# [PAGE 3] Data Collection (Optimized)
+# [PAGE 3] Data Collection
 # ==============================================================================
 
 class RecorderWorker(QThread):
@@ -263,6 +264,11 @@ class RecorderWorker(QThread):
         self.current_start_time = 0
         self.accumulated_time = 0.0
         self.last_reported_int_time = -1
+        
+        # [New] Auto Split
+        self.split_counter = 0
+        self.last_split_time = 0.0
+        self.MAX_SPLIT = 60.0 # 1 minute
 
     def _calc_existing_duration(self, folder):
         total = 0.0
@@ -286,6 +292,18 @@ class RecorderWorker(QThread):
 
     def trigger_bg_capture(self):
         self.req_bg_capture = True
+
+    def _start_segment(self, w, h, fps):
+        if self.video_writer:
+            self.video_writer.release()
+        
+        timestamp = int(time.time())
+        path = os.path.join(self.profile_dir, f"train_video_{timestamp}_{self.split_counter:02d}.mp4")
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.video_writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
+        self.last_split_time = time.time()
+        print(f"[REC] New Segment Started: {os.path.basename(path)}")
 
     def run(self):
         self.accumulated_time = self._calc_existing_duration(self.profile_dir)
@@ -319,27 +337,22 @@ class RecorderWorker(QThread):
                 self.bg_status_updated.emit(True)
                 self.req_bg_capture = False
             
-            # --- RECORDING LOGIC (THREAD SAFE) ---
+            # --- RECORDING LOGIC ---
             
-            # 1. Handle START Command
             if self.cmd_start_rec:
                 self.cmd_start_rec = False
                 if not self.is_recording:
                     self.is_recording = True
                     self.current_start_time = time.time()
-                    
-                    timestamp = int(time.time())
-                    path = os.path.join(self.profile_dir, f"train_video_{timestamp}.mp4")
+                    self.split_counter = 0
                     
                     h, w = frame.shape[:2]
                     fps = self.cap.get(cv2.CAP_PROP_FPS)
                     if fps <= 0: fps = 30.0
                     
                     os.makedirs(self.profile_dir, exist_ok=True)
-                    self.video_writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    print(f"[CAM] [Worker] Recording started: {w}x{h} @ {fps}fps -> {path}")
+                    self._start_segment(w, h, fps)
 
-            # 2. Handle STOP Command
             if self.cmd_stop_rec:
                 self.cmd_stop_rec = False
                 if self.is_recording:
@@ -350,8 +363,14 @@ class RecorderWorker(QThread):
                     self.accumulated_time += (time.time() - self.current_start_time)
                     print("[CAM] [Worker] Recording stopped.")
 
-            # 3. Write Frame
             if self.is_recording:
+                # [New] Auto Split
+                if time.time() - self.last_split_time >= self.MAX_SPLIT:
+                    self.split_counter += 1
+                    h, w = frame.shape[:2]
+                    fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    self._start_segment(w, h, fps)
+
                 elapsed = time.time() - self.current_start_time
                 total_time = self.accumulated_time + elapsed
                 
@@ -544,7 +563,7 @@ class Page3_DataCollection(QWidget):
             self.gl_widget.cleanup()
 
 # ==============================================================================
-# [PAGE 4] AI Training
+# [PAGE 4] AI Training (Redesigned: 2-Step)
 # ==============================================================================
 class Page4_AiTraining(QWidget):
     go_home = Signal()
@@ -552,30 +571,45 @@ class Page4_AiTraining(QWidget):
     def __init__(self, root_dir):
         super().__init__()
         self.root_dir = root_dir
+        self.worker = None
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(60, 60, 60, 60)
-        layout.setSpacing(25)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
 
+        # Title
         layout.addWidget(QLabel("AI 모델 생성 마법사", objectName="Title"), alignment=Qt.AlignCenter)
-        layout.addWidget(QLabel("진행 과정: 라벨링 -> 학습 -> 최적화", objectName="Subtitle"), alignment=Qt.AlignCenter)
+        self.lbl_subtitle = QLabel("1단계: 영상 분석을 시작하세요.", objectName="Subtitle")
+        layout.addWidget(self.lbl_subtitle, alignment=Qt.AlignCenter)
 
+        # Progress
         self.pbar = QProgressBar()
         layout.addWidget(self.pbar)
-        
-        self.lbl_status = QLabel("시작할 준비가 되었습니다.")
+        self.lbl_status = QLabel("준비됨")
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setStyleSheet("color: #00ADB5; font-weight: bold; margin-bottom: 10px;")
+        self.lbl_status.setStyleSheet("color: #AAA;")
         layout.addWidget(self.lbl_status)
 
-        self.btn_start = QPushButton("학습 시작하기")
-        self.btn_start.setProperty("class", "primary")
-        self.btn_start.setCursor(Qt.PointingHandCursor)
-        self.btn_start.clicked.connect(self.start_pipeline)
-        layout.addWidget(self.btn_start)
+        # --- Content Area (Stacked Logic replaced by Visibility) ---
+        
+        # Area 1: Analysis List (Grid)
+        self.list_widget = QListWidget()
+        self.list_widget.setViewMode(QListWidget.IconMode)
+        self.list_widget.setIconSize(QSize(240, 135))
+        self.list_widget.setResizeMode(QListWidget.Adjust)
+        self.list_widget.setSpacing(10)
+        self.list_widget.setSelectionMode(QAbstractItemView.NoSelection) # Custom Checkbox Logic
+        self.list_widget.setStyleSheet("""
+            QListWidget { background-color: #222; border: 1px solid #444; border-radius: 8px; }
+            QListWidget::item { background-color: #333; border-radius: 5px; padding: 5px; }
+            QListWidget::item:hover { background-color: #444; }
+        """)
+        self.list_widget.setVisible(False)
+        layout.addWidget(self.list_widget, stretch=1)
 
+        # Area 2: Log View (Training Phase)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("""
@@ -585,27 +619,137 @@ class Page4_AiTraining(QWidget):
                 border: 1px solid #333; border-radius: 8px; padding: 10px;
             }
         """)
-        layout.addWidget(self.log_view)
+        self.log_view.setVisible(False)
+        layout.addWidget(self.log_view, stretch=1)
 
-        self.btn_home = QPushButton("완료. 홈으로 이동")
-        self.btn_home.setStyleSheet("background: #333; color: white; padding: 15px; border-radius: 8px; border:none;")
-        self.btn_home.setVisible(False)
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        self.btn_step1 = QPushButton("1단계: 영상 분석 시작")
+        self.btn_step1.setProperty("class", "primary")
+        self.btn_step1.clicked.connect(self.start_analysis)
+        
+        self.btn_step2 = QPushButton("2단계: 선택한 데이터로 학습 시작")
+        self.btn_step2.setProperty("class", "primary")
+        self.btn_step2.setStyleSheet("background-color: #4CAF50;") # Green
+        self.btn_step2.clicked.connect(self.start_training)
+        self.btn_step2.setVisible(False)
+        
+        self.btn_home = QPushButton("홈으로")
+        self.btn_home.setStyleSheet("background: #444; color: white; padding: 15px; border-radius: 8px; border:none;")
         self.btn_home.clicked.connect(self.go_home.emit)
-        layout.addWidget(self.btn_home)
+        
+        btn_layout.addWidget(self.btn_step1)
+        btn_layout.addWidget(self.btn_step2)
+        btn_layout.addWidget(self.btn_home)
+        
+        layout.addLayout(btn_layout)
 
-    def start_pipeline(self):
-        self.btn_start.setEnabled(False)
-        self.btn_start.setText("작업 중입니다... 창을 닫지 마세요!")
+    def start_analysis(self):
+        self.btn_step1.setEnabled(False)
+        self.btn_step1.setText("분석 중...")
+        self.list_widget.clear()
+        self.list_widget.setVisible(False)
+        self.log_view.setVisible(True)
         self.log_view.clear()
         
-        self.worker = PipelineWorker(self.root_dir)
+        self.worker = PipelineWorker(self.root_dir, mode="analyze")
         self.worker.log_signal.connect(self.log_view.append)
-        self.worker.progress_signal.connect(lambda v, t: (self.pbar.setValue(v), self.lbl_status.setText(t)))
-        self.worker.finished_signal.connect(self.on_finished)
-        self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "오류 발생", e))
+        self.worker.finished_signal.connect(self.on_analysis_finished)
         self.worker.start()
 
-    def on_finished(self):
-        self.btn_start.setText("작업 완료")
-        self.lbl_status.setText("모든 학습 과정이 성공적으로 끝났습니다.")
+    def on_analysis_finished(self):
+        self.btn_step1.setVisible(False)
+        self.btn_step2.setVisible(True)
+        self.log_view.setVisible(False)
+        self.list_widget.setVisible(True)
+        
+        self.lbl_subtitle.setText("2단계: 학습에 포함할 이미지를 체크하고 학습을 시작하세요.")
+        self.load_previews()
+
+    def load_previews(self):
+        # Scan previews
+        data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
+        profiles = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
+        
+        for p in profiles:
+            preview_dir = os.path.join(data_dir, p, "previews")
+            if not os.path.exists(preview_dir): continue
+            
+            files = sorted(glob.glob(os.path.join(preview_dir, "*.jpg")))
+            for f in files:
+                vid_name = os.path.basename(f).replace(".jpg", ".mp4")
+                
+                # Item Widget
+                item = QListWidgetItem(self.list_widget)
+                item.setSizeHint(QSize(260, 180))
+                
+                # Custom Widget for Item
+                w = QWidget()
+                vbox = QVBoxLayout(w)
+                vbox.setContentsMargins(5,5,5,5)
+                
+                img_lbl = QLabel()
+                pix = QPixmap(f).scaled(240, 135, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                img_lbl.setPixmap(pix)
+                img_lbl.setAlignment(Qt.AlignCenter)
+                vbox.addWidget(img_lbl)
+                
+                chk = QCheckBox(vid_name)
+                chk.setChecked(True) # Default checked
+                chk.setStyleSheet("color: white; font-weight: bold;")
+                vbox.addWidget(chk)
+                
+                # Store data in item
+                item.setData(Qt.UserRole, {
+                    "chk": chk, 
+                    "vid_path": os.path.join(data_dir, p, vid_name),
+                    "preview_path": f
+                })
+                
+                self.list_widget.setItemWidget(item, w)
+
+    def start_training(self):
+        # 1. Filter & Delete
+        remove_count = 0
+        valid_count = 0
+        
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            data = item.data(Qt.UserRole)
+            chk = data["chk"]
+            
+            if not chk.isChecked():
+                # Delete video & preview
+                try:
+                    if os.path.exists(data["vid_path"]): os.remove(data["vid_path"])
+                    if os.path.exists(data["preview_path"]): os.remove(data["preview_path"])
+                    remove_count += 1
+                except: pass
+            else:
+                valid_count += 1
+        
+        if valid_count == 0:
+            QMessageBox.warning(self, "경고", "선택된 데이터가 없습니다!")
+            return
+
+        self.btn_step2.setEnabled(False)
+        self.btn_step2.setText("학습 진행 중... (창을 닫지 마세요)")
+        
+        self.list_widget.setVisible(False)
+        self.log_view.setVisible(True)
+        self.log_view.clear()
+        self.log_view.append(f"[INFO] Deleted {remove_count} rejected videos.")
+        self.log_view.append(f"[INFO] Starting training with {valid_count} videos...")
+
+        self.worker = PipelineWorker(self.root_dir, mode="train")
+        self.worker.log_signal.connect(self.log_view.append)
+        self.worker.progress_signal.connect(lambda v, t: (self.pbar.setValue(v), self.lbl_status.setText(t)))
+        self.worker.finished_signal.connect(self.on_training_finished)
+        self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "오류", e))
+        self.worker.start()
+
+    def on_training_finished(self):
+        self.btn_step2.setText("학습 완료")
+        self.lbl_status.setText("모든 과정이 성공적으로 끝났습니다.")
         self.btn_home.setVisible(True)

@@ -33,11 +33,14 @@ class DataRecorder:
         self.is_recording = False
         self.video_writer = None
         self.record_count = 0
+        self.split_count = 0 # [New] 분할 저장 카운트
         self.current_profile = "default" 
         self.profile_dir = ""            
         
         self.total_recorded_time = 0.0
         self.current_start_time = 0.0
+        self.last_split_time = 0.0 # [New] 마지막 분할 시간
+        self.MAX_SPLIT_DURATION = 60.0 # [New] 60초마다 분할
         
         self._select_global_mode()
         self._setup_profile_session()
@@ -182,9 +185,12 @@ class DataRecorder:
         
         for f in files:
             try:
+                # Format: train_video_01_00.mp4 or train_video_01.mp4
                 name = os.path.splitext(os.path.basename(f))[0]
-                idx = int(name.replace("train_video_", ""))
-                if idx > max_idx: max_idx = idx
+                parts = name.replace("train_video_", "").split("_")
+                if parts:
+                    idx = int(parts[0])
+                    if idx > max_idx: max_idx = idx
             except: pass
             
             cap = cv2.VideoCapture(f)
@@ -203,13 +209,28 @@ class DataRecorder:
         s = int(seconds % 60)
         return f"{m:02d}:{s:02d}"
 
+    def _start_new_segment(self, w, h, fps):
+        """새로운 영상 세그먼트 파일 시작 (분할 저장용)"""
+        if self.video_writer:
+            self.video_writer.release()
+        
+        # 파일명: train_video_{ID}_{Split}.mp4
+        filename = f"train_video_{self.record_count:02d}_{self.split_count:02d}.mp4"
+        video_path = os.path.join(self.profile_dir, filename)
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.video_writer = cv2.VideoWriter(video_path, fourcc, fps, (w, h))
+        
+        self.last_split_time = time.time()
+        print(f"[CAM] [Auto-Split] Starting segment: {filename}")
+
     def run(self):
         print("\n========================================================")
         print(f"   MUSE Recorder - [{self.current_profile}] Mode")
         print("========================================================")
         print("   [Key Controls]")
         print("   - 'B': Capture Background")
-        print("   - 'R': Start/Stop Recording")
+        print("   - 'R': Start/Stop Recording (Auto-splits every 60s)")
         print("   - 'N': Next Profile")
         print("   - 'Q': Quit")
         print("========================================================")
@@ -227,7 +248,16 @@ class DataRecorder:
 
             current_clip_time = 0.0
             if self.is_recording:
-                current_clip_time = time.time() - self.current_start_time
+                now = time.time()
+                current_clip_time = now - self.current_start_time
+                
+                # [New] Auto Split Logic
+                if now - self.last_split_time >= self.MAX_SPLIT_DURATION:
+                    self.split_count += 1
+                    fps = self.cap.get(cv2.CAP_PROP_FPS)
+                    if fps <= 0: fps = 30.0
+                    self._start_new_segment(w, h, fps)
+
             total_display_time = self.total_recorded_time + current_clip_time
 
             cv2.putText(display, f"Profile: {self.current_profile}", (30, 50), 
@@ -246,6 +276,9 @@ class DataRecorder:
             else:
                 cv2.putText(display, "[REC] RECORDING...", (30, 100), 
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                # Split info
+                cv2.putText(display, f"Seg: {self.split_count} ({(time.time()-self.last_split_time):.0f}s)", (220, 100), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
                 cv2.circle(display, (20, 90), 10, (0, 0, 255), -1)
 
             cv2.putText(display, f"Current: {self._fmt_time(current_clip_time)}", (w - 300, 220), 
@@ -279,17 +312,19 @@ class DataRecorder:
                     continue
 
                 if not self.is_recording:
+                    # START
                     self.is_recording = True
                     self.current_start_time = time.time()
                     self.record_count += 1
+                    self.split_count = 0
                     
-                    filename = f"train_video_{self.record_count:02d}.mp4"
-                    video_path = os.path.join(self.profile_dir, filename)
+                    fps = self.cap.get(cv2.CAP_PROP_FPS)
+                    if fps <= 0: fps = 30.0
                     
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    self.video_writer = cv2.VideoWriter(video_path, fourcc, 30.0, (w, h))
-                    print(f"[CAM] Recording Start: {filename}")
+                    self._start_new_segment(w, h, fps)
+                    print(f"[CAM] Recording Start (Auto-Split Enabled)")
                 else:
+                    # STOP
                     self.is_recording = False
                     elapsed = time.time() - self.current_start_time
                     self.total_recorded_time += elapsed

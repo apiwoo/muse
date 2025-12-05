@@ -1,5 +1,5 @@
 # Project MUSE - run_labeling.py
-# The Teacher's Workshop: Smart Auto-Labeling (Append Support)
+# The Teacher's Workshop: Smart Auto-Labeling (Dual Mode: Preview & Full)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import json
 import glob
+import argparse
+import gc
 from tqdm import tqdm
 
 # Project Root Setup
@@ -37,15 +39,133 @@ class AutoLabeler:
         print("[Teacher A] SAM 2 (Video Segmentation) Loading...")
         self.sam_wrapper = Sam2VideoWrapper(model_root=os.path.join(self.root_dir, "assets/models/segment_anything"))
 
-    def process_all_profiles(self):
+    def _force_clear_memory(self):
+        """[New] 강제 메모리 청소"""
+        if self.sam_wrapper:
+            self.sam_wrapper.reset()
+        
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+    def _create_temp_proxy(self, frame, temp_path):
+        """
+        [Optimization] RAM 폭발 방지용 1프레임짜리 가짜 영상 생성
+        SAM 2가 전체 영상을 로딩하지 않도록 속임수를 씀.
+        """
+        h, w = frame.shape[:2]
+        # MJPG 코덱 사용 (빠르고 호환성 좋음)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(temp_path, fourcc, 30, (w, h))
+        out.write(frame)
+        out.release()
+
+    def process_previews(self):
+        """
+        [Mode A] Preview Analysis (Optimized)
+        """
+        print("\n==================================================")
+        print("   [MODE] Preview Analysis (RAM Optimized)")
+        print("==================================================")
+        
+        for profile in self.profiles:
+            profile_dir = os.path.join(self.root_data_dir, profile)
+            video_paths = sorted(glob.glob(os.path.join(profile_dir, "train_video_*.mp4")))
+            preview_dir = os.path.join(profile_dir, "previews")
+            os.makedirs(preview_dir, exist_ok=True)
+            
+            # 임시 파일 경로
+            temp_proxy_path = os.path.join(profile_dir, "temp_proxy_preview.mp4")
+            
+            print(f"   Target Profile: {profile} ({len(video_paths)} videos)")
+            
+            for i, video_path in enumerate(video_paths):
+                vid_name = os.path.basename(video_path)
+                preview_path = os.path.join(preview_dir, vid_name + ".jpg")
+                
+                if os.path.exists(preview_path):
+                    continue
+                
+                print(f"   [{i+1}/{len(video_paths)}] Analyzing: {vid_name}...", end=" ", flush=True)
+                self._generate_preview_optimized(video_path, preview_path, temp_proxy_path)
+                print("Done.")
+                
+                self._force_clear_memory()
+            
+            # 청소
+            if os.path.exists(temp_proxy_path):
+                os.remove(temp_proxy_path)
+
+        print("\n[DONE] Preview generation complete.")
+
+    def _generate_preview_optimized(self, video_path, output_path, temp_proxy_path):
+        cap = cv2.VideoCapture(video_path)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            print("[FAIL] Read Error")
+            return
+
+        try:
+            # [핵심] 원본 대신 1프레임짜리 가짜 영상을 생성하여 SAM에 전달
+            # 이렇게 하면 10GB짜리 영상도 1MB 메모리로 처리가능
+            self._create_temp_proxy(frame, temp_proxy_path)
+            
+            # Step 1: Init (Lightweight Proxy)
+            self.sam_wrapper.init_state(temp_proxy_path)
+            
+            # Step 2: Pose
+            keypoints = self.pose_model.inference(frame)
+            if keypoints is None:
+                print("[SKIP] No Pose")
+                return
+
+            valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
+            
+            if len(valid_kpts) < 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                cv2.putText(frame, "POSE FAIL", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
+                cv2.imwrite(output_path, frame)
+                return
+
+            # Step 3: SAM Inference
+            points = np.array(valid_kpts, dtype=np.float32)
+            labels = np.ones(len(points), dtype=np.int32)
+            
+            mask_logits = self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
+            
+            # Post-process
+            mask_gpu = (mask_logits[0] > 0.0).cpu().numpy().astype(np.uint8)
+            if mask_gpu.ndim > 2: mask_gpu = np.squeeze(mask_gpu)
+            
+            # Step 4: Save
+            colored_mask = np.zeros_like(frame)
+            colored_mask[:, :, 2] = mask_gpu * 255 # Red
+            
+            overlay = cv2.addWeighted(frame, 1.0, colored_mask, 0.5, 0)
+            
+            for kp in valid_kpts:
+                cv2.circle(overlay, (int(kp[0]), int(kp[1])), 5, (0, 255, 0), -1)
+                
+            cv2.imwrite(output_path, overlay)
+            
+        except Exception as e:
+            print(f"[ERROR] {e}")
+
+    def process_full_run(self):
+        print("\n==================================================")
+        print("   [MODE] Full Labeling (Propagation)")
+        print("==================================================")
+        
         total_profiles = len(self.profiles)
         for i, profile in enumerate(self.profiles):
-            print(f"\n==================================================")
-            print(f"   Labeling Profile ({i+1}/{total_profiles}): [{profile}]")
-            print(f"==================================================")
-            self._process_single_profile(profile, i, total_profiles)
+            self._process_single_profile_full(profile, i, total_profiles)
+            self._force_clear_memory()
 
-    def _process_single_profile(self, profile, profile_idx, total_profiles):
+    def _process_single_profile_full(self, profile, profile_idx, total_profiles):
         profile_dir = os.path.join(self.root_data_dir, profile)
         video_paths = sorted(glob.glob(os.path.join(profile_dir, "train_video_*.mp4")))
         
@@ -54,126 +174,101 @@ class AutoLabeler:
         out_labels = os.path.join(profile_dir, "labels")
         for d in [out_imgs, out_masks, out_labels]: os.makedirs(d, exist_ok=True)
 
-        # [Append Logic] Load processed video list
         processed_log_path = os.path.join(profile_dir, "processed_videos.json")
         processed_videos = []
         if os.path.exists(processed_log_path):
             with open(processed_log_path, "r") as f:
                 processed_videos = json.load(f)
         
-        # Calculate next image index
         global_idx = self._get_next_index(out_imgs)
-        
         newly_processed = []
 
         for v_idx, video_path in enumerate(video_paths):
             vid_name = os.path.basename(video_path)
             
-            # [Smart Check] Skip if already processed
             if vid_name in processed_videos:
-                print(f"   [SKIP] Skipping processed video: {vid_name}")
+                print(f"   [SKIP] Already processed: {vid_name}")
                 continue
 
-            print(f"   [VIDEO] Processing New Video: {vid_name}")
+            print(f"   [VIDEO] Processing: {vid_name}")
             
-            # [GUI Log]
             current_progress = int(((profile_idx * len(video_paths) + v_idx) / (total_profiles * len(video_paths))) * 100)
             print(f"[PROGRESS] {current_progress}")
             
             try:
+                # Full run은 원본을 써야 함 (전체 전파 필요)
+                # 여기서는 메모리 터져도 어쩔 수 없음 (1분 제한 권장)
                 self.sam_wrapper.init_state(video_path)
-            except Exception as e:
-                print(f"      [ERROR] SAM Init Failed: {e}")
-                continue
-
-            cap = cv2.VideoCapture(video_path)
-            ret, first_frame = cap.read()
-            if not ret:
-                cap.release()
-                continue
-            
-            keypoints = self.pose_model.inference(first_frame)
-            if keypoints is None:
-                print("      [WARN] No pose detected in first frame.")
-                cap.release()
-                self.sam_wrapper.reset()
-                continue
-
-            valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
-            if len(valid_kpts) < 3:
-                print("      [WARN] Not enough keypoints.")
-                cap.release()
-                self.sam_wrapper.reset()
-                continue
-
-            points = np.array(valid_kpts, dtype=np.float32)
-            labels = np.ones(len(points), dtype=np.int32)
-            
-            self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
-
-            print("      [SAM] Propagating masks...")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            
-            video_masks = {}
-            for frame_idx, obj_ids, mask_logits in self.sam_wrapper.propagate():
-                # [Fix] Ensure mask is 2D (H, W)
-                # mask_logits[0] might be (1, H, W) or (H, W) depending on SAM version/config
-                m_tensor = mask_logits[0]
-                mask = (m_tensor > 0.0).cpu().numpy().astype(np.uint8)
                 
-                # Check dimensions and squeeze if necessary (e.g., remove channel dim 1)
-                if mask.ndim > 2:
-                    mask = np.squeeze(mask)
-                    
-                video_masks[frame_idx] = mask
+                cap = cv2.VideoCapture(video_path)
+                ret, first_frame = cap.read()
+                
+                if not ret:
+                    cap.release()
+                    continue
+                
+                keypoints = self.pose_model.inference(first_frame)
+                if keypoints is None:
+                    cap.release(); continue
 
-            # Save Data
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            curr_f_idx = 0
-            
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret: break
+                valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
+                if len(valid_kpts) < 3:
+                    cap.release(); continue
+
+                points = np.array(valid_kpts, dtype=np.float32)
+                labels = np.ones(len(points), dtype=np.int32)
                 
-                kpts = self.pose_model.inference(frame)
-                mask = video_masks.get(curr_f_idx, None)
-                
-                if kpts is not None and mask is not None:
-                    # [Safety] Double check mask shape before saving
+                self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
+
+                print("      [SAM] Propagating...")
+                video_masks = {}
+                for frame_idx, obj_ids, mask_logits in self.sam_wrapper.propagate():
+                    m_tensor = mask_logits[0]
+                    mask = (m_tensor > 0.0).cpu().numpy().astype(np.uint8)
                     if mask.ndim > 2: mask = np.squeeze(mask)
-                    
-                    fname = f"{global_idx:06d}"
-                    cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
-                    cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
-                    
-                    y_indices, x_indices = np.where(mask > 0)
-                    if len(x_indices) > 0:
-                        box = [int(np.min(x_indices)), int(np.min(y_indices)), 
-                               int(np.max(x_indices)), int(np.max(y_indices))]
-                    else:
-                        box = [0, 0, 0, 0]
+                    video_masks[frame_idx] = mask
 
-                    label_data = {"keypoints": kpts.tolist(), "box": box}
-                    with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
-                        json.dump(label_data, f)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                curr_f_idx = 0
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret: break
                     
-                    global_idx += 1
+                    kpts = self.pose_model.inference(frame)
+                    mask = video_masks.get(curr_f_idx, None)
+                    
+                    if kpts is not None and mask is not None:
+                        if mask.ndim > 2: mask = np.squeeze(mask)
+                        fname = f"{global_idx:06d}"
+                        cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
+                        cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
+                        
+                        y_indices, x_indices = np.where(mask > 0)
+                        if len(x_indices) > 0:
+                            box = [int(np.min(x_indices)), int(np.min(y_indices)), 
+                                   int(np.max(x_indices)), int(np.max(y_indices))]
+                        else:
+                            box = [0, 0, 0, 0]
+
+                        label_data = {"keypoints": kpts.tolist(), "box": box}
+                        with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
+                            json.dump(label_data, f)
+                        
+                        global_idx += 1
+                    curr_f_idx += 1
+
+                cap.release()
+                newly_processed.append(vid_name)
                 
-                curr_f_idx += 1
-
-            cap.release()
-            self.sam_wrapper.reset()
-            
-            newly_processed.append(vid_name)
+            except Exception as e:
+                print(f"      [ERROR] {e}")
+            finally:
+                self._force_clear_memory()
         
-        # Update Log
         if newly_processed:
             processed_videos.extend(newly_processed)
             with open(processed_log_path, "w") as f:
                 json.dump(processed_videos, f, indent=4)
-            print(f"   [OK] Added {len(newly_processed)} videos to processed log.")
-        else:
-            print("   [INFO] No new videos to process.")
 
     def _get_next_index(self, dir_path):
         files = glob.glob(os.path.join(dir_path, "*.jpg"))
@@ -186,6 +281,14 @@ class AutoLabeler:
         return max_idx + 1
 
 if __name__ == "__main__":
-    session = sys.argv[1] if len(sys.argv) > 1 else "personal_data"
-    labeler = AutoLabeler(session)
-    labeler.process_all_profiles()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("session", nargs='?', default="personal_data")
+    parser.add_argument("--mode", choices=['preview', 'full'], default='full')
+    args = parser.parse_args()
+
+    labeler = AutoLabeler(args.session)
+    
+    if args.mode == 'preview':
+        labeler.process_previews()
+    else:
+        labeler.process_full_run()

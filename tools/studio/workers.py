@@ -1,5 +1,5 @@
 # Project MUSE - workers.py
-# Background threads for Studio UI
+# Background threads for Studio UI (Task-Aware)
 
 import sys
 import os
@@ -35,41 +35,64 @@ class CameraLoader(QThread):
 
 class PipelineWorker(QThread):
     """
-    [New] One-Click Training Pipeline
+    [Updated] 2-Step Pipeline Worker
+    modes: "analyze" (Preview) / "train" (Full Pipeline)
     """
     log_signal = Signal(str)
     progress_signal = Signal(int, str) 
     finished_signal = Signal()
     error_signal = Signal(str)
 
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, mode="train"):
         super().__init__()
         self.root_dir = root_dir
         self.tools_dir = os.path.join(root_dir, "tools")
+        self.mode = mode
 
     def run(self):
         try:
-            # Step 1: Labeling
-            self.progress_signal.emit(10, "Step 1/3: 데이터 가공 중 (Auto-Labeling)...")
-            self.run_script(os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), ["personal_data"])
+            if self.mode == "analyze":
+                self._run_analysis()
+            elif self.mode == "train":
+                self._run_training()
+            else:
+                raise ValueError("Invalid Mode")
             
-            # Step 2: Training
-            self.progress_signal.emit(40, "Step 2/3: AI 모델 학습 중 (Training)...")
-            self.run_script(os.path.join(self.tools_dir, "train_student.py"), ["personal_data"])
-            
-            # Step 3: Conversion
-            self.progress_signal.emit(80, "Step 3/3: 실시간 엔진 변환 중 (Optimization)...")
-            self.run_script(os.path.join(self.tools_dir, "convert_student_to_trt.py"), [])
-            
-            self.progress_signal.emit(100, "완료! 모든 작업이 끝났습니다.")
             self.finished_signal.emit()
             
         except Exception as e:
             self.error_signal.emit(str(e))
 
+    def _run_analysis(self):
+        self.progress_signal.emit(0, "영상 분석 중 (첫 프레임 추출)...")
+        # run_labeling.py --mode preview
+        self.run_script(
+            os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), 
+            ["personal_data", "--mode", "preview"]
+        )
+        self.progress_signal.emit(100, "분석 완료")
+
+    def _run_training(self):
+        # Step 1: Full Labeling
+        self.progress_signal.emit(10, "Step 1/3: 정밀 라벨링 (Full Propagation)...")
+        self.run_script(
+            os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), 
+            ["personal_data", "--mode", "full"]
+        )
+        
+        # Step 2: Training
+        self.progress_signal.emit(40, "Step 2/3: AI 모델 학습 중 (Training)...")
+        self.run_script(os.path.join(self.tools_dir, "train_student.py"), ["personal_data"])
+        
+        # Step 3: Conversion
+        self.progress_signal.emit(80, "Step 3/3: 실시간 엔진 변환 중 (Optimization)...")
+        self.run_script(os.path.join(self.tools_dir, "convert_student_to_trt.py"), [])
+        
+        self.progress_signal.emit(100, "완료! 모든 작업이 끝났습니다.")
+
     def run_script(self, script_path, args):
         cmd = [sys.executable, script_path] + args
-        self.log_signal.emit(f"\n[START] Executing: {os.path.basename(script_path)}")
+        self.log_signal.emit(f"\n[START] Executing: {os.path.basename(script_path)} {' '.join(args)}")
         
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
