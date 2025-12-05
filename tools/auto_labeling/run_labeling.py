@@ -196,6 +196,9 @@ class AutoLabeler:
         global_idx = self._get_next_index(out_imgs)
         newly_processed = []
 
+        # [New] Frame Skip 설정 (5프레임마다 1장 저장)
+        FRAME_INTERVAL = 5 
+
         for v_idx, video_path in enumerate(video_paths):
             vid_name = os.path.basename(video_path)
             
@@ -203,14 +206,13 @@ class AutoLabeler:
                 print(f"   [SKIP] Already processed: {vid_name}")
                 continue
 
-            print(f"   [VIDEO] Processing: {vid_name}")
+            print(f"   [VIDEO] Processing: {vid_name} (Skip Interval: {FRAME_INTERVAL})")
             
             current_progress = int(((profile_idx * len(video_paths) + v_idx) / (total_profiles * len(video_paths))) * 100)
             print(f"[PROGRESS] {current_progress}")
             
             try:
                 # Full run은 원본을 써야 함 (전체 전파 필요)
-                # 여기서는 메모리 터져도 어쩔 수 없음 (1분 제한 권장)
                 self.sam_wrapper.init_state(video_path)
                 
                 cap = cv2.VideoCapture(video_path)
@@ -247,27 +249,29 @@ class AutoLabeler:
                     ret, frame = cap.read()
                     if not ret: break
                     
-                    kpts = self.pose_model.inference(frame)
-                    mask = video_masks.get(curr_f_idx, None)
-                    
-                    if kpts is not None and mask is not None:
-                        if mask.ndim > 2: mask = np.squeeze(mask)
-                        fname = f"{global_idx:06d}"
-                        cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
-                        cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
+                    # [Core Fix] Frame Skip Logic
+                    if curr_f_idx % FRAME_INTERVAL == 0:
+                        kpts = self.pose_model.inference(frame)
+                        mask = video_masks.get(curr_f_idx, None)
                         
-                        y_indices, x_indices = np.where(mask > 0)
-                        if len(x_indices) > 0:
-                            box = [int(np.min(x_indices)), int(np.min(y_indices)), 
-                                   int(np.max(x_indices)), int(np.max(y_indices))]
-                        else:
-                            box = [0, 0, 0, 0]
+                        if kpts is not None and mask is not None:
+                            if mask.ndim > 2: mask = np.squeeze(mask)
+                            fname = f"{global_idx:06d}"
+                            cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
+                            cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
+                            
+                            y_indices, x_indices = np.where(mask > 0)
+                            if len(x_indices) > 0:
+                                box = [int(np.min(x_indices)), int(np.min(y_indices)), 
+                                       int(np.max(x_indices)), int(np.max(y_indices))]
+                            else:
+                                box = [0, 0, 0, 0]
 
-                        label_data = {"keypoints": kpts.tolist(), "box": box}
-                        with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
-                            json.dump(label_data, f)
-                        
-                        global_idx += 1
+                            label_data = {"keypoints": kpts.tolist(), "box": box}
+                            with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
+                                json.dump(label_data, f)
+                            
+                            global_idx += 1
                     curr_f_idx += 1
 
                 cap.release()
