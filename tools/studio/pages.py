@@ -143,7 +143,6 @@ class Page2_CameraConnect(QWidget):
         self.lbl_title = QLabel("카메라 연결하기")
         self.lbl_title.setObjectName("Title")
         self.lbl_title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_title)
         
         self.lbl_info = QLabel("대상: ???")
         self.lbl_info.setObjectName("Subtitle")
@@ -679,15 +678,34 @@ class Page4_AiTraining(QWidget):
             files = sorted(glob.glob(os.path.join(preview_dir, "*.jpg")))
             for f in files:
                 vid_name = os.path.basename(f).replace(".jpg", ".mp4")
+                vid_path = os.path.join(data_dir, p, vid_name)
                 
+                # [New] Video Info Extraction (Frame Count & Duration)
+                info_text = ""
+                if os.path.exists(vid_path):
+                    try:
+                        cap = cv2.VideoCapture(vid_path)
+                        if cap.isOpened():
+                            frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            fps = cap.get(cv2.CAP_PROP_FPS)
+                            duration = frames / fps if fps > 0 else 0
+                            info_text = f"{frames} Frames ({duration:.1f}s)"
+                            cap.release()
+                    except:
+                        pass
+                
+                if not info_text:
+                    info_text = "Unknown Info"
+
                 # Item Widget
                 item = QListWidgetItem(self.list_widget)
-                item.setSizeHint(QSize(260, 180))
+                item.setSizeHint(QSize(260, 200)) # Increased height for Info Label
                 
                 # Custom Widget for Item
                 w = QWidget()
                 vbox = QVBoxLayout(w)
                 vbox.setContentsMargins(5,5,5,5)
+                vbox.setSpacing(5)
                 
                 img_lbl = QLabel()
                 pix = QPixmap(f).scaled(240, 135, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -700,10 +718,16 @@ class Page4_AiTraining(QWidget):
                 chk.setStyleSheet("color: white; font-weight: bold;")
                 vbox.addWidget(chk)
                 
+                # [New] Info Label
+                lbl_info = QLabel(f"[INFO] {info_text}")
+                lbl_info.setStyleSheet("color: #AAA; font-size: 11px;")
+                lbl_info.setAlignment(Qt.AlignLeft)
+                vbox.addWidget(lbl_info)
+                
                 # Store data in item
                 item.setData(Qt.UserRole, {
                     "chk": chk, 
-                    "vid_path": os.path.join(data_dir, p, vid_name),
+                    "vid_path": vid_path,
                     "preview_path": f
                 })
                 

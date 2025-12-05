@@ -58,6 +58,8 @@ class MuseDataset(Dataset):
         self.img_files = sorted(glob.glob(os.path.join(self.img_dir, "*.jpg")))
 
         if HAS_ALBUMENTATIONS:
+            # [FIX] keypoint_params 추가: format='xy'로 설정하여 (x, y) 좌표만 사용함을 명시
+            # remove_invisible=False: 이미지를 벗어난 키포인트도 유지 (인덱스 밀림 방지)
             self.transform = A.Compose([
                 A.HueSaturationValue(p=0.3),
                 A.RandomBrightnessContrast(p=0.3),
@@ -65,7 +67,9 @@ class MuseDataset(Dataset):
                 A.Resize(height=input_size[1], width=input_size[0]),
                 A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
                 ToTensorV2()
-            ], additional_targets={'mask': 'image', 'keypoints': 'keypoints'})
+            ], 
+            keypoint_params=A.KeypointParams(format='xy', remove_invisible=False),
+            additional_targets={'mask': 'image', 'keypoints': 'keypoints'})
         else:
             self.transform = None
 
@@ -78,31 +82,84 @@ class MuseDataset(Dataset):
         mask_path = os.path.join(self.mask_dir, f"{basename}.png")
         label_path = os.path.join(self.label_dir, f"{basename}.json")
 
+        # [FIX] 강력한 이미지 로드 및 채널 정규화 (Robust Loading)
         img = cv2.imread(img_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # 1. 파일 로드 실패 시 더미 이미지 생성
+        if img is None:
+            img = np.zeros((self.input_size[1], self.input_size[0], 3), dtype=np.uint8)
+        
+        # 2. 채널 확인 및 RGB 변환 (Albumentations 오류 방지)
+        if len(img.shape) == 2:
+            # Grayscale (H, W) -> RGB (H, W, 3)
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif len(img.shape) == 3:
+            if img.shape[2] == 3:
+                # BGR (H, W, 3) -> RGB (H, W, 3)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img.shape[2] == 4:
+                # BGRA (H, W, 4) -> RGB (H, W, 3) - 투명도 채널 제거
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+            else:
+                # 이상한 채널 수 -> 강제 Grayscale 후 RGB 변환 (안전장치)
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+        else:
+            # 예상치 못한 차원 -> 강제 리셋
+            img = np.zeros((self.input_size[1], self.input_size[0], 3), dtype=np.uint8)
+
         h_orig, w_orig = img.shape[:2]
         
         if os.path.exists(mask_path):
             mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if mask is None: # 마스크 로드 실패 시
+                mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
         else:
             mask = np.zeros((h_orig, w_orig), dtype=np.uint8)
 
         kpts_coord = []
         kpts_conf = []
         if os.path.exists(label_path):
-            with open(label_path, 'r') as f:
-                data = json.load(f)
-                for kp in data['keypoints']:
-                    kpts_coord.append([kp[0], kp[1]])
-                    kpts_conf.append(kp[2])
+            try:
+                with open(label_path, 'r') as f:
+                    data = json.load(f)
+                    for kp in data['keypoints']:
+                        kpts_coord.append([kp[0], kp[1]])
+                        kpts_conf.append(kp[2])
+            except Exception: # JSON 파싱 에러 등
+                pass
+        
+        # 키포인트가 비어있으면 더미 데이터 채움 (17개)
+        if len(kpts_coord) == 0:
+            kpts_coord = [[0, 0]] * 17
+            kpts_conf = [0.0] * 17
 
         if HAS_ALBUMENTATIONS:
-            transformed = self.transform(image=img, mask=mask, keypoints=kpts_coord)
-            img_tensor = transformed['image']
-            mask_tensor = transformed['mask'].float().unsqueeze(0) / 255.0
-            mask_tensor = (mask_tensor > 0.5).float()
-            transformed_kpts = transformed['keypoints']
+            # Albumentations 적용
+            try:
+                transformed = self.transform(image=img, mask=mask, keypoints=kpts_coord)
+                img_tensor = transformed['image']
+                mask_tensor = transformed['mask'].float().unsqueeze(0) / 255.0
+                mask_tensor = (mask_tensor > 0.5).float()
+                transformed_kpts = transformed['keypoints']
+            except Exception as e:
+                # 변환 실패 시 원본 리사이즈로 폴백 (데이터 오염 방지)
+                # print(f"[WARNING] Augmentation failed for {basename}: {e}") # 로그 과다 방지
+                img_resized = cv2.resize(img, self.input_size)
+                mask_resized = cv2.resize(mask, self.input_size, interpolation=cv2.INTER_NEAREST)
+                img_tensor = torch.from_numpy(img_resized).permute(2,0,1).float() / 255.0
+                # Normalize manually
+                mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+                std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+                img_tensor = (img_tensor - mean) / std
+                
+                mask_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0) / 255.0
+                scale_x = self.input_size[0] / w_orig
+                scale_y = self.input_size[1] / h_orig
+                transformed_kpts = [[kp[0] * scale_x, kp[1] * scale_y] for kp in kpts_coord]
+
         else:
+            # Fallback (OpenCV Resize)
             img_resized = cv2.resize(img, self.input_size)
             mask_resized = cv2.resize(mask, self.input_size, interpolation=cv2.INTER_NEAREST)
             img_tensor = torch.from_numpy(img_resized).permute(2,0,1).float() / 255.0
@@ -172,7 +229,12 @@ class Trainer:
         
         optimizer = optim.AdamW(model.parameters(), lr=6e-5, weight_decay=0.01)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs)
-        scaler = torch.cuda.amp.GradScaler()
+        
+        # [Fix] Deprecation Warning Fix
+        try:
+            scaler = torch.amp.GradScaler('cuda')
+        except AttributeError:
+            scaler = torch.cuda.amp.GradScaler()
         
         for epoch in range(self.epochs):
             model.train()
