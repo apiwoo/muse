@@ -14,6 +14,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import glob
 import json
+import gc # [Fix] 메모리 관리를 위한 모듈 추가
 
 # Ensure paths
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
@@ -223,7 +224,9 @@ class Trainer:
         print(f"\n[FIRE] Training SegFormer for [{profile}]...")
         dataset = MuseDataset(os.path.join(self.root_data_dir, profile))
         if len(dataset) == 0: return
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
+        
+        # [Optimization] pin_memory=True 추가 (CPU->GPU 전송 속도 향상)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True)
         
         model = MuseStudentModel(num_keypoints=17, pretrained=True).to(self.device)
         
@@ -243,9 +246,10 @@ class Trainer:
             pbar = tqdm(dataloader, desc=f"Ep {epoch+1}/{self.epochs}", leave=False)
             
             for imgs, masks, heatmaps in pbar:
-                imgs = imgs.to(self.device)
-                masks = masks.to(self.device)
-                heatmaps = heatmaps.to(self.device)
+                # [Optimization] non_blocking=True (비동기 전송)
+                imgs = imgs.to(self.device, non_blocking=True)
+                masks = masks.to(self.device, non_blocking=True)
+                heatmaps = heatmaps.to(self.device, non_blocking=True)
                 
                 optimizer.zero_grad()
                 with torch.cuda.amp.autocast():
@@ -262,6 +266,9 @@ class Trainer:
             
             scheduler.step()
             
+            # [Fix] Epoch마다 PC 메모리 강제 정리 (누수 방지 핵심)
+            gc.collect()
+            
             current_progress = int(((profile_idx * self.epochs) + (epoch + 1)) / (total_profiles * self.epochs) * 100)
             print(f"[PROGRESS] {current_progress}")
             print(f"   Epoch {epoch+1}/{self.epochs} - Loss: {running_loss/len(dataloader):.4f}")
@@ -269,6 +276,17 @@ class Trainer:
         save_path = os.path.join(self.model_save_dir, f"student_{profile}.pth")
         torch.save(model.state_dict(), save_path)
         print(f"   [DONE] Model Saved: {save_path}")
+        
+        # [Fix] 프로파일 학습 종료 후 자원 명시적 해제
+        del model
+        del optimizer
+        del scaler
+        del dataloader
+        del dataset
+        
+        gc.collect() # PC RAM 정리
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache() # GPU VRAM 정리 (파편화 제거)
 
 if __name__ == "__main__":
     session = sys.argv[1] if len(sys.argv) > 1 else "personal_data"
