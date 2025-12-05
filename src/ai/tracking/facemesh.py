@@ -34,7 +34,7 @@ class FaceMesh:
         - 장점: 초경량(CPU 가능), 478개 상세 랜드마크
         - 변경: InsightFace(Heavy) -> MediaPipe(Light)
         """
-        print("🧠 [FaceMesh] AI 엔진 로딩 중... (MediaPipe)")
+        print("[AI] [FaceMesh] AI 엔진 로딩 중... (MediaPipe)")
         
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
@@ -43,7 +43,7 @@ class FaceMesh:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
-        print("✅ [FaceMesh] 엔진 장전 완료 (CPU Optimized)")
+        print("[OK] [FaceMesh] 엔진 장전 완료 (CPU Optimized)")
 
     class FaceResult:
         """BeautyEngine과 호환성을 위한 결과 래퍼"""

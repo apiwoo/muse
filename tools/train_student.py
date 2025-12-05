@@ -19,7 +19,7 @@ def main():
         print("========================================================")
         print("   MUSE Training Launcher")
         print("========================================================")
-        print("❌ 세션 이름이 필요합니다.")
+        print("[ERROR] 세션 이름이 필요합니다.")
         print("   사용법: python tools/train_student.py <SESSION_NAME>")
         print("   예시: python tools/train_student.py 20231025_143000")
         
@@ -29,7 +29,7 @@ def main():
         if os.path.exists(data_root):
             sessions = [d for d in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, d))]
             if sessions:
-                print("\n📂 [가능한 세션 목록]:")
+                print("\n[DIR] [가능한 세션 목록]:")
                 for s in sorted(sessions):
                     print(f"   - {s}")
         return
@@ -37,7 +37,7 @@ def main():
     session_name = sys.argv[1]
     
     print("========================================================")
-    print(f"   🚀 Training Student Model for Session: {session_name}")
+    print(f"   [START] Training Student Model for Session: {session_name}")
     print("========================================================")
     
     # 학습 설정 (RTX 3060 기준)
@@ -45,11 +45,11 @@ def main():
     trainer = Trainer(session_name, epochs=50, batch_size=8)
     
     try:
-        trainer.train()
+        trainer.train_all_profiles()
     except KeyboardInterrupt:
-        print("\n🛑 학습이 사용자에 의해 중단되었습니다.")
+        print("\n[STOP] 학습이 사용자에 의해 중단되었습니다.")
     except Exception as e:
-        print(f"\n❌ 학습 중 오류 발생: {e}")
+        print(f"\n[ERROR] 학습 중 오류 발생: {e}")
         import traceback
         traceback.print_exc()
 

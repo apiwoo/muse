@@ -65,7 +65,7 @@ class MainWindow(QMainWindow):
         # 3. [New] 배경 리셋 신호 연결
         self.request_bg_reset.connect(worker.reset_background)
         
-        print("🔗 [MainWindow] UI와 Worker 스레드 연결 완료")
+        print("[LINK] [MainWindow] UI와 Worker 스레드 연결 완료")
 
     def keyPressEvent(self, event):
         """
@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         - B 키: 배경 리셋
         """
         if event.key() == Qt.Key_B:
-            print("⌨️ [Key] 'B' Pressed -> Request Background Reset")
+            print("[KEY] 'B' Pressed -> Request Background Reset")
             self.request_bg_reset.emit()
             # [한글화] 상태 업데이트
             self.status_label.setText("배경 리셋 중...")
@@ -85,5 +85,5 @@ class MainWindow(QMainWindow):
         [Critical] 창 닫기(X버튼) 클릭 시 호출.
         이 함수가 없으면 백그라운드 스레드가 돌고 있을 때 앱이 완전히 꺼지지 않을 수 있습니다.
         """
-        print("❌ [MainWindow] 창 닫기 감지. 프로그램 종료 절차를 시작합니다.")
+        print("[EXIT] [MainWindow] 창 닫기 감지. 프로그램 종료 절차를 시작합니다.")
         event.accept() # 이벤트를 수락하여 Qt에게 창을 닫으라고 알림

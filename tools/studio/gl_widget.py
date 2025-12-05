@@ -41,12 +41,12 @@ class CameraGLWidget(QOpenGLWidget):
 
     def initializeGL(self):
         """OpenGL 컨텍스트 및 쉐이더 초기화"""
-        print("🎨 [GL] initializeGL() called.")
+        print("[GL] initializeGL() called.")
         try:
             self.ctx = moderngl.create_context()
-            print(f"   ✅ [GL] Context Created: {self.ctx.version_code}")
+            print(f"   [OK] [GL] Context Created: {self.ctx.version_code}")
         except Exception as e:
-            print(f"❌ [GL] Context Init Failed: {e}")
+            print(f"[ERROR] [GL] Context Init Failed: {e}")
             return
 
         # 1. Vertex Shader
@@ -77,7 +77,7 @@ class CameraGLWidget(QOpenGLWidget):
         try:
             self.prog = self.ctx.program(vertex_shader=vs, fragment_shader=fs)
         except Exception as e:
-            print(f"❌ [GL] Shader Error: {e}")
+            print(f"[ERROR] [GL] Shader Error: {e}")
             return
 
         # 3. Geometry (Full Screen Quad)
@@ -170,7 +170,7 @@ class CameraGLWidget(QOpenGLWidget):
                 self.texture.write(frame)
                 
         except Exception as e:
-            print(f"⚠️ [GL] Upload Error: {e}")
+            print(f"[WARNING] [GL] Upload Error: {e}")
 
     def _draw_texture(self, w_widget, h_widget):
         # Aspect Ratio Correction (Letterboxing)
