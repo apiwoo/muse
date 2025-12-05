@@ -53,31 +53,59 @@ class AutoLabeler:
             sys.exit(1)
 
     def _force_clear_memory(self):
-        """[New] 강제 메모리 청소"""
         if self.sam_wrapper:
             self.sam_wrapper.reset()
-        
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
 
     def _create_temp_proxy(self, frame, temp_path):
-        """
-        [Optimization] RAM 폭발 방지용 1프레임짜리 가짜 영상 생성
-        SAM 2가 전체 영상을 로딩하지 않도록 속임수를 씀.
-        """
+        """1프레임짜리 프리뷰용 영상 생성"""
         h, w = frame.shape[:2]
-        # MJPG 코덱 사용 (빠르고 호환성 좋음)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(temp_path, fourcc, 30, (w, h))
         out.write(frame)
         out.release()
 
+    def _create_strided_video(self, source_path, target_path, interval=5):
+        """
+        [Real Optimization] 
+        원본 영상을 읽어서 interval 간격으로 프레임을 추출해 새로운 단축 영상을 만듭니다.
+        SAM 2가 처리해야 할 프레임 수 자체를 물리적으로 줄입니다.
+        """
+        cap = cv2.VideoCapture(source_path)
+        if not cap.isOpened(): return False, 0, 0, 0
+
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # 임시 파일 생성
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # FPS는 유지하거나 줄여도 되지만, 호환성을 위해 30 유지 (재생 속도만 빨라짐)
+        out = cv2.VideoWriter(target_path, fourcc, 30, (w, h))
+        
+        count = 0
+        written_count = 0
+        
+        # print(f"      [ENC] Compressing video (1/{interval})...")
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            
+            if count % interval == 0:
+                out.write(frame)
+                written_count += 1
+            count += 1
+            
+        cap.release()
+        out.release()
+        return True, w, h, written_count
+
     def process_previews(self):
-        """
-        [Mode A] Preview Analysis (Optimized)
-        """
         print("\n==================================================")
         print("   [MODE] Preview Analysis (RAM Optimized)")
         print("==================================================")
@@ -87,8 +115,6 @@ class AutoLabeler:
             video_paths = sorted(glob.glob(os.path.join(profile_dir, "train_video_*.mp4")))
             preview_dir = os.path.join(profile_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
-            
-            # 임시 파일 경로
             temp_proxy_path = os.path.join(profile_dir, "temp_proxy_preview.mp4")
             
             print(f"   Target Profile: {profile} ({len(video_paths)} videos)")
@@ -97,18 +123,14 @@ class AutoLabeler:
                 vid_name = os.path.basename(video_path)
                 preview_path = os.path.join(preview_dir, vid_name + ".jpg")
                 
-                if os.path.exists(preview_path):
-                    continue
+                if os.path.exists(preview_path): continue
                 
                 print(f"   [{i+1}/{len(video_paths)}] Analyzing: {vid_name}...", end=" ", flush=True)
                 self._generate_preview_optimized(video_path, preview_path, temp_proxy_path)
                 print("Done.")
-                
                 self._force_clear_memory()
             
-            # 청소
-            if os.path.exists(temp_proxy_path):
-                os.remove(temp_proxy_path)
+            if os.path.exists(temp_proxy_path): os.remove(temp_proxy_path)
 
         print("\n[DONE] Preview generation complete.")
 
@@ -117,52 +139,39 @@ class AutoLabeler:
         ret, frame = cap.read()
         cap.release()
         
-        if not ret:
-            print("[FAIL] Read Error")
-            return
+        if not ret: return
 
         try:
-            # [핵심] 원본 대신 1프레임짜리 가짜 영상을 생성하여 SAM에 전달
-            # 이렇게 하면 10GB짜리 영상도 1MB 메모리로 처리가능
             self._create_temp_proxy(frame, temp_proxy_path)
-            
-            # Step 1: Init (Lightweight Proxy)
             self.sam_wrapper.init_state(temp_proxy_path)
             
-            # Step 2: Pose
             keypoints = self.pose_model.inference(frame)
-            if keypoints is None:
-                print("[SKIP] No Pose")
-                return
+            if keypoints is None: return
 
             valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
-            
-            if len(valid_kpts) < 3:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                frame = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                cv2.putText(frame, "POSE FAIL", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-                cv2.imwrite(output_path, frame)
-                return
+            if len(valid_kpts) < 3: return
 
-            # Step 3: SAM Inference
             points = np.array(valid_kpts, dtype=np.float32)
             labels = np.ones(len(points), dtype=np.int32)
             
             mask_logits = self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
             
-            # Post-process
             mask_gpu = (mask_logits[0] > 0.0).cpu().numpy().astype(np.uint8)
             if mask_gpu.ndim > 2: mask_gpu = np.squeeze(mask_gpu)
             
-            # Step 4: Save
+            # [Updated Visual Style] Cyan Outline + Light Tint
+            # 1. Create Cyan base mask (BGR: 255, 255, 0)
             colored_mask = np.zeros_like(frame)
-            colored_mask[:, :, 2] = mask_gpu * 255 # Red
+            colored_mask[mask_gpu > 0] = [255, 255, 0] # Cyan
             
-            overlay = cv2.addWeighted(frame, 1.0, colored_mask, 0.5, 0)
+            # 2. Apply very light tint (15% opacity) instead of heavy 50%
+            # 원본 영상이 잘 보이도록 투명도(beta)를 0.15로 대폭 낮춤
+            overlay = cv2.addWeighted(frame, 1.0, colored_mask, 0.15, 0)
             
-            for kp in valid_kpts:
-                cv2.circle(overlay, (int(kp[0]), int(kp[1])), 5, (0, 255, 0), -1)
-                
+            # 3. Draw Contours for clear boundary (Cyan, Thickness 2)
+            contours, _ = cv2.findContours(mask_gpu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay, contours, -1, (255, 255, 0), 2)
+            
             cv2.imwrite(output_path, overlay)
             
         except Exception as e:
@@ -196,8 +205,10 @@ class AutoLabeler:
         global_idx = self._get_next_index(out_imgs)
         newly_processed = []
 
-        # [New] Frame Skip 설정 (5프레임마다 1장 저장)
+        # [Config] 5프레임마다 추출 (데이터 80% 절약)
         FRAME_INTERVAL = 5 
+        # 임시 압축 영상 경로
+        temp_video_path = os.path.join(profile_dir, "temp_processing_strided.mp4")
 
         for v_idx, video_path in enumerate(video_paths):
             vid_name = os.path.basename(video_path)
@@ -206,22 +217,32 @@ class AutoLabeler:
                 print(f"   [SKIP] Already processed: {vid_name}")
                 continue
 
-            print(f"   [VIDEO] Processing: {vid_name} (Skip Interval: {FRAME_INTERVAL})")
+            print(f"   [VIDEO] Processing: {vid_name} (Interval: {FRAME_INTERVAL})")
             
             current_progress = int(((profile_idx * len(video_paths) + v_idx) / (total_profiles * len(video_paths))) * 100)
             print(f"[PROGRESS] {current_progress}")
             
             try:
-                # Full run은 원본을 써야 함 (전체 전파 필요)
-                self.sam_wrapper.init_state(video_path)
+                # 1. 압축 영상 생성 (물리적 프레임 수 감소)
+                # print("      [1/3] Creating strided video...")
+                ok, w, h, frames = self._create_strided_video(video_path, temp_video_path, FRAME_INTERVAL)
+                if not ok or frames == 0:
+                    print("      [ERROR] Video read failed.")
+                    continue
                 
-                cap = cv2.VideoCapture(video_path)
+                # print(f"      -> Compressed: {frames} frames to process.")
+
+                # 2. SAM 초기화 (압축된 영상으로)
+                self.sam_wrapper.init_state(temp_video_path)
+                
+                # 3. 첫 프레임 프롬프트 (압축 영상의 첫 프레임 읽기)
+                cap = cv2.VideoCapture(temp_video_path)
                 ret, first_frame = cap.read()
-                
                 if not ret:
                     cap.release()
                     continue
                 
+                # Pose 추론
                 keypoints = self.pose_model.inference(first_frame)
                 if keypoints is None:
                     cap.release(); continue
@@ -235,7 +256,8 @@ class AutoLabeler:
                 
                 self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
 
-                print("      [SAM] Propagating...")
+                # 4. 전파 (압축된 영상 내에서만 전파하므로 매우 빠름)
+                print(f"      [SAM] Propagating ({frames} frames)...")
                 video_masks = {}
                 for frame_idx, obj_ids, mask_logits in self.sam_wrapper.propagate():
                     m_tensor = mask_logits[0]
@@ -243,35 +265,37 @@ class AutoLabeler:
                     if mask.ndim > 2: mask = np.squeeze(mask)
                     video_masks[frame_idx] = mask
 
+                # 5. 저장 (압축 영상의 모든 프레임 저장)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 curr_f_idx = 0
+                
+                # print("      [SAVE] Saving dataset...")
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: break
                     
-                    # [Core Fix] Frame Skip Logic
-                    if curr_f_idx % FRAME_INTERVAL == 0:
-                        kpts = self.pose_model.inference(frame)
-                        mask = video_masks.get(curr_f_idx, None)
+                    # 이미 압축된 영상이므로 모든 프레임을 저장
+                    kpts = self.pose_model.inference(frame)
+                    mask = video_masks.get(curr_f_idx, None)
+                    
+                    if kpts is not None and mask is not None:
+                        if mask.ndim > 2: mask = np.squeeze(mask)
+                        fname = f"{global_idx:06d}"
+                        cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
+                        cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
                         
-                        if kpts is not None and mask is not None:
-                            if mask.ndim > 2: mask = np.squeeze(mask)
-                            fname = f"{global_idx:06d}"
-                            cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)
-                            cv2.imwrite(os.path.join(out_masks, f"{fname}.png"), mask * 255)
-                            
-                            y_indices, x_indices = np.where(mask > 0)
-                            if len(x_indices) > 0:
-                                box = [int(np.min(x_indices)), int(np.min(y_indices)), 
-                                       int(np.max(x_indices)), int(np.max(y_indices))]
-                            else:
-                                box = [0, 0, 0, 0]
+                        y_indices, x_indices = np.where(mask > 0)
+                        if len(x_indices) > 0:
+                            box = [int(np.min(x_indices)), int(np.min(y_indices)), 
+                                   int(np.max(x_indices)), int(np.max(y_indices))]
+                        else:
+                            box = [0, 0, 0, 0]
 
-                            label_data = {"keypoints": kpts.tolist(), "box": box}
-                            with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
-                                json.dump(label_data, f)
-                            
-                            global_idx += 1
+                        label_data = {"keypoints": kpts.tolist(), "box": box}
+                        with open(os.path.join(out_labels, f"{fname}.json"), "w") as f:
+                            json.dump(label_data, f)
+                        
+                        global_idx += 1
                     curr_f_idx += 1
 
                 cap.release()
@@ -281,6 +305,10 @@ class AutoLabeler:
                 print(f"      [ERROR] {e}")
             finally:
                 self._force_clear_memory()
+                # 임시 파일 삭제
+                if os.path.exists(temp_video_path):
+                    try: os.remove(temp_video_path)
+                    except: pass
         
         if newly_processed:
             processed_videos.extend(newly_processed)

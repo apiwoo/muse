@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 import ctypes
+import glob
 
 # [Log Fix] OpenCV 로그 레벨 조정
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
@@ -36,7 +37,7 @@ class MuseStudio(QMainWindow):
     def __init__(self):
         super().__init__()
         # [한글화] 윈도우 타이틀 변경
-        self.setWindowTitle("MUSE 스튜디오 v3.0 (한국어 버전)")
+        self.setWindowTitle("MUSE 스튜디오 v3.1 (안전 백업 모드)")
         self.resize(1280, 800)
         
         # [Win32 Native Dark Title Bar]
@@ -91,8 +92,53 @@ class MuseStudio(QMainWindow):
 
     def on_profile_confirmed(self, name, mode):
         target = os.path.join(self.personal_data_dir, name)
-        if mode == 'reset' and os.path.exists(target):
-            shutil.move(target, os.path.join(self.root_dir, "recorded_data", "backup", f"{int(time.time())}_{name}"))
+        
+        # [Safety Logic] Reset 모드일 때 데이터와 모델 모두 백업 (Risk Free Update)
+        if mode == 'reset':
+            timestamp = int(time.time())
+            # 백업 경로: recorded_data/backup/{시간}_{프로필명}
+            backup_root = os.path.join(self.root_dir, "recorded_data", "backup", f"{timestamp}_{name}")
+            
+            # 1. 데이터 폴더 확인
+            data_exists = os.path.exists(target)
+            
+            # 2. 모델 파일 확인 (.pth, .engine, .onnx)
+            model_dir = os.path.join(self.root_dir, "assets", "models", "personal")
+            model_files = []
+            # student_프로필명.확장자 패턴을 찾음
+            for ext in [".pth", ".engine", ".onnx"]:
+                f_path = os.path.join(model_dir, f"student_{name}{ext}")
+                if os.path.exists(f_path):
+                    model_files.append(f_path)
+            
+            # 백업할 것이 하나라도 있으면 백업 수행
+            if data_exists or model_files:
+                try:
+                    os.makedirs(backup_root, exist_ok=True)
+                    print(f"\n[BACKUP] [Safety] Starting backup to: {backup_root}")
+                    
+                    # (1) 영상 데이터 이동 -> backup/data
+                    if data_exists:
+                        dest_data = os.path.join(backup_root, "data")
+                        # shutil.move는 대상 디렉토리가 없으면 해당 이름으로 rename됨
+                        shutil.move(target, dest_data)
+                        print(f"   -> [DATA] Recorded data moved to 'data/'")
+                    
+                    # (2) 모델 파일 이동 -> backup/models
+                    if model_files:
+                        dest_model_dir = os.path.join(backup_root, "models")
+                        os.makedirs(dest_model_dir, exist_ok=True)
+                        for mf in model_files:
+                            shutil.move(mf, dest_model_dir)
+                            print(f"   -> [MODEL] {os.path.basename(mf)} moved to 'models/'")
+                            
+                    print("[BACKUP] Complete. Safe to reset.")
+                            
+                except Exception as e:
+                    print(f"[ERROR] Backup failed: {e}")
+                    # 백업 실패시 일단 진행하지만 로그 남김
+
+        # 대상 폴더 생성 (초기화 또는 확인)
         os.makedirs(target, exist_ok=True)
         
         self.page2.set_target(name, mode)
