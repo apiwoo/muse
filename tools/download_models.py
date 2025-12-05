@@ -20,8 +20,7 @@ VITPOSE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_huge_coco_256x192.p
 SAM2_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
 SAM2_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2_hiera_large.pt")
 
-# 3. SegFormer (MiT-B1) Pretrained (Optional, Timm downloads automatically but good to have)
-# Note: We rely on timm's auto-download, but we ensure the folder exists.
+# 3. SegFormer (MiT-B1)
 SEGFORMER_DIR = os.path.join(MODEL_ROOT, "pretrained")
 
 # 4. InsightFace
@@ -36,10 +35,10 @@ FFMPEG_EXE_TARGET = os.path.join(LIBS_DIR, "ffmpeg.exe")
 
 def download_file(url, dest_path):
     if os.path.exists(dest_path):
-        print(f"   ✅ 이미 존재함: {os.path.basename(dest_path)}")
+        print(f"   [OK] Already exists: {os.path.basename(dest_path)}")
         return True
 
-    print(f"   ⬇️ 다운로드 시작: {url}")
+    print(f"   [DOWN] Downloading: {url}")
     try:
         response = requests.get(url, stream=True)
         response.raise_for_status()
@@ -59,39 +58,39 @@ def download_file(url, dest_path):
                 size = file.write(data)
                 bar.update(size)
         
-        print(f"   ✅ 다운로드 완료: {dest_path}")
+        print(f"   [OK] Download Complete: {dest_path}")
         return True
     except Exception as e:
-        print(f"   ❌ 다운로드 실패: {e}")
+        print(f"   [ERROR] Download Failed: {e}")
         if os.path.exists(dest_path): os.remove(dest_path)
         return False
 
 def extract_zip(zip_path, extract_to):
-    print(f"   📦 압축 해제 중: {os.path.basename(zip_path)}...")
+    print(f"   [PKG] Extracting: {os.path.basename(zip_path)}...")
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_to)
-        print(f"   ✅ 압축 해제 완료")
+        print(f"   [OK] Extraction Complete")
         return True
     except Exception as e:
-        print(f"   ❌ 압축 해제 실패: {e}")
+        print(f"   [ERROR] Extraction Failed: {e}")
         return False
 
 def setup_ffmpeg():
     if os.path.exists(FFMPEG_EXE_TARGET): return
     os.makedirs(LIBS_DIR, exist_ok=True)
     if download_file(FFMPEG_URL, FFMPEG_ZIP):
-        print("   📦 FFmpeg 추출 중...")
+        print("   [PKG] Extracting FFmpeg...")
         try:
             with zipfile.ZipFile(FFMPEG_ZIP, 'r') as zf:
                 for file_info in zf.infolist():
                     if file_info.filename.endswith("bin/ffmpeg.exe"):
                         file_info.filename = "ffmpeg.exe"
                         zf.extract(file_info, LIBS_DIR)
-                        print(f"   ✅ FFmpeg 설치 완료: {FFMPEG_EXE_TARGET}")
+                        print(f"   [OK] FFmpeg Installed: {FFMPEG_EXE_TARGET}")
                         break
         except Exception as e:
-            print(f"   ❌ FFmpeg 설치 오류: {e}")
+            print(f"   [ERROR] FFmpeg Install Error: {e}")
         if os.path.exists(FFMPEG_ZIP): os.remove(FFMPEG_ZIP)
 
 def main():
@@ -113,7 +112,7 @@ def main():
             
     setup_ffmpeg()
     
-    print("\n🎉 모든 모델 준비 완료.")
+    print("\n[DONE] All models ready.")
 
 if __name__ == "__main__":
     main()

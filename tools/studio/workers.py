@@ -9,7 +9,7 @@ from PySide6.QtCore import QThread, Signal
 
 class CameraLoader(QThread):
     """
-    [Background Worker] 카메라 연결 시 UI 멈춤 방지용 스레드
+    [Background Worker] Camera Loader
     """
     finished = Signal(object, int) # cap_obj, camera_index
     error = Signal(str)
@@ -20,20 +20,13 @@ class CameraLoader(QThread):
 
     def run(self):
         try:
-            # 실제 카메라 연결 시도
             cap = cv2.VideoCapture(self.camera_index)
-            
-            # [Fix] USB 대역폭 확보를 위해 MJPG 압축 포맷 강제 설정
-            # 1080p 30fps를 YUY2(비압축)로 보내면 USB 2.0 대역폭 초과로 5~6fps로 떨어짐
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
-            
-            # 해상도 설정
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
             cap.set(cv2.CAP_PROP_FPS, 30)
             
             if cap.isOpened():
-                # 연결 성공
                 self.finished.emit(cap, self.camera_index)
             else:
                 self.error.emit("카메라를 열 수 없습니다.")
@@ -42,10 +35,10 @@ class CameraLoader(QThread):
 
 class PipelineWorker(QThread):
     """
-    [New] 원클릭 학습 파이프라인 (라벨링 -> 학습 -> 변환)
+    [New] One-Click Training Pipeline
     """
     log_signal = Signal(str)
-    progress_signal = Signal(int, str) # percent, status_text
+    progress_signal = Signal(int, str) 
     finished_signal = Signal()
     error_signal = Signal(str)
 
@@ -76,9 +69,8 @@ class PipelineWorker(QThread):
 
     def run_script(self, script_path, args):
         cmd = [sys.executable, script_path] + args
-        self.log_signal.emit(f"\n🚀 Executing: {os.path.basename(script_path)}")
+        self.log_signal.emit(f"\n[START] Executing: {os.path.basename(script_path)}")
         
-        # Windows에서 subprocess 실행 시 콘솔 창 숨기기
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         

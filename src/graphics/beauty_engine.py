@@ -18,11 +18,11 @@ try:
     HAS_CUDA = True
 except ImportError:
     HAS_CUDA = False
-    print("⚠️ [BeautyEngine] CuPy not found. Fallback to CPU Mode.")
+    print("[WARNING] [BeautyEngine] CuPy not found. Fallback to CPU Mode.")
 
 class BeautyEngine:
     def __init__(self, profiles=[]):
-        print("💄 [BeautyEngine] V15.1 Smart Composite Ready (Refactored)")
+        print("[BEAUTY] [BeautyEngine] V15.1 Smart Composite Ready (Refactored)")
         self.map_scale = 0.25 
         self.cache_w = 0
         self.cache_h = 0

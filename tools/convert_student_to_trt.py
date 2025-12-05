@@ -21,19 +21,17 @@ def convert_all():
     pth_files = glob.glob(os.path.join(model_dir, "student_*.pth"))
     
     if not pth_files:
-        print("❌ 변환할 모델(.pth)이 없습니다.")
+        print("[ERROR] No models(.pth) to convert.")
         return
 
     total = len(pth_files)
-    print(f"🔄 Found {total} models to convert.")
+    print(f"[LOOP] Found {total} models to convert.")
 
     for i, pth in enumerate(pth_files):
         print(f"\n[{i+1}/{total}] Processing: {os.path.basename(pth)}")
         onnx_path = pth.replace(".pth", ".onnx")
         engine_path = pth.replace(".pth", ".engine")
         
-        # [GUI Log] 
-        # 변환은 2단계 (ONNX -> Engine)이므로 50%씩 끊어서 표시
         base_progress = int((i / total) * 100)
         print(f"[PROGRESS] {base_progress}")
         
@@ -43,7 +41,7 @@ def convert_all():
         build_engine(onnx_path, engine_path)
 
     print("[PROGRESS] 100")
-    print("\n✅ 모든 모델 변환이 완료되었습니다.")
+    print("\n[OK] All conversions complete.")
 
 def export_onnx(pth_path, onnx_path):
     print("   -> Exporting to ONNX...")
@@ -61,7 +59,7 @@ def export_onnx(pth_path, onnx_path):
         dynamic_axes={'input': {0: 'B'}, 'seg': {0: 'B'}, 'pose': {0: 'B'}},
         opset_version=17 
     )
-    print("   ✅ ONNX Exported")
+    print("   [OK] ONNX Exported")
 
 def build_engine(onnx_path, engine_path):
     print("   -> Building TensorRT Engine (Please wait)...")
@@ -73,7 +71,7 @@ def build_engine(onnx_path, engine_path):
     
     with open(onnx_path, 'rb') as model:
         if not parser.parse(model.read()):
-            print("   ❌ ONNX Parse Failed")
+            print("   [ERROR] ONNX Parse Failed")
             for error in range(parser.num_errors):
                 print(parser.get_error(error))
             return
@@ -94,7 +92,7 @@ def build_engine(onnx_path, engine_path):
     serialized_engine = builder.build_serialized_network(network, config)
     with open(engine_path, "wb") as f:
         f.write(serialized_engine)
-    print("   ✅ TensorRT Engine Built")
+    print("   [OK] TensorRT Engine Built")
 
 if __name__ == "__main__":
     convert_all()

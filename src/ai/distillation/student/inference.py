@@ -14,7 +14,7 @@ from ai.distillation.student.model_arch import MuseStudentModel
 class StudentInference:
     def __init__(self, model_path=None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"🎓 [Student] PyTorch Inference Init (SegFormer)...")
+        print(f"[STUDENT] [Student] PyTorch Inference Init (SegFormer)...")
 
         self.model = MuseStudentModel(num_keypoints=17, pretrained=False).to(self.device)
         self.model.eval()
@@ -28,7 +28,7 @@ class StudentInference:
             self.model.load_state_dict(state_dict)
             self.is_ready = True
         else:
-            print(f"   ⚠️ Model not found: {model_path}")
+            print(f"   [WARNING] Model not found: {model_path}")
             self.is_ready = False
 
         self.input_size = (960, 544)
@@ -49,7 +49,6 @@ class StudentInference:
         with torch.no_grad():
             pred_seg, pred_pose = self.model(img_tensor)
             
-            # SegFormer는 Output이 1/4 Scale 일 수 있으나 Model에서 Interpolate함
             mask_prob = torch.sigmoid(pred_seg)
             mask_tensor = (mask_prob > 0.5).float().squeeze().cpu().numpy()
             mask_uint8 = (mask_tensor * 255).astype(np.uint8)

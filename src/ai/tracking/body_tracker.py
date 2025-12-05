@@ -30,13 +30,13 @@ class BodyTracker:
         self.active_model = None
         self.active_profile = None
         
-        print("🧠 [BodyTracker] 스캔 및 모델 프리로딩 시작...")
+        print("[BRAIN] [BodyTracker] Scan & Preload Started...")
         
         # 1. Scan Engines
         engine_files = glob.glob(os.path.join(self.model_dir, "student_*.engine"))
         
         if not engine_files:
-            print("   ⚠️ .engine 파일이 없습니다. PyTorch(CPU) 모드로 대체합니다.")
+            print("   [WARNING] .engine files not found. Using PyTorch(CPU) fallback.")
             self.models['default'] = StudentInference()
         else:
             for ef in engine_files:
@@ -65,14 +65,14 @@ class BodyTracker:
         if profile_name in self.models:
             self.active_profile = profile_name
             self.active_model = self.models[profile_name]
-            print(f"🧠 [BodyTracker] Switched to: {profile_name}")
+            print(f"[BRAIN] [BodyTracker] Switched to: {profile_name}")
             return True
         else:
             # Fallback to default if exists
             if 'default' in self.models:
                 self.active_profile = 'default'
                 self.active_model = self.models['default']
-                print(f"⚠️ [BodyTracker] '{profile_name}' not found. Using default.")
+                print(f"[WARNING] [BodyTracker] '{profile_name}' not found. Using default.")
                 return True
         return False
 
@@ -87,14 +87,14 @@ class BodyTracker:
 
     def draw_debug(self, frame, keypoints):
         """
-        [Visual Check] 뼈대 그리기 (Full Logic Restored)
+        [Visual Check] Skeleton Draw
         """
         if keypoints is None:
             return frame
 
         CONF_THRESH = 0.4
 
-        # 1. 점 찍기 (Joints)
+        # 1. Joints
         for i in range(17):
             x, y, conf = keypoints[i]
             h, w = frame.shape[:2]
@@ -107,7 +107,7 @@ class BodyTracker:
                 cv2.circle(frame, (int(x), int(y)), radius, color, -1)
                 cv2.circle(frame, (int(x), int(y)), radius+1, (255, 255, 255), 1)
 
-        # 2. 선 연결 (Skeleton)
+        # 2. Skeleton
         # COCO 17 Keypoints Format
         skeleton = [
             (5, 7), (7, 9),       # Left Arm

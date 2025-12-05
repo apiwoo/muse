@@ -18,12 +18,12 @@ def verify_session(session_name):
     label_dir = os.path.join(data_dir, "labels")
     
     if not os.path.exists(img_dir):
-        print(f"❌ 데이터 폴더를 찾을 수 없습니다: {data_dir}")
+        print(f"[ERROR] Data folder not found: {data_dir}")
         return
 
     img_files = sorted(glob.glob(os.path.join(img_dir, "*.jpg")))
-    print(f"🔍 검수 시작: {len(img_files)}장")
-    print("   [Key] SPACE: 다음 장, B: 뒤로 가기, Q: 종료")
+    print(f"[SCAN] Verification Start: {len(img_files)} images")
+    print("   [Key] SPACE: Next, B: Back, Q: Quit")
     
     idx = 0
     while idx < len(img_files):
@@ -42,13 +42,13 @@ def verify_session(session_name):
             keypoints = np.array(label_data["keypoints"])
             
         # Visualization
-        # 1. 마스크 오버레이 (빨간색 반투명)
+        # 1. Mask Overlay (Red)
         if mask is not None:
             colored_mask = np.zeros_like(img)
             colored_mask[:, :, 2] = mask # Red Channel
             img = cv2.addWeighted(img, 1.0, colored_mask, 0.5, 0)
             
-        # 2. 뼈대 그리기
+        # 2. Keypoints
         for kp in keypoints:
             x, y, conf = kp
             if conf > 0.4:
@@ -72,7 +72,7 @@ def verify_session(session_name):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("사용법: python verify_data.py <SESSION_NAME>")
+        print("Usage: python verify_data.py <SESSION_NAME>")
         sys.exit(1)
         
     verify_session(sys.argv[1])

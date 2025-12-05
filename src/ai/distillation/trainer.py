@@ -163,7 +163,7 @@ class Trainer:
             self._train_single_profile(profile, profile_idx=i, total_profiles=total_profiles)
 
     def _train_single_profile(self, profile, profile_idx, total_profiles):
-        print(f"\n🔥 Training SegFormer for [{profile}]...")
+        print(f"\n[FIRE] Training SegFormer for [{profile}]...")
         dataset = MuseDataset(os.path.join(self.root_data_dir, profile))
         if len(dataset) == 0: return
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4)
@@ -177,11 +177,6 @@ class Trainer:
         for epoch in range(self.epochs):
             model.train()
             running_loss = 0.0
-            
-            # [GUI Integration] Progress Calculation
-            # 전체 진행률 = (현재 프로파일 완료율 + 현재 에폭 완료율) / 전체 프로파일 수
-            # 하지만 간단하게: 현재 프로파일 내 에폭 진행률만 표시하거나, 전체 통합 표시
-            # 여기서는 Studio가 단순 파싱하므로 Epoch 단위로 로그를 찍습니다.
             
             pbar = tqdm(dataloader, desc=f"Ep {epoch+1}/{self.epochs}", leave=False)
             
@@ -205,19 +200,13 @@ class Trainer:
             
             scheduler.step()
             
-            # [GUI Log Format]
-            # 전체 공정 중 현재 위치 계산
-            # step_per_profile = 100 / total_profiles
-            # current_base = step_per_profile * profile_idx
-            # current_progress = current_base + (step_per_profile * (epoch + 1) / self.epochs)
-            
             current_progress = int(((profile_idx * self.epochs) + (epoch + 1)) / (total_profiles * self.epochs) * 100)
             print(f"[PROGRESS] {current_progress}")
             print(f"   Epoch {epoch+1}/{self.epochs} - Loss: {running_loss/len(dataloader):.4f}")
 
         save_path = os.path.join(self.model_save_dir, f"student_{profile}.pth")
         torch.save(model.state_dict(), save_path)
-        print(f"   🎉 Model Saved: {save_path}")
+        print(f"   [DONE] Model Saved: {save_path}")
 
 if __name__ == "__main__":
     session = sys.argv[1] if len(sys.argv) > 1 else "personal_data"

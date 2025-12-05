@@ -11,10 +11,10 @@ import json
 import glob
 from tqdm import tqdm
 
-# 프로젝트 루트 경로 확보
+# Project Root Setup
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(root_dir)
-sys.path.append(os.path.join(root_dir, "src")) # [Fix] src 폴더를 경로에 추가하여 ai 모듈 인식
+sys.path.append(os.path.join(root_dir, "src"))
 
 from ai.tracking.vitpose_trt import VitPoseTrt
 from ai.distillation.teacher.sam_wrapper import Sam2VideoWrapper
@@ -25,7 +25,7 @@ class AutoLabeler:
         self.root_data_dir = os.path.join(self.root_dir, "recorded_data", root_session)
         
         if not os.path.exists(self.root_data_dir):
-            print("[Error] 데이터 폴더가 없습니다.")
+            print("[ERROR] Data folder not found.")
             self.profiles = []
             return
             
@@ -54,14 +54,14 @@ class AutoLabeler:
         out_labels = os.path.join(profile_dir, "labels")
         for d in [out_imgs, out_masks, out_labels]: os.makedirs(d, exist_ok=True)
 
-        # [Append Logic] 이미 처리된 비디오 목록 로드
+        # [Append Logic] Load processed video list
         processed_log_path = os.path.join(profile_dir, "processed_videos.json")
         processed_videos = []
         if os.path.exists(processed_log_path):
             with open(processed_log_path, "r") as f:
                 processed_videos = json.load(f)
         
-        # 다음 이미지 인덱스 계산 (이어쓰기)
+        # Calculate next image index
         global_idx = self._get_next_index(out_imgs)
         
         newly_processed = []
@@ -69,22 +69,21 @@ class AutoLabeler:
         for v_idx, video_path in enumerate(video_paths):
             vid_name = os.path.basename(video_path)
             
-            # [Smart Check] 이미 처리된 영상이면 스킵
+            # [Smart Check] Skip if already processed
             if vid_name in processed_videos:
-                # 단, 이미지가 실제로 있는지 확인은 필요할 수 있음 (여기서는 로그 신뢰)
-                print(f"   [Skip] Skipping processed video: {vid_name}")
+                print(f"   [SKIP] Skipping processed video: {vid_name}")
                 continue
 
-            print(f"   [Video] Processing New Video: {vid_name}")
+            print(f"   [VIDEO] Processing New Video: {vid_name}")
             
-            # [GUI Log] 비디오 단위 진행률
+            # [GUI Log]
             current_progress = int(((profile_idx * len(video_paths) + v_idx) / (total_profiles * len(video_paths))) * 100)
             print(f"[PROGRESS] {current_progress}")
             
             try:
                 self.sam_wrapper.init_state(video_path)
             except Exception as e:
-                print(f"      [Error] SAM Init Failed: {e}")
+                print(f"      [ERROR] SAM Init Failed: {e}")
                 continue
 
             cap = cv2.VideoCapture(video_path)
@@ -95,14 +94,14 @@ class AutoLabeler:
             
             keypoints = self.pose_model.inference(first_frame)
             if keypoints is None:
-                print("      [Warn] No pose detected in first frame.")
+                print("      [WARN] No pose detected in first frame.")
                 cap.release()
                 self.sam_wrapper.reset()
                 continue
 
             valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
             if len(valid_kpts) < 3:
-                print("      [Warn] Not enough keypoints.")
+                print("      [WARN] Not enough keypoints.")
                 cap.release()
                 self.sam_wrapper.reset()
                 continue
@@ -121,17 +120,12 @@ class AutoLabeler:
                 video_masks[frame_idx] = mask
 
             # Save Data
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             curr_f_idx = 0
             
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
-                
-                # 프레임 저장 여부 결정 (6프레임당 1장 등 샘플링 가능하나, 여기선 전부 저장하고 Trainer에서 셔플)
-                # 용량 절약을 위해 3프레임당 1장 저장 (옵션)
-                # 여기서는 풀 데이터를 위해 전부 저장
                 
                 kpts = self.pose_model.inference(frame)
                 mask = video_masks.get(curr_f_idx, None)
@@ -159,17 +153,16 @@ class AutoLabeler:
             cap.release()
             self.sam_wrapper.reset()
             
-            # 처리 완료 목록에 추가
             newly_processed.append(vid_name)
         
-        # 로그 업데이트
+        # Update Log
         if newly_processed:
             processed_videos.extend(newly_processed)
             with open(processed_log_path, "w") as f:
                 json.dump(processed_videos, f, indent=4)
             print(f"   [OK] Added {len(newly_processed)} videos to processed log.")
         else:
-            print("   [Info] No new videos to process.")
+            print("   [INFO] No new videos to process.")
 
     def _get_next_index(self, dir_path):
         files = glob.glob(os.path.join(dir_path, "*.jpg"))

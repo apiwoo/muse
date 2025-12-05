@@ -54,7 +54,7 @@ class BeautyWorker(QThread):
         self.pinned_mem_ai = None
 
     def run(self):
-        print(f"🧵 [Worker] Zero-Copy Engine Start (Active: {self.current_profile_name})")
+        print(f"[THREAD] [Worker] Zero-Copy Engine Start (Active: {self.current_profile_name})")
 
         try:
             required_cams = []
@@ -79,7 +79,7 @@ class BeautyWorker(QThread):
                 self.slider_sync_requested.emit(self.params)
             
         except Exception as e:
-            print(f"❌ [Worker] Init Failed: {e}")
+            print(f"[ERROR] [Worker] Init Failed: {e}")
             return
 
         frame_count = 0
@@ -134,7 +134,7 @@ class BeautyWorker(QThread):
             frame_count += 1
             curr_time = time.time()
             if curr_time - prev_time >= 1.0:
-                # print(f"⚡ FPS: {frame_count}")
+                # print(f"[FAST] FPS: {frame_count}")
                 frame_count = 0
                 prev_time = curr_time
 
@@ -158,7 +158,7 @@ class BeautyWorker(QThread):
         return frame_cpu
 
     def cleanup(self):
-        print("🧹 [Worker] Cleanup")
+        print("[CLEAN] [Worker] Cleanup")
         self.save_current_config()
         if self.input_mgr: self.input_mgr.release()
         if self.virtual_cam: self.virtual_cam.close()
@@ -184,7 +184,7 @@ class BeautyWorker(QThread):
         target_profile = self.profiles[index]
         if target_profile == self.current_profile_name: return
 
-        print(f"\n🔄 [Switch] -> {target_profile}")
+        print(f"\n[LOOP] [Switch] -> {target_profile}")
         self.save_current_config()
         self.current_profile_name = target_profile
         new_config = self.profile_mgr.get_config(target_profile)

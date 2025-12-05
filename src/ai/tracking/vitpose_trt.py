@@ -23,21 +23,21 @@ class VitPoseTrt:
         [High-End] ViTPose TensorRT Inference Engine
         - Backend: TensorRT 10.x + CuPy (Zero-Copy)
         - Model: ViT-Huge (COCO 17 Keypoints)
-        - V2.0 Update: Letterbox Preprocessing (비율 왜곡 방지)
+        - V2.0 Update: Letterbox Preprocessing (Ratio Preservation)
         """
-        print(f"[ViTPose] TensorRT 엔진 로딩 중: {os.path.basename(engine_path)}")
+        print(f"[ViTPose] TensorRT Engine Loading: {os.path.basename(engine_path)}")
         
         self.logger = trt.Logger(trt.Logger.WARNING)
         
         # 1. Load Engine
         if not os.path.exists(engine_path):
-            raise FileNotFoundError(f"❌ 엔진 파일이 없습니다: {engine_path}")
+            raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}")
 
         with open(engine_path, "rb") as f, trt.Runtime(self.logger) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
 
         if not self.engine:
-            raise RuntimeError("❌ 엔진 역직렬화 실패")
+            raise RuntimeError("[ERROR] Engine deserialization failed")
 
         self.context = self.engine.create_execution_context()
         
@@ -60,7 +60,7 @@ class VitPoseTrt:
         self.mean = cp.array([0.485, 0.456, 0.406], dtype=cp.float32).reshape(1, 3, 1, 1)
         self.std = cp.array([0.229, 0.224, 0.225], dtype=cp.float32).reshape(1, 3, 1, 1)
         
-        print("✅ [ViTPose] 엔진 초기화 완료 (Ready)")
+        print("[OK] [ViTPose] Engine Ready")
 
     def inference(self, frame_bgr):
         """
@@ -72,26 +72,26 @@ class VitPoseTrt:
 
         h_orig, w_orig = frame_bgr.shape[:2]
 
-        # [Step 1] Letterbox Resize (비율 유지)
-        # 1. 스케일 계산 (가로/세로 중 더 많이 줄여야 하는 쪽 기준)
+        # [Step 1] Letterbox Resize (Maintain Aspect Ratio)
+        # 1. Calculate scale
         scale = min(self.input_w / w_orig, self.input_h / h_orig)
         
-        # 2. 리사이즈된 크기
+        # 2. Resized dims
         nw = int(w_orig * scale)
         nh = int(h_orig * scale)
         
-        # 3. 리사이즈 수행
+        # 3. Resize
         img_resized = cv2.resize(frame_bgr, (nw, nh))
         
-        # 4. 패딩 (회색 배경)
-        # 캔버스 생성 (256, 192)
+        # 4. Padding (Gray background)
+        # Create canvas (256, 192)
         img_canvas = np.full((self.input_h, self.input_w, 3), 127.5, dtype=np.uint8)
         
-        # 중앙 정렬을 위한 오프셋 계산
+        # Calculate offset
         pad_w = (self.input_w - nw) // 2
         pad_h = (self.input_h - nh) // 2
         
-        # 이미지 붙여넣기
+        # Paste image
         img_canvas[pad_h:pad_h+nh, pad_w:pad_w+nw] = img_resized
 
         # [Step 2] To GPU & Normalize
@@ -127,11 +127,11 @@ class VitPoseTrt:
         # Stack [x, y]
         kpts = cp.stack([x_heat, y_heat], axis=-1).astype(cp.float32)
         
-        # [Critical] 좌표 복원 (Heatmap -> Input -> Original)
-        # 1. Heatmap(64x48) -> Input(256x192) : 4배 확대
+        # [Critical] Restore Coordinates (Heatmap -> Input -> Original)
+        # 1. Heatmap(64x48) -> Input(256x192) : 4x scale
         kpts *= 4.0
         
-        # 2. Remove Padding (Letterbox 역연산)
+        # 2. Remove Padding (Letterbox Inverse)
         kpts[..., 0] -= pad_w
         kpts[..., 1] -= pad_h
         

@@ -19,8 +19,7 @@ class MuseStudentModel(nn.Module):
         super().__init__()
         
         # 1. Encoder (MiT-B1)
-        # features_only=True returns features from stages [1/4, 1/8, 1/16, 1/32]
-        print("🎓 [Student] Initializing SegFormer (MiT-B1)...")
+        print("[STUDENT] [Student] Initializing SegFormer (MiT-B1)...")
         self.encoder = timm.create_model(
             'mit_b1', 
             pretrained=pretrained, 
@@ -32,7 +31,6 @@ class MuseStudentModel(nn.Module):
         embedding_dim = 256
 
         # 2. MLP Decoder Layers
-        # Project all encoder features to a common embedding dimension
         self.linear_c4 = MLP(input_dim=enc_channels[3], embed_dim=embedding_dim)
         self.linear_c3 = MLP(input_dim=enc_channels[2], embed_dim=embedding_dim)
         self.linear_c2 = MLP(input_dim=enc_channels[1], embed_dim=embedding_dim)
@@ -40,7 +38,6 @@ class MuseStudentModel(nn.Module):
 
         self.dropout = nn.Dropout(0.1)
         
-        # Fused Linear Layer (4 * embed_dim -> embed_dim)
         self.linear_fuse = nn.Conv2d(embedding_dim * 4, embedding_dim, kernel_size=1)
         self.bn = nn.BatchNorm2d(embedding_dim)
         self.relu = nn.ReLU(inplace=True)
@@ -54,15 +51,10 @@ class MuseStudentModel(nn.Module):
 
     def forward(self, x):
         # x: (B, 3, 544, 960)
-        
-        # Encoder
-        # features: [c1, c2, c3, c4] at scales 1/4, 1/8, 1/16, 1/32
         features = self.encoder(x)
         c1, c2, c3, c4 = features
 
-        # MLP Decoder
-        # 1. Projection
-        n, _, h, w = c4.shape # 1/32 scale
+        n, _, h, w = c4.shape 
         
         _c4 = self.linear_c4(c4).permute(0, 2, 1).reshape(n, -1, c4.shape[2], c4.shape[3])
         _c4 = F.interpolate(_c4, size=c1.shape[2:], mode='bilinear', align_corners=False)
@@ -75,28 +67,20 @@ class MuseStudentModel(nn.Module):
 
         _c1 = self.linear_c1(c1).permute(0, 2, 1).reshape(n, -1, c1.shape[2], c1.shape[3])
 
-        # 2. Fuse (Concatenate -> Linear)
         _c = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))
         _c = self.bn(_c)
         _c = self.relu(_c)
         _c = self.dropout(_c)
 
-        # 3. Heads
         seg_logits = self.seg_head(_c)
         pose_heatmaps = self.pose_head(_c)
 
-        # 4. Upsample to Input Resolution (1/4 -> 1/1)
-        # MiT output is 1/4 of input. We need to upsample x4.
         seg_logits = F.interpolate(seg_logits, scale_factor=4, mode='bilinear', align_corners=False)
         pose_heatmaps = F.interpolate(pose_heatmaps, scale_factor=4, mode='bilinear', align_corners=False)
 
         return seg_logits, pose_heatmaps
 
 class MLP(nn.Module):
-    """
-    Linear Projection Layer for Decoder
-    Conv2d 1x1 is equivalent to Linear on channels
-    """
     def __init__(self, input_dim=2048, embed_dim=768):
         super().__init__()
         self.proj = nn.Linear(input_dim, embed_dim)
