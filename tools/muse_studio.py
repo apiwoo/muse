@@ -67,6 +67,10 @@ class MuseStudio(QMainWindow):
         self.page1.profile_confirmed.connect(self.on_profile_confirmed)
         self.page2.go_back.connect(lambda: self.stack.setCurrentIndex(0))
         self.page2.camera_ready.connect(self.on_camera_ready)
+        
+        # [New] Page 2 -> Page 4 (Direct Skip for Debugging)
+        self.page2.go_train_direct.connect(lambda: self.stack.setCurrentIndex(3))
+        
         self.page3.go_home.connect(lambda: self.stack.setCurrentIndex(0))
         self.page3.go_train.connect(lambda: self.stack.setCurrentIndex(3))
         self.page4.go_home.connect(lambda: self.stack.setCurrentIndex(0))

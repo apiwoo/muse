@@ -132,6 +132,7 @@ class Page1_ProfileSelect(QWidget):
 class Page2_CameraConnect(QWidget):
     camera_ready = Signal(int) # [Change] Emit Camera Index (int) instead of object
     go_back = Signal()
+    go_train_direct = Signal() # [New] Debug Skip Signal
 
     def __init__(self):
         super().__init__()
@@ -189,6 +190,13 @@ class Page2_CameraConnect(QWidget):
         btn_back.setCursor(Qt.PointingHandCursor)
         btn_back.clicked.connect(self.go_back.emit)
         layout.addWidget(btn_back)
+
+        # [임시] 학습 메뉴로 바로 가기 버튼
+        self.btn_skip = QPushButton("🚀 학습 메뉴로 바로 가기 (Debug)")
+        self.btn_skip.setStyleSheet("background-color: #444; color: #BBB; border: 1px dashed #666; margin-top: 10px; padding: 10px;")
+        self.btn_skip.setCursor(Qt.PointingHandCursor)
+        self.btn_skip.clicked.connect(self.go_train_direct.emit)
+        layout.addWidget(self.btn_skip)
 
     def set_target(self, name, mode):
         self.target_profile = name

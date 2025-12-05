@@ -12,7 +12,9 @@ import glob
 from tqdm import tqdm
 
 # 프로젝트 루트 경로 확보
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(root_dir)
+sys.path.append(os.path.join(root_dir, "src")) # [Fix] src 폴더를 경로에 추가하여 ai 모듈 인식
 
 from ai.tracking.vitpose_trt import VitPoseTrt
 from ai.distillation.teacher.sam_wrapper import Sam2VideoWrapper
