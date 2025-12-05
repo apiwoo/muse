@@ -47,8 +47,11 @@ class DistillationLoss(nn.Module):
 
     def forward(self, student_seg, student_pose, hard_mask, heatmaps):
         loss_seg = self.bce(student_seg, hard_mask)
+        # [Log Fix] Pose Loss 스케일링 유지
         loss_pose = self.mse(student_pose, heatmaps) * 1000.0
-        return loss_seg + loss_pose
+        
+        # [Log Fix] 개별 Loss 추적을 위해 튜플 반환 (Total, Seg, Pose)
+        return loss_seg + loss_pose, loss_seg, loss_pose
 
 class MuseDataset(Dataset):
     def __init__(self, profile_dir, input_size=(960, 544)):
@@ -241,7 +244,12 @@ class Trainer:
         
         for epoch in range(self.epochs):
             model.train()
-            running_loss = 0.0
+            
+            # [Log Fix] 개별 Loss 추적 변수
+            run_total = 0.0
+            run_seg = 0.0
+            run_dice = 0.0
+            run_pose = 0.0
             
             pbar = tqdm(dataloader, desc=f"Ep {epoch+1}/{self.epochs}", leave=False)
             
@@ -254,15 +262,30 @@ class Trainer:
                 optimizer.zero_grad()
                 with torch.cuda.amp.autocast():
                     pred_seg, pred_pose = model(imgs)
-                    loss_dice = self.dice_loss(pred_seg, masks)
-                    loss_total = self.loss_fn(pred_seg, pred_pose, masks, heatmaps) + loss_dice
+                    
+                    # [Log Fix] Loss 분리 계산 및 수집
+                    # loss_fn 반환값: (distill_total, seg_bce, pose_mse)
+                    distill_loss, l_seg, l_pose = self.loss_fn(pred_seg, pred_pose, masks, heatmaps)
+                    
+                    l_dice = self.dice_loss(pred_seg, masks)
+                    
+                    # 최종 Total Loss
+                    loss_total = distill_loss + l_dice
                 
                 scaler.scale(loss_total).backward()
                 scaler.step(optimizer)
                 scaler.update()
                 
-                running_loss += loss_total.item()
-                pbar.set_postfix({'loss': f"{loss_total.item():.4f}"})
+                # [Log Fix] 누적 및 로그 업데이트
+                run_total += loss_total.item()
+                run_seg += l_seg.item()
+                run_dice += l_dice.item()
+                run_pose += l_pose.item()
+                
+                # 상세 로그 포맷: Total | Seg(BCE) | Dice | Pose
+                pbar.set_postfix_str(
+                    f"T:{loss_total.item():.4f} | S:{l_seg.item():.4f} | D:{l_dice.item():.4f} | P:{l_pose.item():.4f}"
+                )
             
             scheduler.step()
             
@@ -271,7 +294,12 @@ class Trainer:
             
             current_progress = int(((profile_idx * self.epochs) + (epoch + 1)) / (total_profiles * self.epochs) * 100)
             print(f"[PROGRESS] {current_progress}")
-            print(f"   Epoch {epoch+1}/{self.epochs} - Loss: {running_loss/len(dataloader):.4f}")
+            
+            # Epoch 평균 로그 출력
+            avg_len = len(dataloader)
+            print(f"   Epoch {epoch+1}/{self.epochs} - "
+                  f"Avg Loss: {run_total/avg_len:.4f} "
+                  f"(Seg: {run_seg/avg_len:.4f}, Dice: {run_dice/avg_len:.4f}, Pose: {run_pose/avg_len:.4f})")
 
         save_path = os.path.join(self.model_save_dir, f"student_{profile}.pth")
         torch.save(model.state_dict(), save_path)
