@@ -8,6 +8,7 @@ import numpy as np
 import cv2
 import os
 import sys
+import gc
 
 # Windows DLL Path Fix
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -23,21 +24,46 @@ class VitPoseTrt:
         [High-End] ViTPose TensorRT Inference Engine
         - Backend: TensorRT 10.x + CuPy (Zero-Copy)
         - Model: ViT-Huge (COCO 17 Keypoints)
-        - V2.0 Update: Letterbox Preprocessing (Ratio Preservation)
+        - V2.1 Update: Safe Loader (Memory Leak Fix)
         """
-        print(f"[ViTPose] TensorRT Engine Loading: {os.path.basename(engine_path)}")
+        if not os.path.exists(engine_path):
+            raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}\n-> Please run 'tools/trt_converter.py' to rebuild it.")
+
+        # [Safety Check] File Size Validation
+        file_size_mb = os.path.getsize(engine_path) / (1024 * 1024)
+        print(f"[ViTPose] TensorRT Engine Loading: {os.path.basename(engine_path)} ({file_size_mb:.1f} MB)")
         
+        # 엔진 파일이 비정상적으로 크거나 작으면 경고 (보통 500MB~2GB 사이)
+        if file_size_mb < 10 or file_size_mb > 8192:
+            print(f"[WARNING] Engine file size seems abnormal. If it hangs, delete {engine_path} and rebuild.")
+
         self.logger = trt.Logger(trt.Logger.WARNING)
         
-        # 1. Load Engine
-        if not os.path.exists(engine_path):
-            raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}")
-
-        with open(engine_path, "rb") as f, trt.Runtime(self.logger) as runtime:
-            self.engine = runtime.deserialize_cuda_engine(f.read())
+        try:
+            # 1. Load Engine to Memory
+            # 파일을 한 번에 읽어서 변수에 담습니다.
+            with open(engine_path, "rb") as f:
+                engine_data = f.read()
+            
+            # 2. Deserialize (CPU RAM -> GPU VRAM)
+            # 런타임을 with 문으로 사용하여 리소스 자동 해제 유도
+            with trt.Runtime(self.logger) as runtime:
+                self.engine = runtime.deserialize_cuda_engine(engine_data)
+            
+            # [CRITICAL] Delete raw binary from RAM immediately
+            # GPU로 로딩이 끝났으므로, CPU 램에 있는 수 GB짜리 바이너리 데이터는 즉시 삭제합니다.
+            del engine_data
+            gc.collect() # 강제 가비지 컬렉션 실행
+            # print("   [MEM] Raw engine data cleared from RAM.")
+            
+        except Exception as e:
+            print(f"[CRITICAL] Failed to load TensorRT engine: {e}")
+            print("-> The engine file might be corrupted or incompatible with current driver.")
+            print("-> SOLUTION: Delete the .engine file and run 'tools/trt_converter.py'.")
+            raise e
 
         if not self.engine:
-            raise RuntimeError("[ERROR] Engine deserialization failed")
+            raise RuntimeError("[ERROR] Engine deserialization returned None. (Version Mismatch?)")
 
         self.context = self.engine.create_execution_context()
         
@@ -60,7 +86,7 @@ class VitPoseTrt:
         self.mean = cp.array([0.485, 0.456, 0.406], dtype=cp.float32).reshape(1, 3, 1, 1)
         self.std = cp.array([0.229, 0.224, 0.225], dtype=cp.float32).reshape(1, 3, 1, 1)
         
-        print("[OK] [ViTPose] Engine Ready")
+        print("[OK] [ViTPose] Engine Ready & Memory Cleaned")
 
     def inference(self, frame_bgr):
         """

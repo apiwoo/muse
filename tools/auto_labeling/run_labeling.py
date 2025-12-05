@@ -33,11 +33,24 @@ class AutoLabeler:
             
         self.profiles = [d for d in os.listdir(self.root_data_dir) if os.path.isdir(os.path.join(self.root_data_dir, d))]
 
+        # [Memory Optimization] Pre-clean
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         print("[Teacher B] ViTPose (Keypoints) Loading...")
-        self.pose_model = VitPoseTrt(engine_path=os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine"))
+        try:
+            self.pose_model = VitPoseTrt(engine_path=os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine"))
+        except Exception as e:
+            print(f"[ERROR] ViTPose Init Failed: {e}")
+            sys.exit(1)
 
         print("[Teacher A] SAM 2 (Video Segmentation) Loading...")
-        self.sam_wrapper = Sam2VideoWrapper(model_root=os.path.join(self.root_dir, "assets/models/segment_anything"))
+        try:
+            self.sam_wrapper = Sam2VideoWrapper(model_root=os.path.join(self.root_dir, "assets/models/segment_anything"))
+        except Exception as e:
+            print(f"[ERROR] SAM 2 Init Failed: {e}")
+            sys.exit(1)
 
     def _force_clear_memory(self):
         """[New] 강제 메모리 청소"""
