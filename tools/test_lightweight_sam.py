@@ -12,6 +12,33 @@ import torch
 from torchvision import transforms
 from PIL import Image
 
+# [Fix] CUDA Path Setup (Error 126 Fix - Explicit DLL Path Injection)
+current_file = os.path.abspath(__file__)
+root_dir = os.path.dirname(os.path.dirname(current_file))
+sys.path.append(root_dir)
+sys.path.append(os.path.join(root_dir, "src"))
+
+# 1. Project Local 'libs' Folder Injection (Highest Priority)
+if sys.platform == "win32":
+    try:
+        libs_dir = os.path.join(root_dir, "libs")
+        if os.path.exists(libs_dir):
+            os.add_dll_directory(libs_dir)
+            os.environ['PATH'] = libs_dir + os.pathsep + os.environ['PATH']
+            print(f"[INFO] DLL Directory Added: {libs_dir}")
+        else:
+            print(f"[WARNING] 'libs' folder not found at: {libs_dir}")
+    except Exception as e:
+        print(f"[WARNING] Failed to add DLL directory: {e}")
+
+# 2. CUDA Helper Setup (Secondary check)
+try:
+    from utils.cuda_helper import setup_cuda_environment
+    setup_cuda_environment()
+    print("[INFO] CUDA Environment Setup Complete.")
+except ImportError:
+    print("[WARNING] CUDA Helper not found. DLL paths might be missing.")
+
 # 3rd Party Libs
 try:
     import mediapipe as mp
@@ -21,8 +48,6 @@ except ImportError:
     sys.exit(1)
 
 # Paths
-current_file = os.path.abspath(__file__)
-root_dir = os.path.dirname(os.path.dirname(current_file))
 modnet_path = os.path.join(root_dir, "assets", "models", "segmentation", "modnet.onnx")
 
 class SegmentationTester:
@@ -53,10 +78,12 @@ class SegmentationTester:
         print(f"⏳ [2/3] Loading MODNet ({modnet_path})...")
         if os.path.exists(modnet_path):
             try:
+                # [Optimization] Provider 우선순위 명시
                 providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
                 self.modnet_session = ort.InferenceSession(modnet_path, providers=providers)
                 self.modnet_input_name = self.modnet_session.get_inputs()[0].name
                 self.models[1] = self.infer_modnet
+                print(f"   ✅ MODNet Loaded (Providers: {self.modnet_session.get_providers()})")
             except Exception as e:
                 print(f"   ❌ MODNet Load Failed: {e}")
         else:

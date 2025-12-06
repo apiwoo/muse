@@ -28,22 +28,11 @@ SAM2_1_LARGE_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2.1_hiera_l
 
 # 4. MODNet (Webcam Optimized ONNX) - [New]
 MODNET_URL = "https://github.com/ZHKKKe/MODNet/releases/download/v1.0.0/modnet_webcam_portrait_matting.ckpt"
-# ONNX 변환된 버전이 없으면 Torch 버전을 받거나, 호환되는 ONNX 링크 사용
-# [Fixed] Updated Valid Link (Using a reliable mirror for the webcam version)
-MODNET_ONNX_URL = "https://github.com/R3ab/MODNet-ONNX/releases/download/v0.1.0/modnet.onnx" 
-# Let's try the PINTO model again but with the exact verified raw link structure or a different source.
-# The previous link failed. Let's use a standard one.
-# Reverting to a known good source or a different mirror.
-# Actually, let's use the one from the official-ish ONNX model zoo or similar if available.
-# Since direct links can rot, I will use a very standard repo link.
-MODNET_ONNX_URL = "https://github.com/PINTO0309/PINTO_model_zoo/raw/main/147_MODNet/modnet_photographic_portrait_matting_opset11.onnx"
-# Wait, the user just reported this failed. Let's try another file from the same repo or a different repo entirely.
-# The file "modnet_photographic_portrait_matting_opset11.onnx" might have been moved.
-# Let's try the float32 version which is often more stable in link.
-MODNET_ONNX_URL = "https://github.com/PINTO0309/PINTO_model_zoo/raw/main/147_MODNet/float32/modnet_photographic_portrait_matting_opset11.onnx" 
-# If that fails, we can fall back to the dynamic quantization version or another repo.
-# Let's try a different repo to be safe:
-MODNET_ONNX_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.10.23/modnet_photographic_portrait_matting.onnx"
+
+# [Fixed] Updated Valid Link (HivisionIDPhotos Repository)
+# The previous link from sherpa-onnx (v1.10.23) is broken/404.
+# This link is from a reliable ID Photo project using the same model.
+MODNET_ONNX_URL = "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/modnet_photographic_portrait_matting.onnx"
 
 MODNET_PATH = os.path.join(MODEL_ROOT, "segmentation", "modnet.onnx")
 
@@ -118,7 +107,7 @@ def setup_ffmpeg():
 
 def main():
     print("============================================================")
-    print("   MUSE Model Downloader (v1.4 MODNet Added)")
+    print("   MUSE Model Downloader (v1.5 MODNet Fix)")
     print("============================================================")
     
     os.makedirs(os.path.dirname(SAM2_PATH), exist_ok=True)
