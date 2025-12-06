@@ -68,49 +68,60 @@ class NVDECCapture:
         return True
 
 class CaptureWorker(threading.Thread):
-    def __init__(self, caps):
+    def __init__(self, caps, width, height):
         super().__init__()
         self.caps = caps
+        self.width = width
+        self.height = height
         self.active_id = None
         self.latest_frame = None
         self.new_frame_available = False
         self.running = True
         self.lock = threading.Lock()
         self.daemon = True 
+        print(f"[DEBUG] [CaptureWorker] Initialized. Cameras: {list(caps.keys())}")
 
     def set_active_camera(self, cid):
         with self.lock:
             self.active_id = cid
             self.latest_frame = None
+            print(f"[DEBUG] [CaptureWorker] Active camera set to: {cid}")
 
     def run(self):
-        # [Optimization] Thread sleep removed for max polling rate
+        print("[DEBUG] [CaptureWorker] Thread loop started.")
+        fail_count = 0
+        
         while self.running:
+            # 카메라가 선택되지 않았거나 연결된 카메라가 없을 때 더미 처리
             if self.active_id is None:
-                time.sleep(0.01)
+                time.sleep(0.033)
                 continue
             
-            # [Performance] Only read active camera fully
-            # Inactive cameras: skip or grab() only if buffer lagging is issue
-            # For USB bandwidth, better to NOT read inactive at all if possible,
-            # but OpenCV buffers might get stale.
-            # Compromise: Read Active FAST, others SLOW.
-            
+            processed = False
             for cid, cap in self.caps.items():
                 if cid == self.active_id:
                     ret, frame = cap.read()
-                    if ret:
+                    processed = True
+                    if ret and frame is not None:
                         with self.lock:
                             self.latest_frame = frame
                             self.new_frame_available = True
+                        if fail_count > 0:
+                            print(f"[INFO] [CaptureWorker] Camera {cid} recovered after {fail_count} failures.")
+                            fail_count = 0
+                    else:
+                        fail_count += 1
+                        # 60프레임(약 2초)마다 한 번씩만 로그 출력
+                        if fail_count % 60 == 0:
+                            print(f"[WARNING] [CaptureWorker] Failed to read from Cam {cid} (Ret={ret})")
+                            
                 else:
-                    # [Bandwidth Saver] 
-                    # Don't grab every loop for inactive cams. 
-                    # If using DirectShow, buffers might pile up (latency on switch).
-                    # If we care about bandwidth, we assume user accepts 1sec lag on switch.
-                    # Here we just 'grab' (header only usually) to keep alive.
+                    # 비활성 카메라는 버퍼 비우기용 grab만 수행
                     if isinstance(cap, cv2.VideoCapture):
-                        cap.grab() 
+                        cap.grab()
+            
+            if not processed:
+                time.sleep(0.01)
             
     def get_latest_frame(self):
         with self.lock:
@@ -122,6 +133,7 @@ class CaptureWorker(threading.Thread):
 
     def stop(self):
         self.running = False
+        print("[DEBUG] [CaptureWorker] Stopping thread.")
 
 class InputManager:
     def __init__(self, camera_indices=[0], width=1920, height=1080, fps=30):
@@ -131,7 +143,7 @@ class InputManager:
         self.height = height
         self.fps = fps
         
-        unique_sources = list(dict.fromkeys(camera_indices)) # Remove dups
+        unique_sources = list(dict.fromkeys(camera_indices))
         
         print(f"[CAM] [InputManager] Initializing sources: {unique_sources}")
         
@@ -140,41 +152,57 @@ class InputManager:
             if isinstance(source, int):
                 # Webcam
                 print(f"   -> Opening Webcam {source}...", end=" ")
+                # [Recorder.py Style] 최대한 단순하게 오픈
                 cap = cv2.VideoCapture(source)
+                
+                # [DEBUG] 백엔드 확인 (DSHOW, MSMF 등)
+                backend = cap.getBackendName()
+                print(f"[Backend: {backend}]", end=" ")
+
                 if cap.isOpened():
-                    # [Performance] Set props ONLY ONCE here.
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-                    cap.set(cv2.CAP_PROP_FPS, fps)
-                    # MJPG is critical for >1 cams on USB 2.0
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
+                    # [Recorder.py Style] 해상도/FPS만 설정하고 FourCC 강제 설정 제거
+                    res_w = cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    res_h = cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                    res_fps = cap.set(cv2.CAP_PROP_FPS, fps)
                     
-                    self.caps[cid] = cap
-                    print("[OK]")
+                    # [DEBUG] 설정 적용 결과 확인
+                    print(f"\n      [Settings] W:{width}({res_w}) H:{height}({res_h}) FPS:{fps}({res_fps})")
+
+                    # [Critical] MJPG 강제 설정 제거됨 (recorder.py와 동일 환경)
+                    # cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G')) 
+
+                    # [Check] 즉시 프레임 읽기 시도 (Warm-up 루프 제거)
+                    ret, _ = cap.read()
+                    if ret:
+                        self.caps[cid] = cap
+                        print(f"      -> [OK] Camera Ready. (Resolution: {int(cap.get(3))}x{int(cap.get(4))})")
+                    else:
+                        print(f"      -> [FAILED] Camera opened but returned no frame.")
+                        cap.release()
                 else:
-                    print("[ERROR]")
+                    print("[ERROR] (Could not open)")
             
             elif isinstance(source, str):
                 # File/Stream
                 try:
                     cap = NVDECCapture(source, width, height, fps)
                     self.caps[cid] = cap
-                except: pass
+                    print(f"   -> NVDEC Source {source} [OK]")
+                except: 
+                    print(f"   -> NVDEC Source {source} [FAIL]")
 
             if self.active_id is None and cid in self.caps:
                 self.active_id = cid
 
         if not self.caps:
-            # Fallback
-            print("[WARNING] No cameras found. Using dummy.")
-            self.active_id = 0
-
-        self.worker = CaptureWorker(self.caps)
+            print("[WARNING] No cameras found. InputManager will run empty.")
+        
+        print(f"[DEBUG] [InputManager] Starting CaptureWorker with Active ID: {self.active_id}")
+        self.worker = CaptureWorker(self.caps, width, height)
         self.worker.set_active_camera(self.active_id)
         self.worker.start()
 
     def select_camera(self, camera_id):
-        # [Optimization] Only switch if different
         if camera_id == self.active_id: return True
         
         if camera_id in self.caps:
@@ -183,12 +211,11 @@ class InputManager:
             print(f"[INPUT] Switched to Source: {camera_id}")
             return True
         else:
-            # Try to open dynamically if not present?
-            # For stability, we only allow pre-configured cams for now.
             print(f"[WARNING] Camera {camera_id} not initialized.")
             return False
 
     def read(self):
+        if not self.worker: return None, False
         frame_cpu, ret = self.worker.get_latest_frame()
         frame_gpu = None
         if ret and frame_cpu is not None:

@@ -98,26 +98,29 @@ class BeautyWorker(QThread):
             return
 
         frame_count = 0
+        no_frame_tick = 0
         prev_time = time.time()
-        loop_start_time = time.time() # [Debug]
+        
+        print("[ENGINE] >>> Entering Main Loop <<<")
 
         while self.running:
-            loop_start = time.perf_counter() # [Debug] Loop start time
-
-            if self.pending_profile_index != -1:
-                print(f"[DEBUG] Profile switch pending: {self.pending_profile_index}")
-                self._execute_profile_switch(self.pending_profile_index)
-                self.pending_profile_index = -1
-
             # Input (GPU)
-            # print(f"[DEBUG] Reading Input...") # Too verbose for normal run
             frame_gpu, ret = self.input_mgr.read()
             
             if not ret or frame_gpu is None:
-                # print(f"[DEBUG] No frame input. Sleeping...")
-                self.msleep(5) # Increase sleep to avoid busy waiting loop spam
+                # [DEBUG LOG] 데이터 수신 실패 모니터링
+                no_frame_tick += 1
+                if no_frame_tick % 60 == 0: # 약 2초마다 경고 (너무 자주 뜨지 않게)
+                    print(f"[WARNING] Engine Loop: No Frame from InputManager (Tick: {no_frame_tick})")
+                
+                self.msleep(5) 
                 continue
             
+            # 프레임 수신 성공 시 카운터 리셋 및 복구 로그
+            if no_frame_tick > 0:
+                print(f"[INFO] Engine Loop: Frame Signal Restored!")
+                no_frame_tick = 0
+
             # [Event] BG Capture
             if self.pending_bg_capture:
                 print(f"[DEBUG] BG Capture Triggered")
@@ -125,7 +128,6 @@ class BeautyWorker(QThread):
                 self.pending_bg_capture = False
 
             # --- Pipeline ---
-            # print(f"[DEBUG] AI Processing...")
             t_ai_start = time.perf_counter()
             alpha_matte, keypoints = self.ai_engine.process(frame_gpu)
             t_ai_end = time.perf_counter()
@@ -141,7 +143,6 @@ class BeautyWorker(QThread):
             clean_bg = self.bg_manager.get_background()
             self.beauty_engine.bg_gpu = clean_bg 
             
-            # print(f"[DEBUG] Beauty Processing...")
             t_beauty_start = time.perf_counter()
             frame_out_gpu = self.beauty_engine.process(
                 frame_gpu, 
@@ -152,12 +153,10 @@ class BeautyWorker(QThread):
             )
             t_beauty_end = time.perf_counter()
             
-            # print(f"[DEBUG] Sending to VirtualCam...")
             t_send_start = time.perf_counter()
             self.virtual_cam.send(frame_out_gpu)
             t_send_end = time.perf_counter()
             
-            # print(f"[DEBUG] Emitting Frame to UI...")
             self.frame_processed.emit(frame_out_gpu)
 
             frame_count += 1
@@ -165,10 +164,8 @@ class BeautyWorker(QThread):
                 print(f"[FPS] {frame_count} | AI: {(t_ai_end - t_ai_start)*1000:.1f}ms | Beauty: {(t_beauty_end - t_beauty_start)*1000:.1f}ms | Send: {(t_send_end - t_send_start)*1000:.1f}ms")
                 frame_count = 0
                 prev_time = time.time()
-                
-            # [Safety] Prevent loop lockup if something is super fast (unlikely)
-            # self.msleep(1) 
 
+        print("[ENGINE] Loop Finished.")
         self.cleanup()
 
     def _execute_bg_capture(self, frame_gpu):
