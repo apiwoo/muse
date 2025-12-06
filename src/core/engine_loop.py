@@ -1,5 +1,5 @@
 # Project MUSE - engine_loop.py
-# V5 Architecture: The Guided High-Res Flow (Launcher Connected)
+# V5 Architecture: The Guided High-Res Flow (Debug Enhanced)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import time
@@ -10,6 +10,7 @@ import cv2
 
 from PySide6.QtCore import QThread, Signal, Slot, QMutex, QMutexLocker
 
+# [MUSE Modules]
 from utils.config import ProfileManager
 from core.input_manager import InputManager
 from core.virtual_cam import VirtualCamera
@@ -26,7 +27,7 @@ class BeautyWorker(QThread):
     frame_processed = Signal(object)
     slider_sync_requested = Signal(dict)
 
-    def __init__(self, start_profile="default"): # [New] Accept start_profile
+    def __init__(self, start_profile="default"): 
         super().__init__()
         self.running = True
         self.param_mutex = QMutex()
@@ -34,10 +35,8 @@ class BeautyWorker(QThread):
         self.profile_mgr = ProfileManager()
         self.profiles = self.profile_mgr.get_profile_list()
         
-        # [New] Use the profile selected from Launcher
         self.current_profile_name = start_profile
         if self.current_profile_name not in self.profiles:
-            # Fallback if something went wrong
             self.current_profile_name = self.profiles[0] if self.profiles else "default"
         
         initial_config = self.profile_mgr.get_config(self.current_profile_name)
@@ -56,13 +55,12 @@ class BeautyWorker(QThread):
         print(f"[ENGINE] Launching V5 Pipeline (Profile: {self.current_profile_name})...")
 
         try:
-            # 1. Hardware Initialization (Collect all potential cameras)
+            # 1. Hardware Initialization
             used_cams = set([0])
             for p in self.profiles:
                 cfg = self.profile_mgr.get_config(p)
                 used_cams.add(cfg.get("camera_id", 0))
             
-            # [Fix] 런처에서 방금 생성한 프로필의 카메라도 포함되었는지 확인
             current_cfg = self.profile_mgr.get_config(self.current_profile_name)
             used_cams.add(current_cfg.get("camera_id", 0))
             
@@ -70,20 +68,28 @@ class BeautyWorker(QThread):
             self.input_mgr = InputManager(camera_indices=list(used_cams), width=self.WIDTH, height=self.HEIGHT, fps=self.FPS)
             
             # Select Initial Camera
+            print(f"[ENGINE] Selecting Initial Camera ID: {current_cfg.get('camera_id', 0)}")
             self.input_mgr.select_camera(current_cfg.get("camera_id", 0))
             
+            print(f"[ENGINE] Initializing Virtual Camera...")
             self.virtual_cam = VirtualCamera(width=self.WIDTH, height=self.HEIGHT, fps=self.FPS)
 
             # 2. AI & Graphics
+            print(f"[ENGINE] Initializing AI Engine...")
             self.ai_engine = ConsensusEngine(self.root_dir)
+            print(f"[ENGINE] Initializing Graphics (Adaptive BG)...")
             self.bg_manager = AdaptiveBackground(self.WIDTH, self.HEIGHT)
+            print(f"[ENGINE] Initializing Beauty Engine...")
             self.beauty_engine = BeautyEngine(profiles=self.profiles)
             
             # [Load] Initial Assets
+            print(f"[ENGINE] Loading Initial Assets...")
             self._load_profile_assets(self.current_profile_name)
             
             with QMutexLocker(self.param_mutex):
                 self.slider_sync_requested.emit(self.params)
+            
+            print(f"[ENGINE] Initialization Complete. Starting Loop...")
             
         except Exception as e:
             print(f"[ERROR] Engine Init Failed: {e}")
@@ -93,24 +99,36 @@ class BeautyWorker(QThread):
 
         frame_count = 0
         prev_time = time.time()
+        loop_start_time = time.time() # [Debug]
 
         while self.running:
+            loop_start = time.perf_counter() # [Debug] Loop start time
+
             if self.pending_profile_index != -1:
+                print(f"[DEBUG] Profile switch pending: {self.pending_profile_index}")
                 self._execute_profile_switch(self.pending_profile_index)
                 self.pending_profile_index = -1
 
+            # Input (GPU)
+            # print(f"[DEBUG] Reading Input...") # Too verbose for normal run
             frame_gpu, ret = self.input_mgr.read()
+            
             if not ret or frame_gpu is None:
-                self.msleep(1)
+                # print(f"[DEBUG] No frame input. Sleeping...")
+                self.msleep(5) # Increase sleep to avoid busy waiting loop spam
                 continue
             
             # [Event] BG Capture
             if self.pending_bg_capture:
+                print(f"[DEBUG] BG Capture Triggered")
                 self._execute_bg_capture(frame_gpu)
                 self.pending_bg_capture = False
 
             # --- Pipeline ---
+            # print(f"[DEBUG] AI Processing...")
+            t_ai_start = time.perf_counter()
             alpha_matte, keypoints = self.ai_engine.process(frame_gpu)
+            t_ai_end = time.perf_counter()
             
             if alpha_matte is not None:
                 self.bg_manager.update(frame_gpu, alpha_matte)
@@ -123,6 +141,8 @@ class BeautyWorker(QThread):
             clean_bg = self.bg_manager.get_background()
             self.beauty_engine.bg_gpu = clean_bg 
             
+            # print(f"[DEBUG] Beauty Processing...")
+            t_beauty_start = time.perf_counter()
             frame_out_gpu = self.beauty_engine.process(
                 frame_gpu, 
                 faces=[], 
@@ -130,14 +150,24 @@ class BeautyWorker(QThread):
                 params=current_params, 
                 mask=alpha_matte
             )
+            t_beauty_end = time.perf_counter()
             
+            # print(f"[DEBUG] Sending to VirtualCam...")
+            t_send_start = time.perf_counter()
             self.virtual_cam.send(frame_out_gpu)
+            t_send_end = time.perf_counter()
+            
+            # print(f"[DEBUG] Emitting Frame to UI...")
             self.frame_processed.emit(frame_out_gpu)
 
             frame_count += 1
             if time.time() - prev_time >= 1.0:
+                print(f"[FPS] {frame_count} | AI: {(t_ai_end - t_ai_start)*1000:.1f}ms | Beauty: {(t_beauty_end - t_beauty_start)*1000:.1f}ms | Send: {(t_send_end - t_send_start)*1000:.1f}ms")
                 frame_count = 0
                 prev_time = time.time()
+                
+            # [Safety] Prevent loop lockup if something is super fast (unlikely)
+            # self.msleep(1) 
 
         self.cleanup()
 
@@ -166,7 +196,6 @@ class BeautyWorker(QThread):
         if index < len(self.profiles):
             target_profile_name = self.profiles[index]
         else:
-            # Auto-create if shortcut pressed for non-existent profile
             target_profile_name = f"profile_{index+1}"
             print(f"[INFO] Profile '{target_profile_name}' does not exist. Creating...")
             current_cam_id = self.input_mgr.active_id if self.input_mgr.active_id is not None else 0
@@ -193,7 +222,9 @@ class BeautyWorker(QThread):
     def _load_profile_assets(self, profile_name):
         bg_path = os.path.join(self.root_dir, "recorded_data", "personal_data", profile_name, "background.jpg")
         if os.path.exists(bg_path):
-            self.bg_manager.load_static_background(bg_path)
+            if self.bg_manager.load_static_background(bg_path):
+                # print(f"[INFO] Static background loaded for {profile_name}")
+                pass
         else:
             print(f"[WARNING] No background.jpg. Press 'B' to capture.")
             self.bg_manager.is_static_loaded = False 

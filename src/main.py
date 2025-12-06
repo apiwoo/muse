@@ -1,14 +1,15 @@
 # Project MUSE - main.py
-# The Visual Singularity Engine Entry Point (Dynamic Hotkeys)
+# The Visual Singularity Engine Entry Point (Dynamic Hotkeys & Loading State)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import sys
 import os
 import signal
+import time
 
-from PySide6.QtWidgets import QApplication, QDialog
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtWidgets import QApplication, QDialog, QSplashScreen
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QKeySequence, QPixmap, QColor
 import qdarktheme
 
 # Add Paths
@@ -34,6 +35,9 @@ class MuseApp(MainWindow):
         # Connect Signals
         worker.slider_sync_requested.connect(self.beauty_panel.update_sliders_from_config)
         self.request_profile_switch.connect(worker.switch_profile)
+        
+        # [New] Status Bar Update for Loading
+        self.statusBar().showMessage("AI 엔진 초기화 중... 잠시만 기다려주세요.")
 
     def keyPressEvent(self, event):
         # [New] Dynamic Hotkey Matching
@@ -88,7 +92,18 @@ def main():
     start_profile = launcher.get_start_config()
     print(f"[START] Launching Engine with Profile: {start_profile}")
 
+    # [New] Splash Screen for Loading
+    # 간단한 로딩 화면을 띄워 사용자가 멈춘 것으로 오해하지 않게 합니다.
+    splash_pix = QPixmap(400, 200)
+    splash_pix.fill(QColor("#1E1E1E"))
+    splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
+    splash.showMessage(f"\n\n   MUSE AI 엔진 구동 중...\n   프로필: {start_profile}\n   (최대 10초 소요)", 
+                       Qt.AlignCenter, Qt.white)
+    splash.show()
+    app.processEvents()
+
     # [Step 3] Start Engine
+    # Worker 생성 시 모델 로딩이 발생하므로 시간이 걸립니다.
     worker = BeautyWorker(start_profile=start_profile)
     
     window = MuseApp(worker)
@@ -97,8 +112,14 @@ def main():
     # Update UI title with profile
     window.beauty_panel.set_profile_info(start_profile)
     
+    # Worker 시작
     worker.start()
+    
+    # 로딩 완료 후 메인 윈도우 표시
+    # Worker가 첫 프레임을 보낼 때까지 기다리거나, 일정 시간 후 닫음
+    # 여기서는 단순하게 Worker 시작 후 윈도우를 띄우고 스플래시를 닫습니다.
     window.show()
+    splash.finish(window)
     
     app.exec()
     
