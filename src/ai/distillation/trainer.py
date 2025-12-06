@@ -1,12 +1,13 @@
 # Project MUSE - trainer.py
 # Multi-Profile Training Engine (Dual Mode & Single Profile Support)
-# Updated: Detailed Loss Logging (BCE vs Dice)
+# Updated v2.0: OHEM (Hard Example Mining) & SmoothL1 for Higher Accuracy
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import cv2
 import numpy as np
@@ -27,6 +28,31 @@ try:
 except ImportError:
     HAS_ALBUMENTATIONS = False
 
+# [New] Online Hard Example Mining (OHEM) Loss
+# 쉬운 픽셀(배경 등)은 무시하고, 틀린 픽셀(경계면) 위주로 학습
+class OhemBCELoss(nn.Module):
+    def __init__(self, thresh=0.7, min_kept=10000):
+        super(OhemBCELoss, self).__init__()
+        self.thresh = thresh
+        self.min_kept = max(1, min_kept)
+        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+
+    def forward(self, pred, target):
+        # Calculate pixel-wise loss
+        loss = self.bce(pred, target)
+        
+        # Flatten
+        loss = loss.view(-1)
+        
+        # Sort and keep top hard examples
+        # 전체 픽셀 중 Loss가 큰 상위 N개만 학습에 반영
+        num_pixels = loss.numel()
+        num_kept = int(num_pixels * (1.0 - self.thresh))
+        num_kept = max(num_kept, self.min_kept)
+        
+        loss, _ = loss.topk(num_kept)
+        return loss.mean()
+
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1.0):
         super(DiceLoss, self).__init__()
@@ -34,8 +60,10 @@ class DiceLoss(nn.Module):
 
     def forward(self, pred, target):
         pred = torch.sigmoid(pred)
-        intersection = (pred * target).sum(dim=2).sum(dim=2)
-        loss = (1 - ((2. * intersection + self.smooth) / (pred.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + self.smooth)))
+        # [Fix] 차원 명시적 합산 (Batch 제외한 나머지 차원)
+        intersection = (pred * target).sum(dim=(2, 3))
+        union = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
+        loss = 1 - ((2. * intersection + self.smooth) / (union + self.smooth))
         return loss.mean()
 
 class MuseDataset(Dataset):
@@ -47,10 +75,11 @@ class MuseDataset(Dataset):
         self.img_files = sorted(glob.glob(os.path.join(self.img_dir, "*.jpg")))
 
         if HAS_ALBUMENTATIONS:
+            # [Tuning] 증강 강도를 살짝 높여 일반화 성능 향상
             self.transform = A.Compose([
-                A.HueSaturationValue(p=0.3),
-                A.RandomBrightnessContrast(p=0.3),
-                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=10, p=0.5),
+                A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.4),
+                A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.4),
+                A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5, border_mode=cv2.BORDER_CONSTANT),
                 A.Resize(height=input_size[1], width=input_size[0]),
                 A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
                 ToTensorV2()
@@ -176,23 +205,25 @@ class Trainer:
         
         self.profiles = [d for d in os.listdir(self.root_data_dir) if os.path.isdir(os.path.join(self.root_data_dir, d))]
         
-        # Filter for target profile
         if target_profile:
             if target_profile in self.profiles:
                 print(f"[TRAINER] Target Lock: Only training '{target_profile}'")
                 self.profiles = [target_profile]
             else:
-                print(f"[WARNING] Target '{target_profile}' not found in {self.root_data_dir}. Falling back to all.")
+                print(f"[WARNING] Target '{target_profile}' not found. Fallback to all.")
 
         self.epochs = epochs
         self.batch_size = batch_size
         
-        # Loss Functions
-        self.bce_loss = nn.BCEWithLogitsLoss()
-        self.mse_loss = nn.MSELoss()
+        # [New] Advanced Loss Functions
+        # OHEM: Hard mining for better segmentation edges
+        self.ohem_loss = OhemBCELoss(thresh=0.7) 
         self.dice_loss = DiceLoss()
+        
+        # SmoothL1: More robust regression for Pose heatmaps
+        self.pose_loss = nn.SmoothL1Loss(beta=1.0)
 
-        print(f"[TRAINER] Initialized for TASK: {self.task.upper()}")
+        print(f"[TRAINER] Initialized for TASK: {self.task.upper()} (w/ OHEM & SmoothL1)")
 
     def train_all_profiles(self):
         total = len(self.profiles)
@@ -227,7 +258,9 @@ class Trainer:
 
             model.train()
             run_loss = 0.0
-            run_bce = 0.0
+            
+            # Logging metrics
+            run_ohem = 0.0
             run_dice = 0.0
             
             pbar = tqdm(dataloader, desc=f"Ep {epoch+1}/{self.epochs}", leave=False)
@@ -241,21 +274,27 @@ class Trainer:
                     
                     if self.task == 'seg':
                         masks = masks.to(self.device, non_blocking=True)
-                        l_bce = self.bce_loss(output, masks)
-                        l_dice = self.dice_loss(output, masks)
-                        loss = l_bce + (l_dice * 5.0)
                         
-                        run_bce += l_bce.item()
+                        # [Modified] OHEM + Dice (Stronger edge supervision)
+                        l_ohem = self.ohem_loss(output, masks)
+                        l_dice = self.dice_loss(output, masks)
+                        
+                        # OHEM 가중치를 높게 주어 어려운 부분 집중 학습
+                        loss = l_ohem * 1.5 + l_dice 
+                        
+                        run_ohem += l_ohem.item()
                         run_dice += l_dice.item()
                         
-                        # [Modified] Detailed Log for User
-                        pbar.set_postfix_str(f"T:{loss.item():.4f} B:{l_bce.item():.4f} D:{l_dice.item():.4f}")
+                        pbar.set_postfix_str(f"T:{loss.item():.4f} OHEM:{l_ohem.item():.4f} D:{l_dice.item():.4f}")
                         
                     elif self.task == 'pose':
                         heatmaps = heatmaps.to(self.device, non_blocking=True)
-                        l_mse = self.mse_loss(output, heatmaps) * 3000.0 
-                        loss = l_mse
-                        pbar.set_postfix_str(f"Pose Loss: {loss.item():.4f}")
+                        
+                        # [Modified] SmoothL1 Loss (Robust Regression)
+                        # Scaling factor 1000.0 keeps loss magnitude visible
+                        l_pose = self.pose_loss(output, heatmaps) * 1000.0 
+                        loss = l_pose
+                        pbar.set_postfix_str(f"Pose(L1): {loss.item():.4f}")
                 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -272,11 +311,11 @@ class Trainer:
             avg_loss = run_loss / len(dataloader)
             
             if self.task == 'seg':
-                avg_bce = run_bce / len(dataloader)
+                avg_ohem = run_ohem / len(dataloader)
                 avg_dice = run_dice / len(dataloader)
-                print(f"   Epoch {epoch+1}/{self.epochs} - Avg: {avg_loss:.4f} (BCE: {avg_bce:.4f}, Dice: {avg_dice:.4f})")
+                print(f"   Epoch {epoch+1}/{self.epochs} - Total: {avg_loss:.4f} (OHEM: {avg_ohem:.4f}, Dice: {avg_dice:.4f})")
             else:
-                print(f"   Epoch {epoch+1}/{self.epochs} - Avg Loss: {avg_loss:.4f}")
+                print(f"   Epoch {epoch+1}/{self.epochs} - Pose Loss: {avg_loss:.4f}")
 
         # Save with suffix
         save_name = f"student_{self.task}_{profile}.pth"
