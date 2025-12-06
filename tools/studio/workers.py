@@ -48,6 +48,20 @@ class PipelineWorker(QThread):
         self.root_dir = root_dir
         self.tools_dir = os.path.join(root_dir, "tools")
         self.mode = mode
+        self.current_process = None
+
+    def request_early_stop(self):
+        """
+        [New] 학습 조기 종료 요청
+        학습기가 감지할 수 있는 플래그 파일을 생성합니다.
+        """
+        flag_path = os.path.join(self.root_dir, "recorded_data", "personal_data", "stop_training.flag")
+        try:
+            with open(flag_path, "w") as f:
+                f.write("STOP")
+            self.log_signal.emit("\n[CMD] 중단 요청 신호 전송 완료. 현재 에포크 완료 후 저장됩니다...")
+        except Exception as e:
+            self.log_signal.emit(f"\n[ERROR] 중단 신호 생성 실패: {e}")
 
     def run(self):
         try:
@@ -97,17 +111,20 @@ class PipelineWorker(QThread):
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         
-        process = subprocess.Popen(
+        self.current_process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
             text=True, encoding='utf-8', errors='replace', bufsize=1,
             startupinfo=startupinfo
         )
         
-        for line in process.stdout:
+        for line in self.current_process.stdout:
             line = line.strip()
             if line:
                 self.log_signal.emit(line)
         
-        process.wait()
-        if process.returncode != 0:
-            raise RuntimeError(f"Script failed with code {process.returncode}")
+        self.current_process.wait()
+        ret = self.current_process.returncode
+        self.current_process = None # Reset
+        
+        if ret != 0:
+            raise RuntimeError(f"Script failed with code {ret}")

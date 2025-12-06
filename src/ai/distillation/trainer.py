@@ -242,7 +242,17 @@ class Trainer:
         except AttributeError:
             scaler = torch.cuda.amp.GradScaler()
         
+        # [New] Stop Flag Check Path
+        stop_flag = os.path.join(self.root_data_dir, "stop_training.flag")
+        # 시작 전 이전 플래그 삭제
+        if os.path.exists(stop_flag): os.remove(stop_flag)
+
         for epoch in range(self.epochs):
+            # [New] Early Stop Check
+            if os.path.exists(stop_flag):
+                print(f"\n[STOP] 사용자 중단 요청 감지. 학습을 조기 종료하고 모델을 저장합니다.")
+                break
+
             model.train()
             
             # [Log Fix] 개별 Loss 추적 변수

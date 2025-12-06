@@ -634,12 +634,19 @@ class Page4_AiTraining(QWidget):
         self.btn_step2.clicked.connect(self.start_training)
         self.btn_step2.setVisible(False)
         
+        # [New] 학습 중단 버튼 (처음엔 숨김)
+        self.btn_stop = QPushButton("🛑 학습 중단 및 모델 생성")
+        self.btn_stop.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; border-radius: 8px; padding: 15px; border: none;")
+        self.btn_stop.clicked.connect(self.stop_training)
+        self.btn_stop.setVisible(False)
+        
         self.btn_home = QPushButton("홈으로")
         self.btn_home.setStyleSheet("background: #444; color: white; padding: 15px; border-radius: 8px; border:none;")
         self.btn_home.clicked.connect(self.go_home.emit)
         
         btn_layout.addWidget(self.btn_step1)
         btn_layout.addWidget(self.btn_step2)
+        btn_layout.addWidget(self.btn_stop) # 버튼 추가
         btn_layout.addWidget(self.btn_home)
         
         layout.addLayout(btn_layout)
@@ -759,6 +766,10 @@ class Page4_AiTraining(QWidget):
 
         self.btn_step2.setEnabled(False)
         self.btn_step2.setText("학습 진행 중... (창을 닫지 마세요)")
+        self.btn_step2.setVisible(False) # 숨김
+        self.btn_stop.setVisible(True)   # 중단 버튼 보임
+        self.btn_stop.setEnabled(True)
+        self.btn_stop.setText("🛑 학습 중단 및 모델 생성")
         
         self.list_widget.setVisible(False)
         self.log_view.setVisible(True)
@@ -773,7 +784,15 @@ class Page4_AiTraining(QWidget):
         self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "오류", e))
         self.worker.start()
 
+    def stop_training(self):
+        if self.worker:
+            self.worker.request_early_stop()
+            self.btn_stop.setEnabled(False)
+            self.btn_stop.setText("중단 요청됨... (저장 대기 중)")
+
     def on_training_finished(self):
+        self.btn_stop.setVisible(False)
+        self.btn_step2.setVisible(True)
         self.btn_step2.setText("학습 완료")
         self.lbl_status.setText("모든 과정이 성공적으로 끝났습니다.")
         self.btn_home.setVisible(True)
