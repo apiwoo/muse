@@ -45,6 +45,48 @@ except ImportError as e:
     logging.error(f"Failed to import BodyTracker: {e}")
     sys.exit(1)
 
+# [New] 디버그용 스켈레톤 그리기 함수 (낮은 신뢰도용)
+def draw_skeleton_debug(img, keypoints, conf_thresh=0.1):
+    """
+    BodyTracker의 기본 draw_debug 대신 사용할 커스텀 함수.
+    낮은 신뢰도(0.1)에서도 억지로 선을 그려서 디버깅을 돕습니다.
+    """
+    if keypoints is None: return img
+    
+    # COCO Keypoint Indices
+    # 0:Nose, 1:L-Eye, 2:R-Eye, 3:L-Ear, 4:R-Ear
+    # 5:L-Shldr, 6:R-Shldr, 7:L-Elbow, 8:R-Elbow, 9:L-Wrist, 10:R-Wrist
+    # 11:L-Hip, 12:R-Hip, 13:L-Knee, 14:R-Knee, 15:L-Ankle, 16:R-Ankle
+    
+    # 연결 관계 (Skeleton Edges)
+    edges = [
+        (0,1), (0,2), (1,3), (2,4),         # Face
+        (5,6), (5,11), (6,12), (11,12),     # Torso
+        (5,7), (7,9),                       # Left Arm
+        (6,8), (8,10),                      # Right Arm
+        (11,13), (13,15),                   # Left Leg
+        (12,14), (14,16)                    # Right Leg
+    ]
+    
+    # 색상 (BGR)
+    color_point = (0, 0, 255)   # Red Points
+    color_line = (0, 255, 0)    # Green Lines
+
+    # 1. 점 그리기
+    for i, (x, y, conf) in enumerate(keypoints):
+        if conf > conf_thresh:
+            cv2.circle(img, (int(x), int(y)), 4, color_point, -1)
+
+    # 2. 선 그리기
+    for i, j in edges:
+        if i < len(keypoints) and j < len(keypoints):
+            xi, yi, ci = keypoints[i]
+            xj, yj, cj = keypoints[j]
+            if ci > conf_thresh and cj > conf_thresh:
+                cv2.line(img, (int(xi), int(yi)), (int(xj), int(yj)), color_line, 2)
+                
+    return img
+
 def main():
     parser = argparse.ArgumentParser(description="MUSE Personal Model Tester")
     parser.add_argument("--profile", type=str, default="front", help="Target profile name (e.g., front, top)")
@@ -57,24 +99,36 @@ def main():
     logging.info(f"Test Started. Target Profile: {args.profile}, Camera ID: {args.cam}")
 
     # 1. BodyTracker 초기화 (모든 프로필 스캔)
-    # 내부적으로 student_*.engine 파일을 찾아서 로드합니다.
     try:
-        logging.info("Initializing BodyTracker (Scanning for models)...")
+        logging.info("Initializing BodyTracker (Scanning for dual models)...")
         tracker = BodyTracker()
-        logging.info("BodyTracker Initialized.")
+        logging.info(f"BodyTracker Initialized. Loaded Profiles: {list(tracker.models.keys())}")
     except Exception as e:
         print(f"❌ Tracker 초기화 실패: {e}")
-        logging.error(f"Tracker Init Error: {e}", exc_info=True) # 상세 트레이스백
+        logging.error(f"Tracker Init Error: {e}", exc_info=True)
         return
 
     # 2. 프로필 선택
     logging.info(f"Selecting profile: {args.profile}")
     if not tracker.set_profile(args.profile):
         print(f"❌ 프로필 '{args.profile}'을 찾을 수 없습니다.")
-        print("   -> assets/models/personal/ 폴더에 student_{profile}.engine 파일이 있는지 확인하세요.")
+        print("   [Check List]")
+        print(f"   1. assets/models/personal/ 폴더에 다음 두 파일이 모두 있어야 합니다:")
+        print(f"      - student_seg_{args.profile}.engine")
+        print(f"      - student_pose_{args.profile}.engine")
+        print("   2. 학습 후 변환(Convert) 과정을 수행했는지 확인하세요.")
+        print("      -> 실행: python tools/convert_student_to_trt.py --profile {args.profile}")
+        
         logging.warning(f"Profile '{args.profile}' not found in tracker. Using fallback.")
-        # 실패해도 기본값으로 계속 진행 시도 (디버깅용)
-        print("   -> 기본(default) 프로필 또는 로드된 첫 번째 모델로 진행합니다.")
+        print("   -> (테스트를 위해 기본(default) 프로필 또는 로드된 첫 번째 모델로 진행합니다.)")
+        
+        if len(tracker.models) > 0:
+            fallback_profile = list(tracker.models.keys())[0]
+            tracker.set_profile(fallback_profile)
+            print(f"   -> Fallback Profile: {fallback_profile}")
+        else:
+            print("   ❌ 로드된 모델이 전혀 없습니다. 종료합니다.")
+            return
     else:
         logging.info(f"Profile '{args.profile}' selected successfully.")
 
@@ -100,7 +154,7 @@ def main():
     print("   - Red Overlay: Person Mask (Background Removal)")
 
     prev_time = time.time()
-    frame_count = 0 # [Added] 프레임 카운터
+    frame_count = 0 
 
     while True:
         ret, frame = cap.read()
@@ -109,15 +163,12 @@ def main():
             break
 
         frame_count += 1
-        loop_start_time = time.time()
-
+        
         # ---------------------------------------------------------
         # [Step 1] Inference (추론)
         # ---------------------------------------------------------
-        # frame은 BGR 포맷이어야 합니다.
-        # process()는 내부적으로 Mask를 업데이트하고 Keypoints를 반환합니다.
         
-        t_infer_start = time.perf_counter() # 정밀 시간 측정
+        t_infer_start = time.perf_counter() 
         try:
             keypoints = tracker.process(frame)
         except Exception as e:
@@ -137,21 +188,18 @@ def main():
             elif hasattr(mask_gpu, 'cpu'):
                 mask_cpu = mask_gpu.cpu().numpy() # Torch -> Numpy
             else:
-                mask_cpu = mask_gpu # 이미 CPU인 경우
+                mask_cpu = mask_gpu 
 
         # [Added] 상세 로그 출력 (60프레임마다)
         if frame_count % 60 == 0:
-            # 키포인트 통계
             valid_kpts = 0
             avg_conf = 0.0
             if keypoints is not None:
-                # keypoints: [x, y, conf]
                 valid_list = [k for k in keypoints if k[2] > 0.0]
                 valid_kpts = len(valid_list)
                 if valid_kpts > 0:
                     avg_conf = sum(k[2] for k in valid_list) / valid_kpts
             
-            # 마스크 통계
             mask_fill_ratio = 0.0
             if mask_cpu is not None:
                 mask_fill_ratio = np.count_nonzero(mask_cpu) / mask_cpu.size * 100
@@ -165,31 +213,22 @@ def main():
 
         # 1. Mask Overlay (Segmentation 확인)
         if mask_cpu is not None:
-            # 마스크를 0~255로 변환 (float인 경우)
             if mask_cpu.dtype != np.uint8:
                 mask_u8 = (mask_cpu * 255).astype(np.uint8)
             else:
                 mask_u8 = mask_cpu
 
-            # 빨간색 오버레이 생성
-            # 배경(0)은 그대로, 사람(1)은 붉은 틴트
-            
-            # 컬러 채널 생성 (Blue, Green, Red)
             zeros = np.zeros_like(mask_u8)
-            mask_color = cv2.merge([zeros, zeros, mask_u8]) # Red Channel만 마스크 값 적용
-            
-            # 원본과 합성 (가중치: 원본 1.0 + 마스크 0.5)
-            # 마스크가 있는 부분만 붉게 변함
+            mask_color = cv2.merge([zeros, zeros, mask_u8]) 
             display = cv2.addWeighted(display, 1.0, mask_color, 0.5, 0)
             
-            # 외곽선 그리기 (선명하게 보기 위함)
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(display, contours, -1, (0, 255, 255), 2) # 노란색 외곽선
+            cv2.drawContours(display, contours, -1, (0, 255, 255), 2) 
 
-        # 2. Skeleton Draw (관절 확인)
-        # BodyTracker 내장 함수 활용
+        # 2. Skeleton Draw (관절 확인) - [Modified] 커스텀 함수 사용 (Threshold 0.1)
         if keypoints is not None:
-            display = tracker.draw_debug(display, keypoints)
+            # 기존: display = tracker.draw_debug(display, keypoints)
+            display = draw_skeleton_debug(display, keypoints, conf_thresh=0.1)
 
         # ---------------------------------------------------------
         # [Step 3] Info Display

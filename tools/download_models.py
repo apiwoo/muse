@@ -1,6 +1,6 @@
 # Project MUSE - download_models.py
 # (C) 2025 MUSE Corp. All rights reserved.
-# Target: SAM 2 (Hiera-Large) & ViTPose & SegFormer Weights
+# Target: SAM 2 (Hiera-Large & Tiny) & ViTPose & SegFormer Weights
 
 import os
 import requests
@@ -19,6 +19,14 @@ VITPOSE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_huge_coco_256x192.p
 # 2. SAM 2 Hiera-Large (Teacher for Segmentation - Video)
 SAM2_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
 SAM2_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2_hiera_large.pt")
+
+# [Added] SAM 2.1 Hiera-Tiny (Lightweight Test)
+SAM2_TINY_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt"
+SAM2_TINY_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2.1_hiera_tiny.pt")
+
+# [Added] SAM 2.1 Hiera-Large (Most Accurate Teacher)
+SAM2_1_LARGE_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+SAM2_1_LARGE_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2.1_hiera_large.pt")
 
 # 3. SegFormer (MiT-B1)
 SEGFORMER_DIR = os.path.join(MODEL_ROOT, "pretrained")
@@ -95,7 +103,7 @@ def setup_ffmpeg():
 
 def main():
     print("============================================================")
-    print("   MUSE Model Downloader (v1.1 SAM2 Ready)")
+    print("   MUSE Model Downloader (v1.3 SAM 2.1 Large Added)")
     print("============================================================")
     
     os.makedirs(os.path.dirname(SAM2_PATH), exist_ok=True)
@@ -104,6 +112,9 @@ def main():
 
     download_file(VITPOSE_URL, VITPOSE_PATH)
     download_file(SAM2_URL, SAM2_PATH)
+    download_file(SAM2_TINY_URL, SAM2_TINY_PATH)
+    # [Added] Download SAM 2.1 Large
+    download_file(SAM2_1_LARGE_URL, SAM2_1_LARGE_PATH)
     
     os.makedirs(INSIGHTFACE_DIR, exist_ok=True)
     if not os.path.exists(os.path.join(INSIGHTFACE_DIR, "1k3d68.onnx")):
