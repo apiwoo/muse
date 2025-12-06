@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# V15.1: Refactored Architecture (Orchestrator)
+# V15.2: Float32 Mask Compatibility Update
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -8,7 +8,7 @@ import os
 import glob
 from ai.tracking.facemesh import FaceMesh
 
-# [Refactoring] Import Kernels & Logic
+# Import Kernels & Logic
 from graphics.kernels.cuda_kernels import WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE
 from graphics.processors.morph_logic import MorphLogic
 
@@ -22,7 +22,7 @@ except ImportError:
 
 class BeautyEngine:
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V15.1 Smart Composite Ready (Refactored)")
+        print("[BEAUTY] [BeautyEngine] V15.2 Alpha Blending Ready")
         self.map_scale = 0.25 
         self.cache_w = 0
         self.cache_h = 0
@@ -38,7 +38,6 @@ class BeautyEngine:
         self.bg_gpu = None
         self.has_bg = False
         
-        # [Refactoring] Logic Delegate
         self.morph_logic = MorphLogic()
         self.current_alpha = 0.85
         
@@ -110,8 +109,6 @@ class BeautyEngine:
                 self.gpu_initialized = False
                 self._init_bg_buffers(w, h, frame_gpu)
                 
-                # [Fix] 해상도 초기화 직후, 현재 프로파일에 로드된 배경이 있다면 즉시 연결합니다.
-                # 기존에는 초기화만 하고 self.bg_gpu 연결을 안 해서 아래에서 덮어씌워졌습니다.
                 if self.active_profile in self.bg_buffers:
                     gpu_bg = self.bg_buffers[self.active_profile]['gpu']
                     if gpu_bg is not None:
@@ -126,25 +123,30 @@ class BeautyEngine:
                 self.prev_gpu_dy = cp.zeros((sh, sw), dtype=cp.float32)
                 self.gpu_initialized = True
 
-            # [Fix] 저장된 배경이 전혀 없을 때만 첫 프레임을 배경으로 씁니다.
             if self.bg_gpu is None:
                 self.bg_gpu = cp.copy(frame_gpu)
                 self.has_bg = True
 
-            # Mask Handling
+            # [CRITICAL FIX] Type Safety for Mask (Float32 -> Uint8)
+            # MODNet returns 0.0~1.0 float32, but Kernel expects 0~255 uint8
             if self.has_bg and mask is not None:
-                if hasattr(mask, 'device'): mask_gpu = mask
-                else: mask_gpu = cp.asarray(mask)
+                if hasattr(mask, 'device'): 
+                    mask_gpu = mask
+                else: 
+                    mask_gpu = cp.asarray(mask)
+                
+                # Auto-conversion if float
+                if mask_gpu.dtype == cp.float32 or mask_gpu.dtype == cp.float16:
+                    mask_gpu = (mask_gpu * 255.0).astype(cp.uint8)
+                
                 use_bg = 1
             else:
                 mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
                 use_bg = 0
 
-            # [Refactoring] Delegate Parameter Collection to MorphLogic
             self.morph_logic.clear()
             has_deformation = False
             
-            # 1. Body Reshaping Logic
             body_cpu = body_landmarks.get() if hasattr(body_landmarks, 'get') else body_landmarks
             if body_cpu is not None:
                 scaled_body = body_cpu[:, :2] * self.map_scale
@@ -165,7 +167,6 @@ class BeautyEngine:
                     self.morph_logic.collect_hip_params(scaled_body, params['hip_widen'])
                     has_deformation = True
             
-            # 2. Face Reshaping Logic
             if faces:
                 face_v = params.get('face_v', 0)
                 eye_scale = params.get('eye_scale', 0)
@@ -188,8 +189,6 @@ class BeautyEngine:
 
             warp_params = self.morph_logic.get_params()
             
-            # [Fix] Numpy Array Truth Value Check
-            # warp_params는 numpy array이므로 if warp_params: 대신 len()을 써야 함
             if len(warp_params) > 0:
                 params_arr = np.array(warp_params, dtype=np.float32)
                 params_gpu = cp.asarray(params_arr)
@@ -198,14 +197,12 @@ class BeautyEngine:
                 grid_dim = ((sw + block_dim[0] - 1) // block_dim[0], (sh + block_dim[1] - 1) // block_dim[1])
                 self.warp_kernel(grid_dim, block_dim, (self.gpu_dx, self.gpu_dy, params_gpu, len(warp_params), sw, sh))
                 
-            # Smoothing Logic
             if has_deformation or (self.prev_gpu_dx is not None):
                 self._apply_temporal_smoothing_fast(self.current_alpha)
                 
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=5, output=self.gpu_dy)
 
-                # Composite
                 result_gpu = cp.empty_like(frame_gpu)
                 block_dim = (32, 32)
                 grid_dim = ((w + block_dim[0] - 1) // block_dim[0], (h + block_dim[1] - 1) // block_dim[1])
@@ -220,12 +217,10 @@ class BeautyEngine:
                 if is_gpu_input: return result_gpu
                 else: return result_gpu.get()
             
-            # No changes
             return frame_gpu if is_gpu_input else frame
 
     def _init_bg_buffers(self, w, h, tmpl):
         for p, data in self.bg_buffers.items():
-            # [Fix] 화면 크기가 바뀌었거나 GPU 버퍼가 비어있으면 초기화/재할당
             if data['gpu'] is None or (data['gpu'].shape[1] != w or data['gpu'].shape[0] != h):
                 if data['cpu'] is not None:
                     rz = cv2.resize(data['cpu'], (w, h))

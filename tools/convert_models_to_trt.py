@@ -1,5 +1,5 @@
 # Project MUSE - convert_models_to_trt.py
-# High-Fidelity TensorRT Converter (Dynamic Shape for 1080p)
+# High-Fidelity TensorRT Converter (Fixed for Stride 32 Compatibility)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -17,16 +17,17 @@ class TRTBuilder:
         
     def build_engine(self, onnx_path, engine_path, input_name='input', 
                      min_shape=(1, 3, 512, 512), 
-                     opt_shape=(1, 3, 1080, 1920), 
-                     max_shape=(1, 3, 1080, 1920),
+                     opt_shape=(1, 3, 1088, 1920), 
+                     max_shape=(1, 3, 1088, 1920),
                      fp16=True):
         """
-        Builds a TensorRT engine with Dynamic Shapes to support native 1080p processing.
+        Builds a TensorRT engine with Dynamic Shapes.
+        [CRITICAL FIX] Height set to 1088 (multiple of 32) to prevent Concat errors in MODNet.
         """
         print(f"\n================================================================")
         print(f"   Building Engine: {os.path.basename(engine_path)}")
         print(f"   Input ONNX: {onnx_path}")
-        print(f"   Resolution Target: {opt_shape[3]}x{opt_shape[2]} (Opt)")
+        print(f"   Target Shape: {opt_shape} (Height aligned to 32)")
         print(f"================================================================")
 
         if not os.path.exists(onnx_path):
@@ -34,7 +35,6 @@ class TRTBuilder:
             return False
 
         builder = trt.Builder(self.logger)
-        # Explicit Batch Flag is required for Dynamic Shapes
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
         config = builder.create_builder_config()
         parser = trt.OnnxParser(network, self.logger)
@@ -49,29 +49,28 @@ class TRTBuilder:
         
         print("   ✅ ONNX Parsed Successfully.")
 
-        # 2. Optimization Profile (Dynamic Shape)
-        # This is CRITICAL for 1080p Accuracy.
-        # We tell TRT: "Optimize for 1080p, but allow down to 512p if needed."
+        # 2. Optimization Profile
+        # Height 1080 -> 1088 Padding is required at runtime logic, but engine must be 1088.
         profile = builder.create_optimization_profile()
         profile.set_shape(input_name, min_shape, opt_shape, max_shape)
         config.add_optimization_profile(profile)
-        print(f"   🔧 Optimization Profile Set: Min={min_shape}, Opt={opt_shape}, Max={max_shape}")
+        print(f"   🔧 Optimization Profile Set: Opt={opt_shape}")
 
-        # 3. FP16 Mode (Speed up without losing visible accuracy)
+        # 3. FP16 Mode
         if fp16 and builder.platform_has_fast_fp16:
             config.set_flag(trt.BuilderFlag.FP16)
             print("   ✨ FP16 Acceleration Enabled.")
         else:
             print("   ⚠️ FP16 Not supported or disabled. Using FP32.")
 
-        # 4. Memory Pool (Allow huge workspace for high-res layers)
+        # 4. Memory Pool
         try:
-            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30) # 2GB
+            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30) # 4GB for High-Res
         except:
-            config.max_workspace_size = 2 << 30
+            pass
 
         # 5. Build Engine
-        print("   ⏳ Building Engine... (This may take a few minutes for 1080p optimization)")
+        print("   ⏳ Building Engine... (This make take a while)")
         serialized_engine = builder.build_serialized_network(network, config)
 
         if serialized_engine is None:
@@ -87,7 +86,7 @@ class TRTBuilder:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", choices=['all', 'modnet', 'deeplab'], default='all')
+    parser.add_argument("--target", choices=['all', 'modnet'], default='all')
     args = parser.parse_args()
 
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,40 +95,29 @@ def main():
     # Define Models
     models = []
     
-    # 1. MODNet (Matting)
+    # MODNet (Matting) - Fixed Resolution 1088p
     if args.target in ['all', 'modnet']:
         models.append({
             'name': 'MODNet',
             'onnx': os.path.join(model_dir, "segmentation", "modnet.onnx"),
-            'engine': os.path.join(model_dir, "segmentation", "modnet_1080p.engine"),
-            'input_name': 'input', # Usually 'input' or 'input_1'
-            # MODNet ONNX often has fixed input size in export. 
-            # If the downloaded ONNX is static 512, this dynamic shape might fail unless the ONNX is dynamic.
-            # *Assuming we use a dynamic-ready ONNX or we will fix it.*
-            # For this script, we assume the user provided/downloaded a valid ONNX.
-            'opt_shape': (1, 3, 1080, 1920) 
+            'engine': os.path.join(model_dir, "segmentation", "modnet_1088p.engine"),
+            'input_name': 'input',
+            # 1088 is the nearest multiple of 32 for 1080p (1080 + 8 padding)
+            'opt_shape': (1, 3, 1088, 1920) 
         })
 
-    # 2. DeepLabV3+ (Semantic) -> We need to export this from Torch first usually, 
-    # but let's assume we have an ONNX or will add an export step later.
-    # For now, placeholder or if user has it.
-    
     builder = TRTBuilder()
 
     for m in models:
-        # Special check for MODNet input name (it varies)
-        # We can inspect ONNX using onnx library if installed, but let's try 'input' default
-        
         success = builder.build_engine(
             m['onnx'], m['engine'], 
             input_name=m['input_name'],
             opt_shape=m['opt_shape'],
-            max_shape=m['opt_shape'] # Max matches Opt for 1080p focus
+            max_shape=m['opt_shape']
         )
         
         if not success:
-            print(f"\n⚠️ {m['name']} conversion failed. Please check if ONNX file exists and is valid.")
-            print("   (Note: Some static-shape ONNX files cannot be converted to dynamic TRT engines directly.)")
+            print(f"\n⚠️ {m['name']} conversion failed.")
 
 if __name__ == "__main__":
     main()

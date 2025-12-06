@@ -1,8 +1,8 @@
 # Project MUSE - cuda_kernels.py
-# CUDA Kernel Strings for Beauty Engine
+# High-Fidelity Kernels (Alpha Blending & TPS Warping)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-# [Kernel 1] Grid Generation (TPS Logic)
+# [Kernel 1] Grid Generation (TPS Logic) - 기존 유지
 WARP_KERNEL_CODE = r'''
 extern "C" __global__
 void warp_kernel(
@@ -37,13 +37,13 @@ void warp_kernel(
             float dist = sqrtf(dist_sq);
             float factor = (1.0f - dist / r);
             factor = factor * factor * s;
-            if (mode == 0) { // Expand/Shrink (Radial)
+            if (mode == 0) { // Expand/Shrink
                 acc_dx -= diff_x * factor;
                 acc_dy -= diff_y * factor;
-            } else if (mode == 1) { // Shift (Vector)
+            } else if (mode == 1) { // Vector Shift
                 acc_dx -= vx * factor * r * 0.5f;
                 acc_dy -= vy * factor * r * 0.5f;
-            } else if (mode == 2) { // Shrink (Inverse Radial)
+            } else if (mode == 2) { // Inverse
                 acc_dx += diff_x * factor;
                 acc_dy += diff_y * factor;
             }
@@ -54,12 +54,13 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (The Clean Plate Logic)
+# [Kernel 2] Alpha Compositing (Soft Edge Support)
+# MODNet의 Soft Alpha를 지원하기 위해 로직을 완전히 변경했습니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
     const unsigned char* src,  
-    const unsigned char* mask, 
+    const unsigned char* mask, // Alpha Matte (0~255)
     const unsigned char* bg,   
     unsigned char* dst,        
     const float* dx_small,     
@@ -74,7 +75,7 @@ void composite_kernel(
 
     if (x >= width || y >= height) return;
 
-    // 1. Get Displacement (Bilinear Interpolation from small grid)
+    // 1. Warping Field Interpolation
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -84,51 +85,51 @@ void composite_kernel(
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
 
-    // Source Coordinates (u, v)
-    float u = (float)x + shift_x;
-    float v = (float)y + shift_y;
-
-    int u_i = (int)u;
-    int v_i = (int)v;
-
-    // Boundary Check
-    if (u_i < 0 || u_i >= width || v_i < 0 || v_i >= height) {
-        if (use_bg) {
-            int idx = (y * width + x) * 3;
-            dst[idx+0] = bg[idx+0];
-            dst[idx+1] = bg[idx+1];
-            dst[idx+2] = bg[idx+2];
-        } else {
-            int idx = (y * width + x) * 3;
-            dst[idx] = 0; dst[idx+1] = 0; dst[idx+2] = 0;
-        }
-        return;
-    }
-
-    // 2. Check Mask at Source (u, v)
-    int mask_idx = v_i * width + u_i;
-    unsigned char m_val = mask[mask_idx];
+    // Source Coordinates with Deformation
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
 
     int dst_idx = (y * width + x) * 3;
-    int src_idx = (v_i * width + u_i) * 3;
-    int bg_idx = (y * width + x) * 3; // BG uses original coords
+    int bg_idx = dst_idx; // Background matches destination coords
 
-    if (m_val > 10) { 
-        // Person -> Warp
-        dst[dst_idx+0] = src[src_idx+0];
-        dst[dst_idx+1] = src[src_idx+1];
-        dst[dst_idx+2] = src[src_idx+2];
-    } else {
-        // Background -> Static Clean Plate
+    // Boundary Check (If warped pixel is outside, show BG)
+    if (u < 0 || u >= width || v < 0 || v >= height) {
         if (use_bg) {
             dst[dst_idx+0] = bg[bg_idx+0];
             dst[dst_idx+1] = bg[bg_idx+1];
             dst[dst_idx+2] = bg[bg_idx+2];
         } else {
-            dst[dst_idx+0] = src[src_idx+0]; // Fallback
-            dst[dst_idx+1] = src[src_idx+1];
-            dst[dst_idx+2] = src[src_idx+2];
+            dst[dst_idx+0] = 0; dst[dst_idx+1] = 0; dst[dst_idx+2] = 0;
         }
+        return;
     }
+
+    int src_idx = (v * width + u) * 3;
+    int mask_idx = v * width + u;
+
+    // 2. Alpha Blending Logic
+    float alpha = 0.0f;
+    
+    // Mask Value (0~255) -> Alpha (0.0~1.0)
+    if (use_bg) {
+        alpha = (float)mask[mask_idx] / 255.0f;
+    } else {
+        // No background mode: just copy source
+        alpha = 1.0f; 
+    }
+
+    // [Optimization] Branchless Mixing
+    // Out = Src * Alpha + BG * (1 - Alpha)
+    float src_b = (float)src[src_idx+0];
+    float src_g = (float)src[src_idx+1];
+    float src_r = (float)src[src_idx+2];
+
+    float bg_b = (float)bg[bg_idx+0];
+    float bg_g = (float)bg[bg_idx+1];
+    float bg_r = (float)bg[bg_idx+2];
+
+    dst[dst_idx+0] = (unsigned char)(src_b * alpha + bg_b * (1.0f - alpha));
+    dst[dst_idx+1] = (unsigned char)(src_g * alpha + bg_g * (1.0f - alpha));
+    dst[dst_idx+2] = (unsigned char)(src_r * alpha + bg_r * (1.0f - alpha));
 }
 '''
