@@ -177,7 +177,10 @@ class BeautyEngine:
             self.gpu_dy.fill(0)
 
             warp_params = self.morph_logic.get_params()
-            if warp_params:
+            
+            # [Fix] Numpy Array Truth Value Check
+            # warp_params는 numpy array이므로 if warp_params: 대신 len()을 써야 함
+            if len(warp_params) > 0:
                 params_arr = np.array(warp_params, dtype=np.float32)
                 params_gpu = cp.asarray(params_arr)
                 
