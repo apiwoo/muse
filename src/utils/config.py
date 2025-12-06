@@ -1,10 +1,11 @@
 # Project MUSE - config.py
 # (C) 2025 MUSE Corp. All rights reserved.
-# Role: Multi-Profile Config Manager
+# Role: Multi-Profile Config Manager (Full CRUD + Hotkey Persistence)
 
 import os
 import json
 import glob
+import shutil
 
 class ProfileManager:
     def __init__(self):
@@ -20,46 +21,81 @@ class ProfileManager:
             os.makedirs(self.data_dir, exist_ok=True)
             
         subdirs = [d for d in os.listdir(self.data_dir) if os.path.isdir(os.path.join(self.data_dir, d))]
-        
         subdirs.sort()
         
+        # [Fix] 만약 프로필이 하나도 없다면 'default' 자동 생성
         if not subdirs:
+            self.create_profile("default", camera_id=0)
             subdirs = ["default"]
-            os.makedirs(os.path.join(self.data_dir, "default"), exist_ok=True)
         
-        print(f"[DIR] [ProfileManager] Scanned Profiles: {subdirs}")
-
         for idx, profile_name in enumerate(subdirs):
-            config_path = os.path.join(self.data_dir, profile_name, "config.json")
-            
-            default_config = {
-                "camera_id": idx, 
-                "params": {
-                    'eye_scale': 0.0,
-                    'face_v': 0.0,
-                    'head_scale': 0.0,
-                    'shoulder_narrow': 0.0,
-                    'ribcage_slim': 0.0,
-                    'waist_slim': 0.0,
-                    'hip_widen': 0.0,
-                    'show_body_debug': False
-                }
+            self._load_single_profile(profile_name, idx)
+
+    def _load_single_profile(self, profile_name, idx):
+        config_path = os.path.join(self.data_dir, profile_name, "config.json")
+        
+        default_config = {
+            "camera_id": 0,
+            "hotkey": "", # [Modified] 기본값은 공란 (사용자 지정)
+            "params": {
+                'eye_scale': 0.0,
+                'face_v': 0.0,
+                'head_scale': 0.0,
+                'shoulder_narrow': 0.0,
+                'ribcage_slim': 0.0,
+                'waist_slim': 0.0,
+                'hip_widen': 0.0,
+                'show_body_debug': False
             }
-            
-            if os.path.exists(config_path):
-                try:
-                    with open(config_path, 'r') as f:
-                        loaded = json.load(f)
-                        for k, v in loaded.items():
-                            if k == "params":
-                                default_config["params"].update(v)
-                            else:
-                                default_config[k] = v
-                except Exception as e:
-                    print(f"[WARNING] [{profile_name}] Config load failed, using default: {e}")
-            
-            self.profiles[profile_name] = default_config
+        }
+        
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    loaded = json.load(f)
+                    for k, v in loaded.items():
+                        if k == "params":
+                            default_config["params"].update(v)
+                        else:
+                            default_config[k] = v
+            except Exception as e:
+                print(f"[WARNING] [{profile_name}] Config load failed: {e}")
+        
+        self.profiles[profile_name] = default_config
+        
+        if not os.path.exists(config_path):
             self.save_profile(profile_name, default_config)
+
+    def create_profile(self, profile_name, camera_id=0, hotkey=""):
+        """Create a new profile directory and config."""
+        target_dir = os.path.join(self.data_dir, profile_name)
+        if os.path.exists(target_dir):
+            print(f"[WARNING] Profile {profile_name} already exists.")
+            return False
+            
+        os.makedirs(target_dir, exist_ok=True)
+        
+        self._load_single_profile(profile_name, 0)
+        
+        self.profiles[profile_name]['camera_id'] = camera_id
+        self.profiles[profile_name]['hotkey'] = hotkey
+        self.save_profile(profile_name, self.profiles[profile_name])
+        print(f"[CFG] Created Profile: {profile_name} (Cam: {camera_id}, Key: {hotkey})")
+        return True
+
+    def delete_profile(self, profile_name):
+        if profile_name not in self.profiles:
+            return False
+            
+        target_dir = os.path.join(self.data_dir, profile_name)
+        try:
+            shutil.rmtree(target_dir)
+            del self.profiles[profile_name]
+            print(f"[CFG] Deleted Profile: {profile_name}")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to delete profile: {e}")
+            return False
 
     def get_profile_list(self):
         return sorted(list(self.profiles.keys()))
@@ -67,14 +103,29 @@ class ProfileManager:
     def get_config(self, profile_name):
         return self.profiles.get(profile_name, {})
 
+    def get_profile_path(self, profile_name):
+        return os.path.join(self.data_dir, profile_name)
+
     def update_params(self, profile_name, new_params):
         if profile_name in self.profiles:
             self.profiles[profile_name]['params'] = new_params
             self.save_profile(profile_name, self.profiles[profile_name])
 
+    def update_camera_id(self, profile_name, cam_id):
+        if profile_name in self.profiles:
+            self.profiles[profile_name]['camera_id'] = cam_id
+            self.save_profile(profile_name, self.profiles[profile_name])
+
+    def update_hotkey(self, profile_name, hotkey_str):
+        """[New] Update hotkey for a profile."""
+        if profile_name in self.profiles:
+            self.profiles[profile_name]['hotkey'] = hotkey_str
+            self.save_profile(profile_name, self.profiles[profile_name])
+
     def save_profile(self, profile_name, config_data):
         path = os.path.join(self.data_dir, profile_name, "config.json")
         try:
+            # [Modified] 이제 hotkey 정보를 삭제하지 않고 그대로 저장합니다.
             with open(path, 'w') as f:
                 json.dump(config_data, f, indent=4)
         except Exception as e:
