@@ -1,111 +1,61 @@
-Project MUSE - File Structure (v15.1 Refactored Full)
+Project MUSE - File Structure (V5 High-Fidelity Engine)
 
 MUSE_Project/
-├── recorded_data/              # [Data Lake]
-│   └── personal_data/          # [Root Session] (고정 경로)
-│       ├── front/              # [Profile 1] (예시)
-│       │   ├── background.jpg
-│       │   ├── train_video_01.mp4
-│       │   ├── images/
-│       │   ├── masks/
-│       │   └── labels/
-│       └── ... (사용자 정의 프로파일)
-│
 ├── assets/                     # [Resource Layer]
-│   ├── models/
-│   │   ├── tracking/           # ViTPose (Teacher)
-│   │   ├── segment_anything/   # SAM (Teacher)
-│   │   └── personal/           # [Student] 개인화 모델 (.pth, .engine)
-│   │
+│   ├── models/                 # (TRT Engine Files)
+│   │   ├── tracking/           # ViTPose (Guide)
+│   │   └── segmentation/       # MODNet (1080p), DeepLabV3+
 │   └── shaders/                # [Visual Core]
-│       ├── beauty/             # 뷰티 & 왜곡 보정
+│       ├── beauty/             # Warping & Healing
 │       │   ├── background_fill.glsl
-│       │   ├── relighting.glsl
-│       │   ├── skin_smooth.glsl
-│       │   └── warping.glsl
-│       └── post/               # 후보정 (Upscale, Grading)
-│           ├── color_grade.glsl
-│           └── upscale.glsl
+│       │   ├── warping.glsl
+│       │   └── ...
+│       └── post/               # Color Grading
+│           └── color_grade.glsl
 │
 ├── src/                        # [Source Code]
-│   ├── main.py                 # [Refactored] 앱 엔트리 (UI 구동 전용)
+│   ├── main.py                 # 앱 엔트리 (UI 구동)
 │   │
 │   ├── core/                   # [System Layer]
-│   │   ├── engine_loop.py      # [New] 엔진 로직 스레드 (BeautyWorker 분리)
-│   │   ├── input_manager.py    # 카메라/비디오 입력 관리
-│   │   ├── virtual_cam.py      # OBS 가상 카메라 출력
+│   │   ├── engine_loop.py      # 메인 루프 (Consensus Engine 호출)
+│   │   ├── input_manager.py    # 1080p Camera Input
+│   │   ├── virtual_cam.py      # OBS 송출
 │   │   └── profiler.py         # 성능 모니터링
 │   │
-│   ├── ai/                     # [Intelligence Layer]
-│   │   ├── personalizer.py
-│   │   ├── tracking/           # 트래킹 엔진
-│   │   │   ├── body_tracker.py # 신체 트래킹 (Student 로더)
-│   │   │   ├── facemesh.py     # 얼굴 트래킹 (MediaPipe)
-│   │   │   └── vitpose_trt.py  # 교사 모델 (ViTPose TRT)
-│   │   └── distillation/       # 지식 증류 (학습)
-│   │       ├── trainer.py      # 모델 학습기
-│   │       ├── student/        # 학생 모델 아키텍처
-│   │       │   ├── inference.py
-│   │       │   ├── inference_trt.py
-│   │       │   └── model_arch.py
-│   │       └── teacher/        # 교사 모델 래퍼
-│   │           ├── auto_labeler.py
-│   │           └── sam_wrapper.py
+│   ├── ai/                     # [Intelligence Layer: Tri-Core]
+│   │   ├── consensus_engine.py # [New] Tri-Core Logic (ViTPose+MODNet+DeepLab)
+│   │   └── tracking/           # ViTPose Wrapper
+│   │       ├── vitpose_trt.py
+│   │       └── facemesh.py
 │   │
 │   ├── graphics/               # [Visuals Layer]
-│   │   ├── beauty_engine.py    # [Refactored] 엔진 오케스트레이터 (경량화)
-│   │   ├── renderer.py         # 렌더링 파이프라인
-│   │   ├── shader_loader.py    # GLSL 로더
-│   │   ├── kernels/            # [New] CUDA 커널 코드
+│   │   ├── beauty_engine.py    # [Modified] High-Res Warping Logic
+│   │   ├── adaptive_bg.py      # [New] Adaptive Background Buffer
+│   │   ├── renderer.py         # OpenGL Renderer
+│   │   ├── shader_loader.py    # GLSL Loader
+│   │   ├── kernels/            # CUDA Kernels (Morphing/Composite)
 │   │   │   └── cuda_kernels.py
-│   │   └── processors/         # [New] 변형 수학 로직
+│   │   └── processors/         # Deformation Math
 │   │       └── morph_logic.py
 │   │
 │   ├── ui/                     # [Control Layer]
-│   │   ├── main_window.py      # 메인 윈도우 (뷰포트 컨테이너)
-│   │   ├── beauty_panel.py     # 파라미터 조절 패널
-│   │   ├── viewport.py         # 화면 표시 위젯
+│   │   ├── main_window.py
+│   │   ├── beauty_panel.py
+│   │   ├── viewport.py
 │   │   └── controls/
-│   │       └── sliders.py      # 커스텀 슬라이더
+│   │       └── sliders.py
 │   │
 │   └── utils/                  # [Utility Layer]
-│       ├── config.py           # 프로파일 설정 관리
-│       ├── cuda_helper.py      # Windows DLL 경로 수정
-│       └── logger.py           # 로깅 유틸
+│       ├── config.py           # 설정 관리
+│       ├── cuda_helper.py      # DLL Path Fix
+│       └── logger.py
 │
-├── tools/                      # [Utilities & Launcher]
-│   ├── muse_studio.py          # [Refactored] GUI 런처 (메인 실행 파일)
-│   │
-│   ├── studio/                 # [New] 스튜디오 UI 패키지
-│   │   ├── __init__.py
-│   │   ├── pages.py            # 마법사 페이지들 (Select, Connect, Record, Train)
-│   │   ├── workers.py          # 스튜디오용 백그라운드 작업 (Camera, Pipeline)
-│   │   ├── widgets.py          # 공통 위젯 및 다이얼로그
-│   │   └── styles.py           # UI 스타일시트
-│   │
-│   ├── auto_labeling/          # 데이터 가공 도구
-│   │   ├── run_labeling.py     # 자동 라벨링 실행
-│   │   └── verify_data.py      # 데이터 검수
-│   │
-│   ├── check_gpu.py            # GPU 가속 확인
-│   ├── clean_launch.py         # 캐시 삭제 후 실행
-│   ├── collect_libs.py         # 배포용 DLL 수집
-│   ├── compare_pose_hmr.py     # 포즈 추정 비교
-│   ├── convert_student_to_trt.py # 학생 모델 최적화 (TRT 변환)
-│   ├── download_models.py      # 필수 모델 다운로더
-│   ├── fix_env.py              # 환경 설정 복구
-│   ├── force_patch_ort.py      # ONNX 런타임 패치
-│   ├── patch_dll.py            # DLL 수동 패치
-│   ├── recorder.py             # (Legacy) CLI 레코더
-│   ├── run_muse.py             # (Legacy) CLI 런처
-│   ├── test_mediapipe_face.py  # 얼굴 인식 테스트
-│   ├── test_mediapipe_pose.py  # 포즈 인식 테스트
-│   ├── test_sam.py             # SAM 테스트
-│   ├── train_student.py        # 학습 실행 스크립트
-│   ├── trt_converter.py        # 교사 모델 변환기
-│   └── validator.py            # 시스템 검증기
+├── tools/                      # [Utilities]
+│   ├── convert_models_to_trt.py # [Core] 고정밀 엔진 변환기 (1080p Profile)
+│   ├── run_muse.py             # (Legacy CLI)
+│   ├── clean_launch.py         # 캐시 삭제 실행
+│   └── check_gpu.py            # GPU 가속 확인
 │
-├── libs/                       # [Portable] NVIDIA Core DLLs
-├── setup.py                    # 환경 설정 스크립트
-├── requirements.txt            # 의존성 목록
+├── libs/                       # NVIDIA Core DLLs
+├── requirements.txt
 └── .gitignore
