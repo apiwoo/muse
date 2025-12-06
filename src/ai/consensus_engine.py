@@ -1,6 +1,5 @@
 # Project MUSE - consensus_engine.py
-# The "Tri-Core" Logic: ViTPose + MODNet + DeepLab
-# Fixed: Added 'set_input_shape' for Dynamic TRT Engine
+# V7 Hybrid: MODNet (Matting) + ViTPose (Body Morphing Support)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
@@ -18,7 +17,7 @@ except ImportError:
     HAS_CUPYX = False
     print("[WARNING] cupyx not found. GPU resizing might differ.")
 
-# Import ViTPose (Teacher B)
+# Import ViTPose (Teacher B) - 체형 보정을 위해 필수
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from ai.tracking.vitpose_trt import VitPoseTrt
@@ -42,7 +41,6 @@ class TensorRTModel:
                 self.context = self.engine.create_execution_context()
                 
                 # [Fix] 입력 텐서 이름 찾기 (TensorRT 8.5+ 호환)
-                # 바인딩 인덱스 0번이 입력이라고 가정하고 이름 가져오기
                 try:
                     self.input_name = self.engine.get_tensor_name(0)
                 except AttributeError:
@@ -87,17 +85,25 @@ class TensorRTModel:
 
 class ConsensusEngine:
     def __init__(self, root_dir):
+        """
+        [Hybrid Mode] MODNet + ViTPose
+        - 배경 분리: MODNet 단독 (속도 최적화)
+        - 체형 보정: ViTPose 활성화 (필수)
+        """
         self.root_dir = root_dir
         model_dir = os.path.join(root_dir, "assets", "models")
         
-        # 1. ViTPose (Guide)
+        print("[AI] Initializing Hybrid Engine (MODNet + ViTPose)...")
+
+        # 1. ViTPose (Body Morphing Guide)
+        # 체형 보정을 위해 반드시 필요합니다.
         try:
             pose_path = os.path.join(model_dir, "tracking", "vitpose_huge.engine")
             if os.path.exists(pose_path) and VitPoseTrt:
                 self.pose_model = VitPoseTrt(pose_path)
             else:
                 self.pose_model = None
-                print("[WARNING] ViTPose engine not found or module missing.")
+                print("[WARNING] ViTPose engine not found or module missing. Body morphing will be disabled.")
         except Exception as e:
             self.pose_model = None
             print(f"[WARNING] ViTPose Init Failed: {e}")
@@ -108,42 +114,39 @@ class ConsensusEngine:
         self.target_h = 544
         
         self.modnet = TensorRTModel(
-            os.path.join(model_dir, "segmentation", "modnet_544p.engine"), # Changed to 544p
+            os.path.join(model_dir, "segmentation", "modnet_544p.engine"),
             input_shape=(1, 3, self.target_h, self.target_w)
         )
 
         # Preprocessing Constants
         self.mean = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
         self.std = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
-        
-        # [Optimization] No padding needed for 544p (Multiple of 32)
 
     def process(self, frame_gpu):
         """
-        Main Pipeline: Input(1080p) -> Downscale(544p) -> Tri-Core -> Upscale(1080p) -> Alpha
+        Hybrid Pipeline:
+        1. MODNet: Generate Alpha Matte (Background Removal)
+        2. ViTPose: Extract Body Keypoints (For Body Morphing)
+        
+        Returns: (matte_1080, kpts)
         """
         if frame_gpu is None: return None, None
 
         h, w = frame_gpu.shape[:2] # Expect 1080, 1920
         
-        # [Step 1] Internal Downscaling (1080p -> 544p)
-        # Using GPU Bilinear Interpolation via CuPy/Cupyx
+        # [Step 1] Internal Downscaling (1080p -> 544p) for MODNet
+        # zoom factors calculation
+        zoom_h = self.target_h / h
+        zoom_w = self.target_w / w
+
         if HAS_CUPYX:
-            # Calculate zoom factors
-            zoom_h = self.target_h / h
-            zoom_w = self.target_w / w
-            
-            # (H, W, C) -> (TargetH, TargetW, C)
-            # order=1 (Bilinear) is faster and good enough for input
             frame_small = cupyx.scipy.ndimage.zoom(frame_gpu, (zoom_h, zoom_w, 1), order=1)
         else:
-            # Fallback (Slow CPU Resize, Avoid if possible)
             frame_cpu = cp.asnumpy(frame_gpu)
             frame_small_cpu = cv2.resize(frame_cpu, (self.target_w, self.target_h))
             frame_small = cp.asarray(frame_small_cpu)
         
-        # [Step 2] Normalize & CHW
-        # (H, W, C) -> (1, C, H, W)
+        # [Step 2] Normalize & CHW for MODNet
         img_norm = frame_small.astype(cp.float32) / 255.0
         img_norm = img_norm.transpose(2, 0, 1).reshape(1, 3, self.target_h, self.target_w)
         img_norm = (img_norm - self.mean) / self.std 
@@ -151,15 +154,46 @@ class ConsensusEngine:
         # [Step 3] Inference (MODNet)
         raw_matte = self.modnet.infer(img_norm) # (1, 1, 544, 960)
         
+        # [Step 4] ViTPose Inference (Parallel-ish)
+        # ViTPose는 현재 CPU 입력을 받으므로 변환 필요
+        # (향후 GPU 입력 지원 ViTPose로 업그레이드 가능)
+        kpts = None
+        if self.pose_model:
+            try:
+                # MODNet이 GPU에서 도는 동안 CPU로 데이터 복사 준비
+                if hasattr(frame_gpu, 'get'):
+                    frame_cpu = frame_gpu.get()
+                else:
+                    frame_cpu = frame_gpu
+                
+                # ViTPose 실행 (Input: Original High-Res)
+                kpts = self.pose_model.inference(frame_cpu)
+            except Exception:
+                pass
+        
+        # MODNet 결과 처리 (실패 시 빈 마스크 반환)
         if raw_matte is None:
-            return cp.zeros((h, w), dtype=cp.float32), None
+            return cp.zeros((h, w), dtype=cp.float32), kpts
 
-        # [Step 4] Upscale back to 1080p
+        # [Optimization] Apply Hull Mask BEFORE Upscaling
+        # 저해상도(544p)에서 마스킹을 수행하여 CPU 부하를 최소화합니다.
         matte_small = raw_matte[0, 0] # (544, 960)
         
+        if kpts is not None:
+             # Keypoints를 544p 좌표계로 변환 (High-Res -> Low-Res)
+             kpts_small = kpts.copy()
+             kpts_small[:, 0] *= zoom_w # Scale X
+             kpts_small[:, 1] *= zoom_h # Scale Y
+             
+             # 저해상도에서 Hull Mask 생성 (매우 빠름)
+             hull_mask_small = self._create_hull_mask(kpts_small, self.target_w, self.target_h)
+             
+             # Apply Mask immediately
+             matte_small = matte_small * hull_mask_small
+
+        # [Step 5] Upscale Matte back to 1080p
+        # 이미 마스킹된 작은 매트를 업스케일링하므로 노이즈가 더 적음
         if HAS_CUPYX:
-            # Inverse zoom (544p -> 1080p)
-            # order=1 (Bilinear) ensures smooth alpha edges
             zoom_h_inv = h / self.target_h
             zoom_w_inv = w / self.target_w
             matte_1080 = cupyx.scipy.ndimage.zoom(matte_small, (zoom_h_inv, zoom_w_inv), order=1)
@@ -167,36 +201,19 @@ class ConsensusEngine:
             # [Safety] Fix rounding errors in shape
             mh, mw = matte_1080.shape
             if mh != h or mw != w:
-                # Simple crop or pad (Usually it matches or is slightly larger)
                 matte_1080 = matte_1080[:h, :w]
-                # If smaller (rare), we need padding, but zoom usually covers it.
         else:
-            # Fallback
             matte_small_cpu = cp.asnumpy(matte_small)
             matte_1080_cpu = cv2.resize(matte_small_cpu, (w, h))
             matte_1080 = cp.asarray(matte_1080_cpu)
 
-        # [Step 5] ViTPose Guide (Hull Logic)
-        # Note: ViTPose still runs on CPU input currently (can be optimized later)
-        frame_cpu = cp.asnumpy(frame_gpu)
-        kpts = None
-        if self.pose_model:
-            try:
-                kpts = self.pose_model.inference(frame_cpu)
-            except Exception:
-                pass
-        
-        if kpts is not None:
-            # Create Hull Mask on GPU
-            hull_mask = self._create_hull_mask(kpts, w, h)
-            # Consensus: Filter Matte with Hull (Noise reduction)
-            matte_1080 = matte_1080 * hull_mask
-            
         return matte_1080, kpts
 
     def _create_hull_mask(self, kpts, w, h):
         """
         Creates a convex hull mask from keypoints on GPU.
+        ViTPose 좌표를 기반으로 사람 영역 밖의 노이즈를 제거합니다.
+        [Optimization] 544p 해상도 기준에 맞춰 커널 크기 최적화됨.
         """
         # 신뢰도 0.2 이상인 점만 사용
         valid_pts = kpts[kpts[:, 2] > 0.2, :2].astype(np.int32)
@@ -207,7 +224,11 @@ class ConsensusEngine:
             cv2.fillConvexPoly(mask, hull, 1.0)
             
             # Dilate to include hair/accessories (넉넉하게 확장)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (100, 100))
+            # [Updated] 150 -> 80 (해상도가 544p로 줄었으므로 이에 맞춰 조정)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (80, 80))
             mask = cv2.dilate(mask, kernel, iterations=1)
+        else:
+            # 감지된 포인트가 너무 적으면 마스킹을 하지 않음 (MODNet 전체 신뢰)
+            return cp.ones((h, w), dtype=cp.float32)
             
         return cp.asarray(mask)
