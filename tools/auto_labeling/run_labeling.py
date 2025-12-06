@@ -205,8 +205,9 @@ class AutoLabeler:
         global_idx = self._get_next_index(out_imgs)
         newly_processed = []
 
-        # [Config] 5프레임마다 추출 (데이터 80% 절약)
-        FRAME_INTERVAL = 5 
+        # [Config] 2프레임마다 추출 (30fps 기준 초당 15장 - 고품질 학습용)
+        # 기존 5에서 2로 변경하여 데이터 밀도를 2.5배 높임
+        FRAME_INTERVAL = 2
         # 임시 압축 영상 경로
         temp_video_path = os.path.join(profile_dir, "temp_processing_strided.mp4")
 

@@ -83,10 +83,15 @@ class StudentInferenceTRT:
         scale_x = w_orig / w_map
         scale_y = h_orig / h_map
 
+        # [Debug] 전체 히트맵의 최대값 확인 (디버깅용, 너무 낮으면 모델 학습 문제)
+        # print(f"DEBUG: Max Confidence in Heatmaps: {np.max(heatmaps):.4f}")
+
         for i in range(17):
             hm = heatmaps[i]
             min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(hm)
-            if max_val > 0.1:
+            
+            # [Fix] 임계값을 0.1 -> 0.05로 완화 (초기 모델 인식률 향상)
+            if max_val > 0.05:
                 x = max_loc[0] * scale_x
                 y = max_loc[1] * scale_y
                 kpts.append([x, y, max_val])

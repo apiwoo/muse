@@ -47,8 +47,9 @@ class DistillationLoss(nn.Module):
 
     def forward(self, student_seg, student_pose, hard_mask, heatmaps):
         loss_seg = self.bce(student_seg, hard_mask)
-        # [Log Fix] Pose Loss 스케일링 유지
-        loss_pose = self.mse(student_pose, heatmaps) * 1000.0
+        # [Log Fix] Pose Loss 스케일링 강화 (1000 -> 3000)
+        # 관절 점이 매우 작기 때문에 MSE 값이 작게 나옵니다. 이를 증폭시켜 모델이 중요하게 여기도록 만듭니다.
+        loss_pose = self.mse(student_pose, heatmaps) * 3000.0
         
         # [Log Fix] 개별 Loss 추적을 위해 튜플 반환 (Total, Seg, Pose)
         return loss_seg + loss_pose, loss_seg, loss_pose
@@ -206,7 +207,8 @@ class MuseDataset(Dataset):
         return heatmap
 
 class Trainer:
-    def __init__(self, root_session="personal_data", epochs=30, batch_size=4):
+    # [Update] Default Epochs increased to 100
+    def __init__(self, root_session="personal_data", epochs=100, batch_size=4):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.root_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "recorded_data", root_session)
         self.model_save_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "assets", "models", "personal")
@@ -279,8 +281,8 @@ class Trainer:
                     
                     l_dice = self.dice_loss(pred_seg, masks)
                     
-                    # 최종 Total Loss
-                    loss_total = distill_loss + l_dice
+                    # [Critical Update] Dice Loss 가중치 5배 강화 -> 세그멘테이션 외곽선 정밀도 향상
+                    loss_total = distill_loss + (l_dice * 5.0)
                 
                 scaler.scale(loss_total).backward()
                 scaler.step(optimizer)

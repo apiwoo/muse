@@ -59,6 +59,7 @@ class BeautyEngine:
                 img = cv2.imread(bg_path)
                 if img is not None:
                     self.bg_buffers[p] = {'cpu': img, 'gpu': None}
+                    print(f"[BEAUTY] Loaded background for profile: {p}")
             else:
                 self.bg_buffers[p] = {'cpu': None, 'gpu': None}
 
@@ -108,6 +109,14 @@ class BeautyEngine:
                 self.cache_w, self.cache_h = w, h
                 self.gpu_initialized = False
                 self._init_bg_buffers(w, h, frame_gpu)
+                
+                # [Fix] 해상도 초기화 직후, 현재 프로파일에 로드된 배경이 있다면 즉시 연결합니다.
+                # 기존에는 초기화만 하고 self.bg_gpu 연결을 안 해서 아래에서 덮어씌워졌습니다.
+                if self.active_profile in self.bg_buffers:
+                    gpu_bg = self.bg_buffers[self.active_profile]['gpu']
+                    if gpu_bg is not None:
+                        self.bg_gpu = gpu_bg
+                        self.has_bg = True
 
             sw, sh = int(w * self.map_scale), int(h * self.map_scale)
             if not self.gpu_initialized:
@@ -117,6 +126,7 @@ class BeautyEngine:
                 self.prev_gpu_dy = cp.zeros((sh, sw), dtype=cp.float32)
                 self.gpu_initialized = True
 
+            # [Fix] 저장된 배경이 전혀 없을 때만 첫 프레임을 배경으로 씁니다.
             if self.bg_gpu is None:
                 self.bg_gpu = cp.copy(frame_gpu)
                 self.has_bg = True
@@ -215,7 +225,8 @@ class BeautyEngine:
 
     def _init_bg_buffers(self, w, h, tmpl):
         for p, data in self.bg_buffers.items():
-            if data['gpu'] is None:
+            # [Fix] 화면 크기가 바뀌었거나 GPU 버퍼가 비어있으면 초기화/재할당
+            if data['gpu'] is None or (data['gpu'].shape[1] != w or data['gpu'].shape[0] != h):
                 if data['cpu'] is not None:
                     rz = cv2.resize(data['cpu'], (w, h))
                     data['gpu'] = cp.asarray(rz)
