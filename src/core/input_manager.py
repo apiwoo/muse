@@ -92,8 +92,8 @@ class CaptureWorker(threading.Thread):
         fail_count = 0
         
         while self.running:
-            # 카메라가 선택되지 않았거나 연결된 카메라가 없을 때 더미 처리
             if self.active_id is None:
+                # 활성 카메라가 없을 때도 UI가 멈추지 않도록 더미 딜레이
                 time.sleep(0.033)
                 continue
             
@@ -111,7 +111,7 @@ class CaptureWorker(threading.Thread):
                             fail_count = 0
                     else:
                         fail_count += 1
-                        # 60프레임(약 2초)마다 한 번씩만 로그 출력
+                        # 2초(60프레임)마다 로그 출력하여 도배 방지
                         if fail_count % 60 == 0:
                             print(f"[WARNING] [CaptureWorker] Failed to read from Cam {cid} (Ret={ret})")
                             
@@ -155,35 +155,39 @@ class InputManager:
                 # [Recorder.py Style] 최대한 단순하게 오픈
                 cap = cv2.VideoCapture(source)
                 
-                # [DEBUG] 백엔드 확인 (DSHOW, MSMF 등)
+                # [DEBUG] 백엔드 확인 (DSHOW, MSMF, V4L2 등)
+                # 이 정보가 recorder.py와 run_muse.py의 동작 차이를 설명할 수 있음
                 backend = cap.getBackendName()
                 print(f"[Backend: {backend}]", end=" ")
 
                 if cap.isOpened():
-                    # [Recorder.py Style] 해상도/FPS만 설정하고 FourCC 강제 설정 제거
-                    res_w = cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-                    res_h = cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-                    res_fps = cap.set(cv2.CAP_PROP_FPS, fps)
+                    # [Recorder.py Style] 해상도/FPS 설정
+                    # 코덱 강제 설정(FOURCC)은 제거함 -> OS 기본값 사용
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                    cap.set(cv2.CAP_PROP_FPS, fps)
                     
-                    # [DEBUG] 설정 적용 결과 확인
-                    print(f"\n      [Settings] W:{width}({res_w}) H:{height}({res_h}) FPS:{fps}({res_fps})")
-
-                    # [Critical] MJPG 강제 설정 제거됨 (recorder.py와 동일 환경)
-                    # cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G')) 
+                    # [DEBUG] 실제 적용된 설정값 확인
+                    real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    real_fps = cap.get(cv2.CAP_PROP_FPS)
+                    print(f"\n      [Settings] Req: {width}x{height}@{fps} -> Act: {int(real_w)}x{int(real_h)}@{int(real_fps)}")
 
                     # [Check] 즉시 프레임 읽기 시도 (Warm-up 루프 제거)
+                    # recorder.py와 동일하게 바로 읽어서 성공하면 OK
                     ret, _ = cap.read()
                     if ret:
                         self.caps[cid] = cap
-                        print(f"      -> [OK] Camera Ready. (Resolution: {int(cap.get(3))}x{int(cap.get(4))})")
+                        print(f"      -> [OK] Camera Ready.")
                     else:
                         print(f"      -> [FAILED] Camera opened but returned no frame.")
+                        # 프레임 안 나오면 과감히 해제 (CaptureWorker에서 에러 뿜는 것보다 나음)
                         cap.release()
                 else:
                     print("[ERROR] (Could not open)")
             
             elif isinstance(source, str):
-                # File/Stream
+                # File/Stream (NVDEC)
                 try:
                     cap = NVDECCapture(source, width, height, fps)
                     self.caps[cid] = cap
