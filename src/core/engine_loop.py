@@ -1,6 +1,7 @@
 # Project MUSE - engine_loop.py
 # V5 Architecture: The Guided High-Res Flow (Debug Enhanced)
 # (C) 2025 MUSE Corp. All rights reserved.
+# [Debug] Added extensive logging to trace frame flow from InputManager to UI
 
 import time
 import numpy as np
@@ -105,7 +106,10 @@ class BeautyWorker(QThread):
 
         while self.running:
             # Input (GPU)
+            # [Debug] Trace InputManager read
+            t_read_start = time.perf_counter()
             frame_gpu, ret = self.input_mgr.read()
+            t_read_end = time.perf_counter()
             
             if not ret or frame_gpu is None:
                 # [DEBUG LOG] 데이터 수신 실패 모니터링
@@ -116,6 +120,12 @@ class BeautyWorker(QThread):
                 self.msleep(5) 
                 continue
             
+            # [Debug] Check received frame properties once per second
+            if frame_count % 30 == 0:
+                frame_type = type(frame_gpu)
+                frame_shape = frame_gpu.shape if hasattr(frame_gpu, 'shape') else 'Unknown'
+                # print(f"[DEBUG] Frame Received: Type={frame_type}, Shape={frame_shape}, ReadTime={(t_read_end-t_read_start)*1000:.2f}ms")
+
             # 프레임 수신 성공 시 카운터 리셋 및 복구 로그
             if no_frame_tick > 0:
                 print(f"[INFO] Engine Loop: Frame Signal Restored!")
@@ -157,11 +167,13 @@ class BeautyWorker(QThread):
             self.virtual_cam.send(frame_out_gpu)
             t_send_end = time.perf_counter()
             
+            # [Debug] Emit Signal Trace
+            # print(f"[DEBUG] Emitting frame_processed signal...")
             self.frame_processed.emit(frame_out_gpu)
 
             frame_count += 1
             if time.time() - prev_time >= 1.0:
-                print(f"[FPS] {frame_count} | AI: {(t_ai_end - t_ai_start)*1000:.1f}ms | Beauty: {(t_beauty_end - t_beauty_start)*1000:.1f}ms | Send: {(t_send_end - t_send_start)*1000:.1f}ms")
+                print(f"[FPS] {frame_count} | Read: {(t_read_end - t_read_start)*1000:.1f}ms | AI: {(t_ai_end - t_ai_start)*1000:.1f}ms | Beauty: {(t_beauty_end - t_beauty_start)*1000:.1f}ms | Send: {(t_send_end - t_send_start)*1000:.1f}ms")
                 frame_count = 0
                 prev_time = time.time()
 

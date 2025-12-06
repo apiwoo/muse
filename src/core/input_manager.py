@@ -2,10 +2,10 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 # Optimization: No-Lag Switching & NVDEC Support
 # [2025-05 Update] Enhanced Camera Init with Warm-up & Detailed Logging
-# [Critical Fix] Reverted to MSMF (Default) backend to fix 1 FPS issue
-# [Critical Fix] Removed CaptureWorker for Thread Affinity (Direct Read Mode)
-# [Fix] Added MJPG FourCC & Corrected Init Order (Bandwidth Fix)
-# [Debug] Added Ultra-Verbose Logging for hang detection
+# [Critical Fix] Reverted to 'Recorder.py' logic (Simplest is Best)
+# - No backend specifier (Let OS decide)
+# - No forced codec (Let OS decide)
+# - Just Resolution & FPS
 
 import cv2
 import numpy as np
@@ -95,7 +95,7 @@ class InputManager:
         self.fps = fps
         
         unique_sources = list(dict.fromkeys(camera_indices))
-        print(f"\n[CAM] [InputManager] === Debug Mode: Ultra Verbose Init ===")
+        print(f"\n[CAM] [InputManager] === Debug Mode: Recorder.py Style (Simplest) ===")
         print(f"[CAM] [InputManager] Target Resolution: {width}x{height} @ {fps}fps")
         print(f"[CAM] [InputManager] Target Sources: {unique_sources}")
         
@@ -105,24 +105,19 @@ class InputManager:
                 # Webcam Initialization Logic
                 print(f"   -> [Init] Attempting to open Webcam ID {source}...")
                 
-                # Debug Log: Opening
+                # [Solution] The 'Recorder.py' Way
+                # No backend specifier, No Codec forcing. Just open it.
+                
                 print(f"      [DEBUG] Calling cv2.VideoCapture({source})... ", end="", flush=True)
                 t_start = time.time()
-                cap = cv2.VideoCapture(source)
+                cap = cv2.VideoCapture(source) # Simple is best
                 print(f"Done in {time.time()-t_start:.4f}s")
                 
                 backend_name = cap.getBackendName()
                 print(f"      [Backend] {backend_name}")
 
                 if cap.isOpened():
-                    # [CRITICAL FIX] Set MJPG Codec FIRST to reserve bandwidth before setting High-Res
-                    # Debug Logs for Settings
-                    
-                    print(f"      [DEBUG] Setting MJPG Codec...", end="", flush=True)
-                    t0 = time.time()
-                    ret_cc = cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
-                    print(f" Result: {ret_cc} ({time.time()-t0:.4f}s)")
-                    
+                    # Just Resolution & FPS (Exactly like recorder.py)
                     print(f"      [DEBUG] Setting Width {width}...", end="", flush=True)
                     t0 = time.time()
                     ret_w = cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -138,9 +133,6 @@ class InputManager:
                     ret_fps = cap.set(cv2.CAP_PROP_FPS, fps)
                     print(f" Result: {ret_fps} ({time.time()-t0:.4f}s)")
                     
-                    # [Optimization] Low Latency Buffer (from pages.py)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
                     # 3. Validate Settings
                     real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
                     real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -154,7 +146,7 @@ class InputManager:
                     
                     print(f"      [Settings Check] {int(real_w)}x{int(real_h)} @ {real_fps:.1f}fps (Codec: {fcc_str})")
 
-                    # 4. Warm-up Loop (Still needed for stability)
+                    # 4. Warm-up Loop
                     print("      [Warm-up] Starting frame stabilization loop...")
                     success = False
                     max_retries = 20 # Try for ~2 seconds
