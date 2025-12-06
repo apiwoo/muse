@@ -95,15 +95,15 @@ def main():
     # Define Models
     models = []
     
-    # MODNet (Matting) - Fixed Resolution 1088p
+    # MODNet (Matting) - Optimized Resolution 960x544 (qHD+)
     if args.target in ['all', 'modnet']:
         models.append({
             'name': 'MODNet',
             'onnx': os.path.join(model_dir, "segmentation", "modnet.onnx"),
-            'engine': os.path.join(model_dir, "segmentation", "modnet_1088p.engine"),
+            'engine': os.path.join(model_dir, "segmentation", "modnet_544p.engine"), # Output filename updated
             'input_name': 'input',
-            # 1088 is the nearest multiple of 32 for 1080p (1080 + 8 padding)
-            'opt_shape': (1, 3, 1088, 1920) 
+            # 544 is the nearest multiple of 32 for 540p (960x540)
+            'opt_shape': (1, 3, 544, 960) 
         })
 
     builder = TRTBuilder()

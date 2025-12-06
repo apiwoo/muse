@@ -10,6 +10,14 @@ import cv2
 import os
 import sys
 
+# [Optimization] GPU Resizing
+try:
+    import cupyx.scipy.ndimage
+    HAS_CUPYX = True
+except ImportError:
+    HAS_CUPYX = False
+    print("[WARNING] cupyx not found. GPU resizing might differ.")
+
 # Import ViTPose (Teacher B)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
@@ -19,7 +27,7 @@ except ImportError:
 
 class TensorRTModel:
     """Generic TensorRT Wrapper for Segmentation Models"""
-    def __init__(self, engine_path, input_shape=(1, 3, 1088, 1920)):
+    def __init__(self, engine_path, input_shape=(1, 3, 544, 960)):
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.engine_path = engine_path
         self.input_shape = input_shape # NCHW
@@ -59,7 +67,7 @@ class TensorRTModel:
 
     def infer(self, img_gpu_norm):
         """
-        img_gpu_norm: (1, 3, 1088, 1920) Normalized CuPy Array
+        img_gpu_norm: (1, 3, H, W) Normalized CuPy Array
         """
         if not self.is_ready: return None
         
@@ -94,51 +102,82 @@ class ConsensusEngine:
             self.pose_model = None
             print(f"[WARNING] ViTPose Init Failed: {e}")
 
-        # 2. MODNet (Detailer) - Requires 1088p input
+        # 2. MODNet (Detailer) - Optimized for 544p (qHD+)
+        # Resolution: 960x544 (16:9 Aspect Ratio, Stride 32)
+        self.target_w = 960
+        self.target_h = 544
+        
         self.modnet = TensorRTModel(
-            os.path.join(model_dir, "segmentation", "modnet_1088p.engine"),
-            input_shape=(1, 3, 1088, 1920)
+            os.path.join(model_dir, "segmentation", "modnet_544p.engine"), # Changed to 544p
+            input_shape=(1, 3, self.target_h, self.target_w)
         )
 
         # Preprocessing Constants
         self.mean = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
         self.std = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
         
-        # Runtime Padding Vars (1080 -> 1088)
-        self.pad_h = 8 
+        # [Optimization] No padding needed for 544p (Multiple of 32)
 
     def process(self, frame_gpu):
         """
-        Main Pipeline: Input(1080p) -> Pad(1088p) -> Tri-Core -> Crop(1080p) -> Alpha
+        Main Pipeline: Input(1080p) -> Downscale(544p) -> Tri-Core -> Upscale(1080p) -> Alpha
         """
         if frame_gpu is None: return None, None
 
         h, w = frame_gpu.shape[:2] # Expect 1080, 1920
         
-        # [Step 1] Pad to 1088p (Bottom Padding)
-        # 1080p는 32의 배수가 아니므로, 8픽셀을 붙여 1088p로 만듭니다.
-        if h == 1080:
-            frame_padded = cp.pad(frame_gpu, ((0, self.pad_h), (0, 0), (0, 0)), mode='edge')
+        # [Step 1] Internal Downscaling (1080p -> 544p)
+        # Using GPU Bilinear Interpolation via CuPy/Cupyx
+        if HAS_CUPYX:
+            # Calculate zoom factors
+            zoom_h = self.target_h / h
+            zoom_w = self.target_w / w
+            
+            # (H, W, C) -> (TargetH, TargetW, C)
+            # order=1 (Bilinear) is faster and good enough for input
+            frame_small = cupyx.scipy.ndimage.zoom(frame_gpu, (zoom_h, zoom_w, 1), order=1)
         else:
-            frame_padded = frame_gpu # 이미 크기가 맞거나 다르면 그대로 진행 (오류 날 수 있음)
+            # Fallback (Slow CPU Resize, Avoid if possible)
+            frame_cpu = cp.asnumpy(frame_gpu)
+            frame_small_cpu = cv2.resize(frame_cpu, (self.target_w, self.target_h))
+            frame_small = cp.asarray(frame_small_cpu)
         
         # [Step 2] Normalize & CHW
         # (H, W, C) -> (1, C, H, W)
-        img_norm = frame_padded.astype(cp.float32) / 255.0
-        img_norm = img_norm.transpose(2, 0, 1).reshape(1, 3, 1088, 1920)
+        img_norm = frame_small.astype(cp.float32) / 255.0
+        img_norm = img_norm.transpose(2, 0, 1).reshape(1, 3, self.target_h, self.target_w)
         img_norm = (img_norm - self.mean) / self.std 
         
         # [Step 3] Inference (MODNet)
-        raw_matte = self.modnet.infer(img_norm) # (1, 1, 1088, 1920)
+        raw_matte = self.modnet.infer(img_norm) # (1, 1, 544, 960)
         
         if raw_matte is None:
             return cp.zeros((h, w), dtype=cp.float32), None
 
-        # [Step 4] Crop back to 1080p
-        # 1088p 결과에서 패딩했던 8픽셀을 다시 잘라냅니다.
-        matte_1080 = raw_matte[0, 0, :h, :w] 
+        # [Step 4] Upscale back to 1080p
+        matte_small = raw_matte[0, 0] # (544, 960)
         
+        if HAS_CUPYX:
+            # Inverse zoom (544p -> 1080p)
+            # order=1 (Bilinear) ensures smooth alpha edges
+            zoom_h_inv = h / self.target_h
+            zoom_w_inv = w / self.target_w
+            matte_1080 = cupyx.scipy.ndimage.zoom(matte_small, (zoom_h_inv, zoom_w_inv), order=1)
+            
+            # [Safety] Fix rounding errors in shape
+            mh, mw = matte_1080.shape
+            if mh != h or mw != w:
+                # Simple crop or pad (Usually it matches or is slightly larger)
+                matte_1080 = matte_1080[:h, :w]
+                # If smaller (rare), we need padding, but zoom usually covers it.
+        else:
+            # Fallback
+            matte_small_cpu = cp.asnumpy(matte_small)
+            matte_1080_cpu = cv2.resize(matte_small_cpu, (w, h))
+            matte_1080 = cp.asarray(matte_1080_cpu)
+
         # [Step 5] ViTPose Guide (Hull Logic)
+        # Note: ViTPose still runs on CPU input currently (can be optimized later)
         frame_cpu = cp.asnumpy(frame_gpu)
         kpts = None
         if self.pose_model:

@@ -114,26 +114,30 @@ class SegmentationTester:
         return mask
 
     def infer_modnet(self, frame):
-        # MODNet expects (1, 3, 512, 512), range [-1, 1] usually or normalized
-        # This ONNX specific version usually likes 512x512
+        # MODNet (ONNX) Inference
         h, w = frame.shape[:2]
-        target_size = 512
         
-        img = cv2.resize(frame, (target_size, target_size))
+        # [Optimization] "Golden Ratio" for Speed/Accuracy
+        # 16:9 비율 유지 (정확도 UP) + 32의 배수 + 512x512와 유사한 픽셀 수
+        # 512x512 = 262,144 pixels
+        # 672x384 = 258,048 pixels (거의 동일, 비율 완벽)
+        target_w = 672
+        target_h = 384
+        
+        img = cv2.resize(frame, (target_w, target_h))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        # Normalize to [0, 1] then subtract mean/std if needed, 
-        # but standardized MODNet ONNX often takes [0,1] or [-0.5, 0.5]
-        # Let's try standard range correction for this ONNX: (img - 127.5) / 127.5
+        # Normalize to [-1, 1] usually for ONNX MODNet
+        # (img - 127.5) / 127.5
         img = (img.astype(np.float32) - 127.5) / 127.5
         img = np.transpose(img, (2, 0, 1)) # CHW
         img = np.expand_dims(img, axis=0)  # BCHW
         
         pred = self.modnet_session.run(None, {self.modnet_input_name: img})[0]
-        # Pred shape: (1, 1, 512, 512)
+        # Pred shape: (1, 1, 384, 672)
         
         mask = pred[0, 0]
-        mask = cv2.resize(mask, (w, h))
+        mask = cv2.resize(mask, (w, h)) # 원본 크기로 복원
         return mask
 
     def infer_deeplab(self, frame):
