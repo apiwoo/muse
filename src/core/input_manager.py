@@ -2,10 +2,9 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 # Optimization: No-Lag Switching & NVDEC Support
 # [2025-05 Update] Enhanced Camera Init with Warm-up & Detailed Logging
-# [Critical Fix] Reverted to 'Recorder.py' logic (Simplest is Best)
-# - No backend specifier (Let OS decide)
-# - No forced codec (Let OS decide)
-# - Just Resolution & FPS
+# [Critical Fix] Forced DSHOW to match Launcher backend (Fixes 10s MSMF Timeout)
+# [Critical Fix] Init Order: Res -> MJPG -> FPS (Fixes 1FPS issue completely)
+# [Debug] Added Ultra-Verbose Logging for hang detection
 
 import cv2
 import numpy as np
@@ -95,7 +94,7 @@ class InputManager:
         self.fps = fps
         
         unique_sources = list(dict.fromkeys(camera_indices))
-        print(f"\n[CAM] [InputManager] === Debug Mode: Recorder.py Style (Simplest) ===")
+        print(f"\n[CAM] [InputManager] === Debug Mode: Ultra Verbose Init ===")
         print(f"[CAM] [InputManager] Target Resolution: {width}x{height} @ {fps}fps")
         print(f"[CAM] [InputManager] Target Sources: {unique_sources}")
         
@@ -103,21 +102,25 @@ class InputManager:
             cid = source
             if isinstance(source, int):
                 # Webcam Initialization Logic
-                print(f"   -> [Init] Attempting to open Webcam ID {source}...")
+                print(f"   -> [Init] Attempting to open Webcam ID {source} (Force DSHOW)...")
                 
-                # [Solution] The 'Recorder.py' Way
-                # No backend specifier, No Codec forcing. Just open it.
-                
-                print(f"      [DEBUG] Calling cv2.VideoCapture({source})... ", end="", flush=True)
+                # Debug Log: Opening
+                # [FIX] MSMF causes 10s hang if Launcher accessed camera via DSHOW.
+                # We enforce cv2.CAP_DSHOW to align backends.
+                print(f"      [DEBUG] Calling cv2.VideoCapture({source}, CAP_DSHOW)... ", end="", flush=True)
                 t_start = time.time()
-                cap = cv2.VideoCapture(source) # Simple is best
+                cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
                 print(f"Done in {time.time()-t_start:.4f}s")
                 
                 backend_name = cap.getBackendName()
                 print(f"      [Backend] {backend_name}")
 
                 if cap.isOpened():
-                    # Just Resolution & FPS (Exactly like recorder.py)
+                    # [CRITICAL FIX] Correct Order for DSHOW High-Res:
+                    # 1. Set Resolution (Forces Codec reset)
+                    # 2. Set MJPG Codec (Enables Bandwidth)
+                    # 3. Set FPS (Locks Timing - MUST BE LAST)
+                    
                     print(f"      [DEBUG] Setting Width {width}...", end="", flush=True)
                     t0 = time.time()
                     ret_w = cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -128,11 +131,20 @@ class InputManager:
                     ret_h = cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
                     print(f" Result: {ret_h} ({time.time()-t0:.4f}s)")
                     
-                    print(f"      [DEBUG] Setting FPS {fps}...", end="", flush=True)
+                    print(f"      [DEBUG] Setting MJPG Codec...", end="", flush=True)
+                    t0 = time.time()
+                    ret_cc = cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
+                    print(f" Result: {ret_cc} ({time.time()-t0:.4f}s)")
+
+                    # [FPS MUST BE LAST]
+                    print(f"      [DEBUG] Setting FPS {fps} (LAST)...", end="", flush=True)
                     t0 = time.time()
                     ret_fps = cap.set(cv2.CAP_PROP_FPS, fps)
                     print(f" Result: {ret_fps} ({time.time()-t0:.4f}s)")
                     
+                    # [Optimization] Low Latency Buffer (from pages.py)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
                     # 3. Validate Settings
                     real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
                     real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -146,7 +158,7 @@ class InputManager:
                     
                     print(f"      [Settings Check] {int(real_w)}x{int(real_h)} @ {real_fps:.1f}fps (Codec: {fcc_str})")
 
-                    # 4. Warm-up Loop
+                    # 4. Warm-up Loop (Still needed for stability)
                     print("      [Warm-up] Starting frame stabilization loop...")
                     success = False
                     max_retries = 20 # Try for ~2 seconds
