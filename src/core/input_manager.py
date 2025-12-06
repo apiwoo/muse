@@ -1,6 +1,11 @@
 # Project MUSE - input_manager.py
 # (C) 2025 MUSE Corp. All rights reserved.
 # Optimization: No-Lag Switching & NVDEC Support
+# [2025-05 Update] Enhanced Camera Init with Warm-up & Detailed Logging
+# [Critical Fix] Reverted to MSMF (Default) backend to fix 1 FPS issue
+# [Critical Fix] Removed CaptureWorker for Thread Affinity (Direct Read Mode)
+# [Fix] Added MJPG FourCC & Corrected Init Order (Bandwidth Fix)
+# [Debug] Added Ultra-Verbose Logging for hang detection
 
 import cv2
 import numpy as np
@@ -29,8 +34,9 @@ class NVDECCapture:
         self.ffmpeg_path = os.path.join(project_root, "libs", "ffmpeg.exe")
         
         if not os.path.exists(self.ffmpeg_path):
-            raise FileNotFoundError(f"[ERROR] FFmpeg missing.")
+            self.ffmpeg_path = "ffmpeg"
 
+        print(f"[NVDEC] Initializing FFmpeg pipe for: {source}")
         self.cmd = [
             self.ffmpeg_path,
             '-hide_banner', '-loglevel', 'error',
@@ -44,19 +50,28 @@ class NVDECCapture:
             '-'
         ]
         
-        self.process = subprocess.Popen(
-            self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**7
-        )
+        try:
+            self.process = subprocess.Popen(
+                self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**7
+            )
+        except Exception as e:
+            print(f"[NVDEC] FFmpeg Launch Failed: {e}")
+            self.process = None
 
     def isOpened(self):
+        if self.process is None: return False
         return self.process.poll() is None
 
     def read(self):
-        if self.process.poll() is not None: return False, None
-        raw_frame = self.process.stdout.read(self.frame_len)
-        if len(raw_frame) != self.frame_len: return False, None
-        frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((self.height, self.width, 3))
-        return True, frame
+        if self.process is None or self.process.poll() is not None: return False, None
+        try:
+            raw_frame = self.process.stdout.read(self.frame_len)
+            if len(raw_frame) != self.frame_len: return False, None
+            frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((self.height, self.width, 3))
+            return True, frame
+        except Exception as e:
+            print(f"[NVDEC] Read Error: {e}")
+            return False, None
 
     def release(self):
         if self.process:
@@ -64,76 +79,12 @@ class NVDECCapture:
             self.process.wait()
 
     def grab(self):
-        _ = self.process.stdout.read(self.frame_len)
+        if self.process:
+            _ = self.process.stdout.read(self.frame_len)
         return True
 
-class CaptureWorker(threading.Thread):
-    def __init__(self, caps, width, height):
-        super().__init__()
-        self.caps = caps
-        self.width = width
-        self.height = height
-        self.active_id = None
-        self.latest_frame = None
-        self.new_frame_available = False
-        self.running = True
-        self.lock = threading.Lock()
-        self.daemon = True 
-        print(f"[DEBUG] [CaptureWorker] Initialized. Cameras: {list(caps.keys())}")
-
-    def set_active_camera(self, cid):
-        with self.lock:
-            self.active_id = cid
-            self.latest_frame = None
-            print(f"[DEBUG] [CaptureWorker] Active camera set to: {cid}")
-
-    def run(self):
-        print("[DEBUG] [CaptureWorker] Thread loop started.")
-        fail_count = 0
-        
-        while self.running:
-            if self.active_id is None:
-                # 활성 카메라가 없을 때도 UI가 멈추지 않도록 더미 딜레이
-                time.sleep(0.033)
-                continue
-            
-            processed = False
-            for cid, cap in self.caps.items():
-                if cid == self.active_id:
-                    ret, frame = cap.read()
-                    processed = True
-                    if ret and frame is not None:
-                        with self.lock:
-                            self.latest_frame = frame
-                            self.new_frame_available = True
-                        if fail_count > 0:
-                            print(f"[INFO] [CaptureWorker] Camera {cid} recovered after {fail_count} failures.")
-                            fail_count = 0
-                    else:
-                        fail_count += 1
-                        # 2초(60프레임)마다 로그 출력하여 도배 방지
-                        if fail_count % 60 == 0:
-                            print(f"[WARNING] [CaptureWorker] Failed to read from Cam {cid} (Ret={ret})")
-                            
-                else:
-                    # 비활성 카메라는 버퍼 비우기용 grab만 수행
-                    if isinstance(cap, cv2.VideoCapture):
-                        cap.grab()
-            
-            if not processed:
-                time.sleep(0.01)
-            
-    def get_latest_frame(self):
-        with self.lock:
-            if self.new_frame_available and self.latest_frame is not None:
-                self.new_frame_available = False
-                return self.latest_frame, True
-            else:
-                return None, False
-
-    def stop(self):
-        self.running = False
-        print("[DEBUG] [CaptureWorker] Stopping thread.")
+# [Critical Change] CaptureWorker removed to fix DSHOW thread affinity issues.
+# InputManager now handles reading directly in the calling thread.
 
 class InputManager:
     def __init__(self, camera_indices=[0], width=1920, height=1080, fps=30):
@@ -144,91 +95,153 @@ class InputManager:
         self.fps = fps
         
         unique_sources = list(dict.fromkeys(camera_indices))
-        
-        print(f"[CAM] [InputManager] Initializing sources: {unique_sources}")
+        print(f"\n[CAM] [InputManager] === Debug Mode: Ultra Verbose Init ===")
+        print(f"[CAM] [InputManager] Target Resolution: {width}x{height} @ {fps}fps")
+        print(f"[CAM] [InputManager] Target Sources: {unique_sources}")
         
         for source in unique_sources:
             cid = source
             if isinstance(source, int):
-                # Webcam
-                print(f"   -> Opening Webcam {source}...", end=" ")
-                # [Recorder.py Style] 최대한 단순하게 오픈
-                cap = cv2.VideoCapture(source)
+                # Webcam Initialization Logic
+                print(f"   -> [Init] Attempting to open Webcam ID {source}...")
                 
-                # [DEBUG] 백엔드 확인 (DSHOW, MSMF, V4L2 등)
-                # 이 정보가 recorder.py와 run_muse.py의 동작 차이를 설명할 수 있음
-                backend = cap.getBackendName()
-                print(f"[Backend: {backend}]", end=" ")
+                # Debug Log: Opening
+                print(f"      [DEBUG] Calling cv2.VideoCapture({source})... ", end="", flush=True)
+                t_start = time.time()
+                cap = cv2.VideoCapture(source)
+                print(f"Done in {time.time()-t_start:.4f}s")
+                
+                backend_name = cap.getBackendName()
+                print(f"      [Backend] {backend_name}")
 
                 if cap.isOpened():
-                    # [Recorder.py Style] 해상도/FPS 설정
-                    # 코덱 강제 설정(FOURCC)은 제거함 -> OS 기본값 사용
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-                    cap.set(cv2.CAP_PROP_FPS, fps)
+                    # [CRITICAL FIX] Set MJPG Codec FIRST to reserve bandwidth before setting High-Res
+                    # Debug Logs for Settings
                     
-                    # [DEBUG] 실제 적용된 설정값 확인
+                    print(f"      [DEBUG] Setting MJPG Codec...", end="", flush=True)
+                    t0 = time.time()
+                    ret_cc = cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
+                    print(f" Result: {ret_cc} ({time.time()-t0:.4f}s)")
+                    
+                    print(f"      [DEBUG] Setting Width {width}...", end="", flush=True)
+                    t0 = time.time()
+                    ret_w = cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    print(f" Result: {ret_w} ({time.time()-t0:.4f}s)")
+
+                    print(f"      [DEBUG] Setting Height {height}...", end="", flush=True)
+                    t0 = time.time()
+                    ret_h = cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                    print(f" Result: {ret_h} ({time.time()-t0:.4f}s)")
+                    
+                    print(f"      [DEBUG] Setting FPS {fps}...", end="", flush=True)
+                    t0 = time.time()
+                    ret_fps = cap.set(cv2.CAP_PROP_FPS, fps)
+                    print(f" Result: {ret_fps} ({time.time()-t0:.4f}s)")
+                    
+                    # [Optimization] Low Latency Buffer (from pages.py)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+                    # 3. Validate Settings
                     real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
                     real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
                     real_fps = cap.get(cv2.CAP_PROP_FPS)
-                    print(f"\n      [Settings] Req: {width}x{height}@{fps} -> Act: {int(real_w)}x{int(real_h)}@{int(real_fps)}")
+                    
+                    try:
+                        fcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+                        fcc_str = "".join([chr((fcc >> 8 * i) & 0xFF) for i in range(4)])
+                    except Exception as e:
+                        fcc_str = f"Error({e})"
+                    
+                    print(f"      [Settings Check] {int(real_w)}x{int(real_h)} @ {real_fps:.1f}fps (Codec: {fcc_str})")
 
-                    # [Check] 즉시 프레임 읽기 시도 (Warm-up 루프 제거)
-                    # recorder.py와 동일하게 바로 읽어서 성공하면 OK
-                    ret, _ = cap.read()
-                    if ret:
+                    # 4. Warm-up Loop (Still needed for stability)
+                    print("      [Warm-up] Starting frame stabilization loop...")
+                    success = False
+                    max_retries = 20 # Try for ~2 seconds
+                    
+                    for i in range(max_retries):
+                        print(f"      [DEBUG] Attempt {i+1}: Calling read()... ", end="", flush=True)
+                        t_read = time.time()
+                        ret, frame = cap.read()
+                        t_end = time.time()
+                        print(f"Returned in {t_end - t_read:.4f}s | Ret: {ret}")
+                        
+                        if ret:
+                            if frame is None:
+                                print(f"      [DEBUG] !!! Ret is True but Frame is None !!!")
+                            elif frame.size == 0:
+                                print(f"      [DEBUG] !!! Frame size is 0 !!!")
+                            else:
+                                print(f"      [DEBUG] Frame Valid! Shape: {frame.shape}")
+                                success = True
+                                break
+                        else:
+                            print(f"      [DEBUG] Read Failed. Sleeping 0.1s...")
+                            time.sleep(0.1)
+                    
+                    if success:
                         self.caps[cid] = cap
-                        print(f"      -> [OK] Camera Ready.")
+                        print(f"      -> [SUCCESS] Camera {source} Ready.")
                     else:
-                        print(f"      -> [FAILED] Camera opened but returned no frame.")
-                        # 프레임 안 나오면 과감히 해제 (CaptureWorker에서 에러 뿜는 것보다 나음)
+                        print(f"\n      -> [FAILED] Camera opened but returned NO frames after {max_retries} attempts.")
                         cap.release()
                 else:
-                    print("[ERROR] (Could not open)")
+                    print(f"      -> [ERROR] Could not open device (Occupied or not found).")
             
             elif isinstance(source, str):
                 # File/Stream (NVDEC)
                 try:
                     cap = NVDECCapture(source, width, height, fps)
-                    self.caps[cid] = cap
-                    print(f"   -> NVDEC Source {source} [OK]")
-                except: 
-                    print(f"   -> NVDEC Source {source} [FAIL]")
+                    if cap.isOpened():
+                        self.caps[cid] = cap
+                        print(f"   -> [NVDEC] Source {source} [OK]")
+                    else:
+                        print(f"   -> [NVDEC] Source {source} [FAIL]")
+                except Exception as e: 
+                    print(f"   -> [NVDEC] Error: {e}")
 
             if self.active_id is None and cid in self.caps:
                 self.active_id = cid
 
+        print(f"[CAM] [InputManager] === Initialization Complete. Active Cams: {len(self.caps)} ===\n")
+
         if not self.caps:
-            print("[WARNING] No cameras found. InputManager will run empty.")
+            print("[CRITICAL WARNING] No cameras found! InputManager running in EMPTY mode.")
         
-        print(f"[DEBUG] [InputManager] Starting CaptureWorker with Active ID: {self.active_id}")
-        self.worker = CaptureWorker(self.caps, width, height)
-        self.worker.set_active_camera(self.active_id)
-        self.worker.start()
+        # [Thread Affinity Fix] Do NOT start a separate worker thread.
+        # We will read directly in the read() method.
 
     def select_camera(self, camera_id):
         if camera_id == self.active_id: return True
         
         if camera_id in self.caps:
             self.active_id = camera_id
-            self.worker.set_active_camera(camera_id)
             print(f"[INPUT] Switched to Source: {camera_id}")
             return True
         else:
-            print(f"[WARNING] Camera {camera_id} not initialized.")
+            print(f"[WARNING] Camera {camera_id} not available in initialized list.")
             return False
 
     def read(self):
-        if not self.worker: return None, False
-        frame_cpu, ret = self.worker.get_latest_frame()
+        # [Direct Read Mode]
+        # Reads directly from the OpenCV object in the calling thread (BeautyWorker).
+        # This prevents DSHOW thread affinity issues.
+        
+        if self.active_id is None or self.active_id not in self.caps:
+            return None, False
+
+        cap = self.caps[self.active_id]
+        ret, frame_cpu = cap.read()
+        
         frame_gpu = None
         if ret and frame_cpu is not None:
-             frame_gpu = cp.asarray(frame_cpu)
+             if HAS_CUDA:
+                 frame_gpu = cp.asarray(frame_cpu)
+             else:
+                 frame_gpu = frame_cpu # Fallback for CPU-only
+        
         return frame_gpu, ret
 
     def release(self):
-        if self.worker:
-            self.worker.stop()
-            self.worker.join()
         for cap in self.caps.values():
             cap.release()
