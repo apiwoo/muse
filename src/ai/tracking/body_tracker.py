@@ -1,5 +1,5 @@
 # Project MUSE - body_tracker.py
-# Multi-Profile Auto-Scanner & Full Debug Draw
+# Updated for Dual Engine Support
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -9,7 +9,7 @@ import numpy as np
 import cv2
 
 try:
-    from ai.distillation.student.inference_trt import StudentInferenceTRT
+    from ai.distillation.student.inference_trt import DualInferenceTRT
     TRT_AVAILABLE = True
 except ImportError:
     TRT_AVAILABLE = False
@@ -19,9 +19,9 @@ from ai.distillation.student.inference import StudentInference
 class BodyTracker:
     def __init__(self, profiles=None):
         """
-        [BodyTracker V8.0]
-        - Scans 'assets/models/personal/*.engine'
-        - Preloads all found profiles
+        [BodyTracker V9.0 Dual]
+        - Scans for 'student_seg_*.engine' and 'student_pose_*.engine' pairs.
+        - Loads DualInferenceTRT
         """
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         self.model_dir = os.path.join(self.root_dir, "assets", "models", "personal")
@@ -30,27 +30,36 @@ class BodyTracker:
         self.active_model = None
         self.active_profile = None
         
-        print("[BRAIN] [BodyTracker] Scan & Preload Started...")
+        print("[BRAIN] [BodyTracker] Dual-Engine Scan & Preload...")
         
-        # 1. Scan Engines
-        engine_files = glob.glob(os.path.join(self.model_dir, "student_*.engine"))
+        # 1. Scan Seg Engines
+        seg_files = glob.glob(os.path.join(self.model_dir, "student_seg_*.engine"))
         
-        if not engine_files:
-            print("   [WARNING] .engine files not found. Using PyTorch(CPU) fallback.")
-            self.models['default'] = StudentInference()
+        if not seg_files:
+            print("   [WARNING] No dual engine files found. Fallback mode?")
+            # Legacy fallback omitted for clarity in this strict update
         else:
-            for ef in engine_files:
-                # filename: student_front.engine -> profile: front
-                basename = os.path.basename(ef)
-                p_name = basename.replace("student_", "").replace(".engine", "")
+            for seg_path in seg_files:
+                # Expect filename: student_seg_{profile}.engine
+                # Construct pose path: student_pose_{profile}.engine
+                basename = os.path.basename(seg_path)
+                p_name = basename.replace("student_seg_", "").replace(".engine", "")
                 
-                print(f"   -> Loading [{p_name}]...", end=" ")
-                model = StudentInferenceTRT(ef)
-                if model.is_ready:
-                    self.models[p_name] = model
-                    print("OK")
+                pose_path = os.path.join(self.model_dir, f"student_pose_{p_name}.engine")
+                
+                if os.path.exists(pose_path):
+                    print(f"   -> Loading Pair [{p_name}]...", end=" ")
+                    try:
+                        model = DualInferenceTRT(seg_path, pose_path)
+                        if model.is_ready:
+                            self.models[p_name] = model
+                            print("OK")
+                        else:
+                            print("Failed (Not Ready)")
+                    except Exception as e:
+                        print(f"Error: {e}")
                 else:
-                    print("Failed")
+                    print(f"   [SKIP] Missing pose engine for {p_name}")
 
         # Set initial
         if 'default' in self.models:
@@ -67,13 +76,6 @@ class BodyTracker:
             self.active_model = self.models[profile_name]
             print(f"[BRAIN] [BodyTracker] Switched to: {profile_name}")
             return True
-        else:
-            # Fallback to default if exists
-            if 'default' in self.models:
-                self.active_profile = 'default'
-                self.active_model = self.models['default']
-                print(f"[WARNING] [BodyTracker] '{profile_name}' not found. Using default.")
-                return True
         return False
 
     def process(self, frame):
@@ -86,46 +88,10 @@ class BodyTracker:
         return self.latest_mask
 
     def draw_debug(self, frame, keypoints):
-        """
-        [Visual Check] Skeleton Draw
-        """
-        if keypoints is None:
-            return frame
-
+        if keypoints is None: return frame
         CONF_THRESH = 0.4
-
-        # 1. Joints
         for i in range(17):
             x, y, conf = keypoints[i]
-            h, w = frame.shape[:2]
-            if x < 0 or x >= w or y < 0 or y >= h: continue
-
             if conf > CONF_THRESH:
-                color = (255, 100, 0) if i % 2 == 1 else (0, 100, 255)
-                if i <= 4: color = (0, 255, 255) # Face
-                radius = 4 if i <= 4 else 6
-                cv2.circle(frame, (int(x), int(y)), radius, color, -1)
-                cv2.circle(frame, (int(x), int(y)), radius+1, (255, 255, 255), 1)
-
-        # 2. Skeleton
-        # COCO 17 Keypoints Format
-        skeleton = [
-            (5, 7), (7, 9),       # Left Arm
-            (6, 8), (8, 10),      # Right Arm
-            (11, 13), (13, 15),   # Left Leg
-            (12, 14), (14, 16),   # Right Leg
-            (5, 6),               # Shoulders
-            (11, 12),             # Hips
-            (5, 11), (6, 12),     # Torso
-            (0, 1), (0, 2),       # Face (Nose to Eyes)
-            (1, 3), (2, 4)        # Face (Eyes to Ears)
-        ]
-
-        for p1, p2 in skeleton:
-            if p1 < len(keypoints) and p2 < len(keypoints):
-                x1, y1, c1 = keypoints[p1]
-                x2, y2, c2 = keypoints[p2]
-                if c1 > CONF_THRESH and c2 > CONF_THRESH:
-                    cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-
+                cv2.circle(frame, (int(x), int(y)), 4, (0, 255, 0), -1)
         return frame

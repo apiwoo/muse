@@ -1,6 +1,6 @@
 # Project MUSE - model_arch.py
 # The "Student" Architecture: SegFormer (MiT-B1)
-# Replaces ResNet-34 U-Net for Global Context Awareness
+# Refactored for Dual Model Support (Seg vs Pose)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import torch
@@ -10,7 +10,6 @@ import math
 
 # ==============================================================================
 # [Mix Transformer (MiT)] Implementation
-# timm 라이브러리 버전 이슈로 인해 직접 구현체를 포함시킵니다.
 # ==============================================================================
 
 class DWConv(nn.Module):
@@ -98,10 +97,7 @@ class Block(nn.Module):
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
             attn_drop=attn_drop, proj_drop=drop, sr_ratio=sr_ratio)
-        
-        # DropPath implementation (Identity if unavailable)
-        self.drop_path = nn.Identity() # Simplification for portability
-        
+        self.drop_path = nn.Identity() 
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer, drop=drop)
 
@@ -132,13 +128,11 @@ class MixVisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.depths = depths
 
-        # Patch Embeddings
         self.patch_embed1 = OverlapPatchEmbed(img_size=img_size, patch_size=7, stride=4, in_chans=in_chans, embed_dim=embed_dims[0])
         self.patch_embed2 = OverlapPatchEmbed(img_size=img_size // 4, patch_size=3, stride=2, in_chans=embed_dims[0], embed_dim=embed_dims[1])
         self.patch_embed3 = OverlapPatchEmbed(img_size=img_size // 8, patch_size=3, stride=2, in_chans=embed_dims[1], embed_dim=embed_dims[2])
         self.patch_embed4 = OverlapPatchEmbed(img_size=img_size // 16, patch_size=3, stride=2, in_chans=embed_dims[2], embed_dim=embed_dims[3])
 
-        # Transformer Encoder
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
         cur = 0
         
@@ -173,34 +167,26 @@ class MixVisionTransformer(nn.Module):
         B = x.shape[0]
         outs = []
 
-        # Stage 1
         x, H, W = self.patch_embed1(x)
-        for i, blk in enumerate(self.block1):
-            x = blk(x, H, W)
+        for i, blk in enumerate(self.block1): x = blk(x, H, W)
         x_out = self.norm1(x)
         x_out = x_out.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x_out)
 
-        # Stage 2
         x, H, W = self.patch_embed2(x_out)
-        for i, blk in enumerate(self.block2):
-            x = blk(x, H, W)
+        for i, blk in enumerate(self.block2): x = blk(x, H, W)
         x_out = self.norm2(x)
         x_out = x_out.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x_out)
 
-        # Stage 3
         x, H, W = self.patch_embed3(x_out)
-        for i, blk in enumerate(self.block3):
-            x = blk(x, H, W)
+        for i, blk in enumerate(self.block3): x = blk(x, H, W)
         x_out = self.norm3(x)
         x_out = x_out.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x_out)
 
-        # Stage 4
         x, H, W = self.patch_embed4(x_out)
-        for i, blk in enumerate(self.block4):
-            x = blk(x, H, W)
+        for i, blk in enumerate(self.block4): x = blk(x, H, W)
         x_out = self.norm4(x)
         x_out = x_out.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x_out)
@@ -208,58 +194,56 @@ class MixVisionTransformer(nn.Module):
         return outs
 
 # ==============================================================================
-# [MUSE Student Model] Wrapper
+# [MUSE Student Model] Wrapper (Dual Mode Supported)
 # ==============================================================================
 
 class MuseStudentModel(nn.Module):
-    def __init__(self, num_keypoints=17, pretrained=True):
+    def __init__(self, num_keypoints=17, pretrained=True, mode='dual'):
         """
         [MUSE SegFormer Student]
-        - Encoder: MiT-B1 (Mix Transformer) [Direct Implementation]
-        - Decoder: Lightweight MLP Decoder (Segmentation & Pose)
-        - Resolution: 960 x 544
+        Args:
+            mode (str): 'dual' (Both), 'seg' (Segmentation only), 'pose' (Pose only)
         """
         super().__init__()
         
+        self.mode = mode # seg, pose, or dual
+        print(f"[STUDENT] Initializing MuseStudentModel (Mode: {self.mode.upper()})...")
+
         # 1. Encoder (MiT-B1)
-        print("[STUDENT] [Student] Initializing SegFormer (MiT-B1) - Custom Impl...")
-        # MiT-B1 Configuration
         self.encoder = MixVisionTransformer(
             patch_size=4, embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8], 
             mlp_ratios=[4, 4, 4, 4], qkv_bias=True, norm_layer=nn.LayerNorm, 
             depths=[2, 2, 2, 2], sr_ratios=[8, 4, 2, 1]
         )
         
-        if pretrained:
-            print("   [INFO] Pretrained weights are disabled for Custom MiT to avoid URL errors.")
-            # For production, we should load state_dict from a local file if available.
-        
-        # Channel counts for MiT-B1: [64, 128, 320, 512]
+        # 2. MLP Decoder Layers (Common for both, but features are shared)
         enc_channels = [64, 128, 320, 512]
         embedding_dim = 256
 
-        # 2. MLP Decoder Layers
         self.linear_c4 = MLP(input_dim=enc_channels[3], embed_dim=embedding_dim)
         self.linear_c3 = MLP(input_dim=enc_channels[2], embed_dim=embedding_dim)
         self.linear_c2 = MLP(input_dim=enc_channels[1], embed_dim=embedding_dim)
         self.linear_c1 = MLP(input_dim=enc_channels[0], embed_dim=embedding_dim)
 
         self.dropout = nn.Dropout(0.1)
-        
         self.linear_fuse = nn.Conv2d(embedding_dim * 4, embedding_dim, kernel_size=1)
         self.bn = nn.BatchNorm2d(embedding_dim)
         self.relu = nn.ReLU(inplace=True)
 
-        # 3. Heads
-        # Segmentation Head (1 Channel)
-        self.seg_head = nn.Conv2d(embedding_dim, 1, kernel_size=1)
+        # 3. Heads (Conditional Activation)
+        self.seg_head = None
+        self.pose_head = None
+
+        if self.mode == 'seg' or self.mode == 'dual':
+            self.seg_head = nn.Conv2d(embedding_dim, 1, kernel_size=1)
+            print("   -> Segmentation Head Enabled")
         
-        # Pose Head (17 Channels)
-        self.pose_head = nn.Conv2d(embedding_dim, num_keypoints, kernel_size=1)
+        if self.mode == 'pose' or self.mode == 'dual':
+            self.pose_head = nn.Conv2d(embedding_dim, num_keypoints, kernel_size=1)
+            print("   -> Pose Head Enabled")
 
     def forward(self, x):
-        # x: (B, 3, 544, 960)
-        # MiT Encoder forward
+        # x: (B, 3, H, W)
         features = self.encoder.forward_features(x)
         c1, c2, c3, c4 = features
 
@@ -281,13 +265,25 @@ class MuseStudentModel(nn.Module):
         _c = self.relu(_c)
         _c = self.dropout(_c)
 
-        seg_logits = self.seg_head(_c)
-        pose_heatmaps = self.pose_head(_c)
+        # Outputs based on mode
+        seg_logits = None
+        pose_heatmaps = None
 
-        seg_logits = F.interpolate(seg_logits, scale_factor=4, mode='bilinear', align_corners=False)
-        pose_heatmaps = F.interpolate(pose_heatmaps, scale_factor=4, mode='bilinear', align_corners=False)
+        if self.seg_head is not None:
+            seg_logits = self.seg_head(_c)
+            seg_logits = F.interpolate(seg_logits, scale_factor=4, mode='bilinear', align_corners=False)
 
-        return seg_logits, pose_heatmaps
+        if self.pose_head is not None:
+            pose_heatmaps = self.pose_head(_c)
+            pose_heatmaps = F.interpolate(pose_heatmaps, scale_factor=4, mode='bilinear', align_corners=False)
+
+        # Return format consistent with expectations
+        if self.mode == 'dual':
+            return seg_logits, pose_heatmaps
+        elif self.mode == 'seg':
+            return seg_logits
+        elif self.mode == 'pose':
+            return pose_heatmaps
 
 class MLP(nn.Module):
     def __init__(self, input_dim=2048, embed_dim=768):
