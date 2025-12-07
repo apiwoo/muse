@@ -48,39 +48,14 @@ IGNORE_FOLDERS = {
     "masks",         
     "labels",        
     
-    # [NEW] 개인화 학습(Personalized Learning) 관련 레거시 폴더 제외
-    "distillation",  # 학습 로직 (Teacher/Student)
-    "auto_labeling", # 라벨링 도구
-    "studio",        # 학습용 GUI 패키지 (Wizard)
-    
     # 자기 자신 제외
     OUTPUT_DIR_NAME
 }
 
 # [NEW] 제외할 특정 파일명 (레거시/실험용/문서 파일)
 IGNORE_FILES = {
-    # 문서 (이제 불필요함)
-    "개인학습가이드.txt",        # [삭제] 개인화 학습 가이드
-
-    # 학습 및 데이터 수집 도구 (레거시)
-    "recorder.py",              # 데이터 녹화
-    "train_student.py",         # 학생 모델 학습
-    "convert_student_to_trt.py",# 학생 모델 변환
-    "muse_studio.py",           # 학습용 GUI 런처
+    "validator.py"             # 내용 없는 파일
     
-    # 구버전/미사용 로직
-    "body_tracker.py",          # 구버전 개인화 모델 로더
-    "personalizer.py",          # 미사용 클래스
-    "validator.py",             # 내용 없는 파일
-    
-    # 유틸리티 (필요시 제외 해제 가능)
-    "collect_libs.py",          # 배포용 툴
-    "clean_launch.py",          # 캐시 정리 툴
-    "fix_env.py",               # 환경 복구 툴
-    "patch_dll.py",             # DLL 패치 툴
-    "force_patch_ort.py",       # ONNX 패치 툴
-    "check_gpu.py",             # GPU 확인 툴
-    "download_models.py"        # 모델 다운로더 (코드가 아닌 유틸리티)
 }
 
 # [NEW] 제외할 파일명 패턴 (접두사)
