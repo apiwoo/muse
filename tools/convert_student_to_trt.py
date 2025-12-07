@@ -12,8 +12,11 @@ import argparse
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.ai.distillation.student.model_arch import MuseStudentModel
 
-TARGET_W = 960
-TARGET_H = 544
+# [Config] Dynamic Resolution based on Task
+def get_resolution(mode):
+    if mode == 'pose':
+        return 640, 352
+    return 960, 544 # Default for Seg
 
 def convert_all(target_profile=None):
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -62,7 +65,7 @@ def convert_all(target_profile=None):
             export_onnx(pth, onnx_path, mode)
             
             print(f"[PROGRESS] {base_progress + int(50/total)}")
-            build_engine(onnx_path, engine_path)
+            build_engine(onnx_path, engine_path, mode)
         except Exception as e:
             print(f"[ERROR] Failed to convert {filename}: {e}")
 
@@ -70,14 +73,16 @@ def convert_all(target_profile=None):
     print("\n[OK] Conversion complete.")
 
 def export_onnx(pth_path, onnx_path, mode):
-    print(f"   -> Exporting to ONNX ({mode.upper()})...")
+    width, height = get_resolution(mode)
+    print(f"   -> Exporting to ONNX ({mode.upper()}) @ {width}x{height}...")
+    
     device = torch.device("cuda")
     
     model = MuseStudentModel(num_keypoints=17, pretrained=False, mode=mode).to(device)
     model.load_state_dict(torch.load(pth_path))
     model.eval()
 
-    dummy_input = torch.randn(1, 3, TARGET_H, TARGET_W).to(device)
+    dummy_input = torch.randn(1, 3, height, width).to(device)
     
     output_names = ['seg'] if mode == 'seg' else ['pose']
     dynamic_axes = {'input': {0: 'B'}, output_names[0]: {0: 'B'}}
@@ -91,8 +96,10 @@ def export_onnx(pth_path, onnx_path, mode):
     )
     print("   [OK] ONNX Exported")
 
-def build_engine(onnx_path, engine_path):
-    print("   -> Building TensorRT Engine...")
+def build_engine(onnx_path, engine_path, mode):
+    width, height = get_resolution(mode)
+    print(f"   -> Building TensorRT Engine ({mode.upper()})...")
+    
     TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
@@ -106,7 +113,7 @@ def build_engine(onnx_path, engine_path):
                 print(parser.get_error(error))
             return
 
-    input_shape = (1, 3, TARGET_H, TARGET_W)
+    input_shape = (1, 3, height, width)
     profile = builder.create_optimization_profile()
     profile.set_shape("input", input_shape, input_shape, input_shape)
     config.add_optimization_profile(profile)

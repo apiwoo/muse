@@ -1,6 +1,7 @@
 # Project MUSE - inference_trt.py
 # Dual TensorRT Inference (Seg & Pose Split)
 # Optimized: Full GPU Pipeline (Zero-Copy) using Pure CuPy
+# Updated: Hybrid Resolution (544p Seg / 352p Pose)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
@@ -15,14 +16,18 @@ class DualInferenceTRT:
     """
     [Dual Engine Runtime]
     Simultaneously runs two TensorRT engines (Segmentation + Pose)
-    Input is shared (uploaded once), Outputs are separate.
+    Input is processed twice (544p for Seg, 352p for Pose).
     """
     def __init__(self, seg_engine_path, pose_engine_path):
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.is_ready = False
         
-        self.input_h, self.input_w = 544, 960
-        self.input_shape = (1, 3, self.input_h, self.input_w)
+        # [Config] Resolutions
+        self.seg_h, self.seg_w = 544, 960
+        self.pose_h, self.pose_w = 352, 640
+        
+        self.seg_shape = (1, 3, self.seg_h, self.seg_w)
+        self.pose_shape = (1, 3, self.pose_h, self.pose_w)
         
         # Preprocessing constants
         self.mean = cp.array([0.485, 0.456, 0.406], dtype=cp.float32).reshape(1,3,1,1)
@@ -48,19 +53,20 @@ class DualInferenceTRT:
             return runtime.deserialize_cuda_engine(f.read())
 
     def _allocate_buffers(self):
-        # Shared Input Buffer
-        self.d_input = cp.zeros(self.input_shape, dtype=cp.float32)
+        # Input Buffers (Separate)
+        self.d_input_seg = cp.zeros(self.seg_shape, dtype=cp.float32)
+        self.d_input_pose = cp.zeros(self.pose_shape, dtype=cp.float32)
         
         # Output Buffers
-        # Seg: (1, 1, H, W)
-        self.d_seg = cp.zeros((1, 1, self.input_h, self.input_w), dtype=cp.float32)
-        # Pose: (1, 17, H, W)
-        self.d_pose = cp.zeros((1, 17, self.input_h, self.input_w), dtype=cp.float32)
+        # Seg: (1, 1, 544, 960)
+        self.d_seg = cp.zeros((1, 1, self.seg_h, self.seg_w), dtype=cp.float32)
+        # Pose: (1, 17, 88, 160) -> 352p input -> 1/4 heatmap resolution
+        self.d_pose = cp.zeros((1, 17, self.pose_h // 4, self.pose_w // 4), dtype=cp.float32)
         
         # Bindings
         # Assuming model export order: input (0) -> output (1)
-        self.bindings_seg = [int(self.d_input.data.ptr), int(self.d_seg.data.ptr)]
-        self.bindings_pose = [int(self.d_input.data.ptr), int(self.d_pose.data.ptr)]
+        self.bindings_seg = [int(self.d_input_seg.data.ptr), int(self.d_seg.data.ptr)]
+        self.bindings_pose = [int(self.d_input_pose.data.ptr), int(self.d_pose.data.ptr)]
 
     def _resize_gpu_nearest(self, img, new_h, new_w):
         """
@@ -99,38 +105,41 @@ class DualInferenceTRT:
             img_gpu_src = cp.asarray(frame_input)
             h_orig, w_orig = frame_input.shape[:2]
 
-        # 2. Preprocess on GPU (Pure CuPy)
-        # Resize: 1080p -> 544p
-        img_resized = self._resize_gpu_nearest(img_gpu_src, self.input_h, self.input_w)
-
+        # ----------------------------------------------------
+        # PATH A: Segmentation (544p)
+        # ----------------------------------------------------
+        img_seg = self._resize_gpu_nearest(img_gpu_src, self.seg_h, self.seg_w)
+        
         # BGR -> RGB & Normalize
-        # Slice [..., ::-1] converts BGR to RGB
-        # Transpose: (H, W, C) -> (B, C, H, W) where B=1
-        img_pre = img_resized[..., ::-1].transpose(2,0,1).astype(cp.float32) / 255.0
-        img_pre = img_pre.reshape(1, 3, self.input_h, self.input_w)
-        img_pre = (img_pre - self.mean) / self.std
+        img_pre_seg = img_seg[..., ::-1].transpose(2,0,1).astype(cp.float32) / 255.0
+        img_pre_seg = img_pre_seg.reshape(1, 3, self.seg_h, self.seg_w)
+        img_pre_seg = (img_pre_seg - self.mean) / self.std
         
-        # Copy to Engine Buffer
-        cp.copyto(self.d_input, img_pre)
-        
-        # 3. Execute
+        cp.copyto(self.d_input_seg, img_pre_seg)
         self.ctx_seg.execute_v2(bindings=self.bindings_seg)
+        
+        # Postprocess Seg (Sigmoid)
+        mask_prob = 1.0 / (1.0 + cp.exp(-self.d_seg)) 
+        mask_small = (mask_prob > 0.5).astype(cp.float32).squeeze() 
+        
+        # Upscale Mask to 1080p
+        mask_small_3d = mask_small[..., None]
+        mask_final_gpu = self._resize_gpu_nearest(mask_small_3d, h_orig, w_orig)
+        mask_final_gpu = mask_final_gpu.squeeze()
+
+        # ----------------------------------------------------
+        # PATH B: Pose (352p)
+        # ----------------------------------------------------
+        img_pose = self._resize_gpu_nearest(img_gpu_src, self.pose_h, self.pose_w)
+        
+        img_pre_pose = img_pose[..., ::-1].transpose(2,0,1).astype(cp.float32) / 255.0
+        img_pre_pose = img_pre_pose.reshape(1, 3, self.pose_h, self.pose_w)
+        img_pre_pose = (img_pre_pose - self.mean) / self.std
+        
+        cp.copyto(self.d_input_pose, img_pre_pose)
         self.ctx_pose.execute_v2(bindings=self.bindings_pose)
         
-        # 4. Postprocess Seg (Keep on GPU)
-        # Sigmoid: 1 / (1 + exp(-x))
-        mask_prob = 1.0 / (1.0 + cp.exp(-self.d_seg)) 
-        mask_small = (mask_prob > 0.5).astype(cp.float32).squeeze() # (544, 960)
-        
-        # Upscale Mask to Original Resolution (GPU Nearest)
-        # We can reuse the same resizing logic but for 2D array
-        # _resize_gpu_nearest expects (H, W, C), so we add a dim temporarily
-        mask_small_3d = mask_small[..., None] # (H, W, 1)
-        mask_final_gpu = self._resize_gpu_nearest(mask_small_3d, h_orig, w_orig)
-        mask_final_gpu = mask_final_gpu.squeeze() # (H, W)
-
-        # 5. Postprocess Pose (CPU for Parsing)
-        # Heatmap extraction logic is complex on GPU without kernels, keeping on CPU for now
+        # Postprocess Pose (CPU for Parsing)
         heatmaps = cp.asnumpy(self.d_pose.squeeze())
         keypoints = self._parse_heatmaps(heatmaps, (w_orig, h_orig))
         
@@ -139,11 +148,11 @@ class DualInferenceTRT:
     def _parse_heatmaps(self, heatmaps, original_size):
         kpts = []
         w_orig, h_orig = original_size
-        _, h_map, w_map = heatmaps.shape
+        _, h_map, w_map = heatmaps.shape # (17, 88, 160) for 352p input
+        
         scale_x = w_orig / w_map
         scale_y = h_orig / h_map
         
-        # Use OpenCV minMaxLoc on CPU (Fast enough for 17 small heatmaps)
         import cv2 
         
         for i in range(17):

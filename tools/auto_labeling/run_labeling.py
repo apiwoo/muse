@@ -205,11 +205,16 @@ class AutoLabeler:
         global_idx = self._get_next_index(out_imgs)
         newly_processed = []
 
-        # [Config] 2프레임마다 추출 (30fps 기준 초당 15장 - 고품질 학습용)
-        # 기존 5에서 2로 변경하여 데이터 밀도를 2.5배 높임
-        FRAME_INTERVAL = 2
+        # [Config] 모든 프레임 라벨링 (30fps 기준 초당 30장 - 데이터 손실 방지)
+        # Verify 단계에서의 데이터 손실을 보완하기 위해 모든 프레임을 저장합니다.
+        FRAME_INTERVAL = 1
         # 임시 압축 영상 경로
         temp_video_path = os.path.join(profile_dir, "temp_processing_strided.mp4")
+
+        # [Added] Student Pose Resolution Target (352p)
+        # Teacher가 352p에서 뼈대를 찾도록 제한하여 Student의 눈높이와 맞춤
+        TARGET_POSE_W = 640
+        TARGET_POSE_H = 352
 
         for v_idx, video_path in enumerate(video_paths):
             vid_name = os.path.basename(video_path)
@@ -243,10 +248,22 @@ class AutoLabeler:
                     cap.release()
                     continue
                 
-                # Pose 추론
-                keypoints = self.pose_model.inference(first_frame)
-                if keypoints is None:
+                # [Optimization] Resize for Teacher Pose Inference
+                # Teacher also looks at 352p to match Student's future capability
+                frame_small = cv2.resize(first_frame, (TARGET_POSE_W, TARGET_POSE_H))
+                
+                # Pose 추론 (Low Res)
+                keypoints_small = self.pose_model.inference(frame_small)
+                if keypoints_small is None:
                     cap.release(); continue
+
+                # Restore Coordinates to 1080p
+                scale_x = w / TARGET_POSE_W
+                scale_y = h / TARGET_POSE_H
+                
+                keypoints = keypoints_small.copy()
+                keypoints[:, 0] *= scale_x
+                keypoints[:, 1] *= scale_y
 
                 valid_kpts = [kp[:2] for kp in keypoints if kp[2] > 0.4]
                 if len(valid_kpts) < 3:
@@ -275,11 +292,18 @@ class AutoLabeler:
                     ret, frame = cap.read()
                     if not ret: break
                     
-                    # 이미 압축된 영상이므로 모든 프레임을 저장
-                    kpts = self.pose_model.inference(frame)
+                    # [Optimization] Apply the same resizing logic for every frame
+                    frame_small = cv2.resize(frame, (TARGET_POSE_W, TARGET_POSE_H))
+                    kpts_small = self.pose_model.inference(frame_small)
+                    
                     mask = video_masks.get(curr_f_idx, None)
                     
-                    if kpts is not None and mask is not None:
+                    if kpts_small is not None and mask is not None:
+                        # Restore Scale
+                        kpts = kpts_small.copy()
+                        kpts[:, 0] *= scale_x
+                        kpts[:, 1] *= scale_y
+                        
                         if mask.ndim > 2: mask = np.squeeze(mask)
                         fname = f"{global_idx:06d}"
                         cv2.imwrite(os.path.join(out_imgs, f"{fname}.jpg"), frame)

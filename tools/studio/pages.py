@@ -635,7 +635,7 @@ class Page4_AiTraining(QWidget):
         self.btn_step2.setVisible(False)
         
         # [New] 학습 중단 버튼 (처음엔 숨김)
-        self.btn_stop = QPushButton("🛑 학습 중단 및 모델 생성")
+        self.btn_stop = QPushButton("🛑 중단")
         self.btn_stop.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; border-radius: 8px; padding: 15px; border: none;")
         self.btn_stop.clicked.connect(self.stop_training)
         self.btn_stop.setVisible(False)
@@ -644,10 +644,18 @@ class Page4_AiTraining(QWidget):
         self.btn_home.setStyleSheet("background: #444; color: white; padding: 15px; border-radius: 8px; border:none;")
         self.btn_home.clicked.connect(self.go_home.emit)
         
-        btn_layout.addWidget(self.btn_step1)
-        btn_layout.addWidget(self.btn_step2)
-        btn_layout.addWidget(self.btn_stop) # 버튼 추가
-        btn_layout.addWidget(self.btn_home)
+        # Layout Assembly
+        # 1. Main Action Buttons (Left/Center) - 3의 비율로 넓게
+        btn_layout.addWidget(self.btn_step1, stretch=3)
+        btn_layout.addWidget(self.btn_step2, stretch=3)
+        
+        # 2. Control/Nav Buttons (Right - Split Space) - 1의 비율로 좁게 (홈/중단 공유)
+        nav_layout = QHBoxLayout()
+        nav_layout.setSpacing(10)
+        nav_layout.addWidget(self.btn_stop, stretch=1) # 중단 버튼 (보일 때만 공간 차지)
+        nav_layout.addWidget(self.btn_home, stretch=1) # 홈 버튼
+        
+        btn_layout.addLayout(nav_layout, stretch=1)
         
         layout.addLayout(btn_layout)
 
@@ -769,7 +777,7 @@ class Page4_AiTraining(QWidget):
         self.btn_step2.setVisible(False) # 숨김
         self.btn_stop.setVisible(True)   # 중단 버튼 보임
         self.btn_stop.setEnabled(True)
-        self.btn_stop.setText("🛑 학습 중단 및 모델 생성")
+        self.btn_stop.setText("🛑 학습 중단")
         
         self.list_widget.setVisible(False)
         self.log_view.setVisible(True)
@@ -788,7 +796,7 @@ class Page4_AiTraining(QWidget):
         if self.worker:
             self.worker.request_early_stop()
             self.btn_stop.setEnabled(False)
-            self.btn_stop.setText("중단 요청됨... (저장 대기 중)")
+            self.btn_stop.setText("중단 요청됨...")
 
     def on_training_finished(self):
         self.btn_stop.setVisible(False)

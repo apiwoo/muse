@@ -215,6 +215,16 @@ class Trainer:
         self.epochs = epochs
         self.batch_size = batch_size
         
+        # [Config] Input Resolution based on Task
+        # Seg: 960x544 (Detailed edge detection)
+        # Pose: 640x352 (Fast skeletal tracking)
+        if self.task == 'pose':
+            self.input_size = (640, 352)
+        else:
+            self.input_size = (960, 544)
+            
+        print(f"[TRAINER] Task: {self.task.upper()}, Input Size: {self.input_size}")
+        
         # [New] Advanced Loss Functions
         # OHEM: Hard mining for better segmentation edges
         self.ohem_loss = OhemBCELoss(thresh=0.7) 
@@ -232,7 +242,8 @@ class Trainer:
             self._train_single_profile(profile, i, total)
 
     def _train_single_profile(self, profile, profile_idx, total_profiles):
-        dataset = MuseDataset(os.path.join(self.root_data_dir, profile))
+        # [Modified] Pass self.input_size to Dataset
+        dataset = MuseDataset(os.path.join(self.root_data_dir, profile), input_size=self.input_size)
         if len(dataset) == 0: return
         
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True)
