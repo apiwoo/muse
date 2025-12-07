@@ -19,6 +19,9 @@ from ai.consensus_engine import ConsensusEngine
 from graphics.adaptive_bg import AdaptiveBackground
 from graphics.beauty_engine import BeautyEngine
 
+# [New] Face Model Connection
+from ai.tracking.facemesh import FaceMesh
+
 try:
     import cupy as cp
 except ImportError:
@@ -51,6 +54,10 @@ class BeautyWorker(QThread):
         
         self.pending_profile_index = -1
         self.pending_bg_capture = False
+        
+        # [New] Face Tracker Initialization
+        print(f"[ENGINE] Initializing Face Tracker (MediaPipe)...")
+        self.face_tracker = FaceMesh(self.root_dir)
 
     def run(self):
         print(f"[ENGINE] Launching V5 Pipeline (Profile: {self.current_profile_name})...")
@@ -140,6 +147,15 @@ class BeautyWorker(QThread):
             # --- Pipeline ---
             t_ai_start = time.perf_counter()
             alpha_matte, keypoints = self.ai_engine.process(frame_gpu)
+            
+            # [New] Face Tracking (CPU)
+            # MediaPipe는 CPU 이미지를 요구하므로 변환
+            if hasattr(frame_gpu, 'get'):
+                frame_bgr_cpu = frame_gpu.get()
+            else:
+                frame_bgr_cpu = frame_gpu
+            
+            faces = self.face_tracker.process(frame_bgr_cpu)
             t_ai_end = time.perf_counter()
             
             if alpha_matte is not None:
@@ -154,9 +170,10 @@ class BeautyWorker(QThread):
             self.beauty_engine.bg_gpu = clean_bg 
             
             t_beauty_start = time.perf_counter()
+            # [Fix] Pass detected 'faces' instead of empty list
             frame_out_gpu = self.beauty_engine.process(
                 frame_gpu, 
-                faces=[], 
+                faces=faces, 
                 body_landmarks=keypoints, 
                 params=current_params, 
                 mask=alpha_matte

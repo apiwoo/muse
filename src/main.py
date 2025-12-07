@@ -53,7 +53,9 @@ class MuseApp(MainWindow):
             super().keyPressEvent(event)
             return
 
-        pressed_seq = QKeySequence(key_int | modifiers)
+        # [Fix] PySide6 Compatibility: Use keyCombination() instead of bitwise OR
+        # This fixes the TypeError: 'PySide6.QtCore.QKeyCombination.__init__' called with wrong argument types
+        pressed_seq = QKeySequence(event.keyCombination())
         
         for idx, p_name in enumerate(current_profiles):
             config = self.worker.profile_mgr.get_config(p_name)

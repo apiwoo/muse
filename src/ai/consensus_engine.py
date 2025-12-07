@@ -128,6 +128,9 @@ class ConsensusEngine:
         1. MODNet: Generate Alpha Matte (Background Removal)
         2. ViTPose: Extract Body Keypoints (For Body Morphing)
         
+        [Updated V7.1] ViTPose masking logic removed as requested.
+        Returns pure MODNet result and pure ViTPose result.
+        
         Returns: (matte_1080, kpts)
         """
         if frame_gpu is None: return None, None
@@ -175,24 +178,19 @@ class ConsensusEngine:
         if raw_matte is None:
             return cp.zeros((h, w), dtype=cp.float32), kpts
 
-        # [Optimization] Apply Hull Mask BEFORE Upscaling
-        # 저해상도(544p)에서 마스킹을 수행하여 CPU 부하를 최소화합니다.
+        # [Changed] Apply Hull Mask Logic REMOVED
+        # 사용자 요청에 의해 MODNet 결과값을 ViTPose로 수정하지 않고 원본 그대로 사용합니다.
+        # 저해상도(544p) Matte 추출
         matte_small = raw_matte[0, 0] # (544, 960)
         
-        if kpts is not None:
-             # Keypoints를 544p 좌표계로 변환 (High-Res -> Low-Res)
-             kpts_small = kpts.copy()
-             kpts_small[:, 0] *= zoom_w # Scale X
-             kpts_small[:, 1] *= zoom_h # Scale Y
-             
-             # 저해상도에서 Hull Mask 생성 (매우 빠름)
-             hull_mask_small = self._create_hull_mask(kpts_small, self.target_w, self.target_h)
-             
-             # Apply Mask immediately
-             matte_small = matte_small * hull_mask_small
+        # (ViTPose 마스킹 로직 삭제됨)
+        # if kpts is not None:
+        #      kpts_small = kpts.copy() ...
+        #      hull_mask_small = ...
+        #      matte_small = matte_small * hull_mask_small
 
         # [Step 5] Upscale Matte back to 1080p
-        # 이미 마스킹된 작은 매트를 업스케일링하므로 노이즈가 더 적음
+        # 마스킹 없이 순수 MODNet 결과를 업스케일링합니다.
         if HAS_CUPYX:
             zoom_h_inv = h / self.target_h
             zoom_w_inv = w / self.target_w
@@ -211,9 +209,8 @@ class ConsensusEngine:
 
     def _create_hull_mask(self, kpts, w, h):
         """
-        Creates a convex hull mask from keypoints on GPU.
-        ViTPose 좌표를 기반으로 사람 영역 밖의 노이즈를 제거합니다.
-        [Optimization] 544p 해상도 기준에 맞춰 커널 크기 최적화됨.
+        (Deprecated) Creates a convex hull mask from keypoints on GPU.
+        사용자 요청으로 인해 이 함수는 더 이상 메인 파이프라인에서 호출되지 않습니다.
         """
         # 신뢰도 0.2 이상인 점만 사용
         valid_pts = kpts[kpts[:, 2] > 0.2, :2].astype(np.int32)
@@ -224,11 +221,10 @@ class ConsensusEngine:
             cv2.fillConvexPoly(mask, hull, 1.0)
             
             # Dilate to include hair/accessories (넉넉하게 확장)
-            # [Updated] 150 -> 80 (해상도가 544p로 줄었으므로 이에 맞춰 조정)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (80, 80))
             mask = cv2.dilate(mask, kernel, iterations=1)
         else:
-            # 감지된 포인트가 너무 적으면 마스킹을 하지 않음 (MODNet 전체 신뢰)
+            # 감지된 포인트가 너무 적으면 마스킹을 하지 않음
             return cp.ones((h, w), dtype=cp.float32)
             
         return cp.asarray(mask)
