@@ -1,5 +1,6 @@
 # Project MUSE - consensus_engine.py
 # V8 Hybrid: Dynamic Switching (Personalized Student vs Default MODNet+ViTPose)
+# Optimized: Full GPU Pipeline & Lazy Loading (Smart Memory Management)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
@@ -32,16 +33,29 @@ except ImportError:
 
 class TensorRTModel:
     """Generic TensorRT Wrapper for Segmentation Models"""
-    def __init__(self, engine_path, input_shape=(1, 3, 544, 960)):
+    def __init__(self, engine_path, input_shape=(1, 3, 544, 960), lazy=False):
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.engine_path = engine_path
         self.input_shape = input_shape # NCHW
         self.is_ready = False
         self.input_name = None
         
-        if os.path.exists(engine_path):
+        # Lazy Loading: Init variables but don't load engine yet
+        self.context = None
+        self.d_input = None
+        self.d_output = None
+        self.bindings = []
+        
+        if not lazy:
+            self.load()
+
+    def load(self):
+        if self.is_ready: return
+        
+        if os.path.exists(self.engine_path):
             try:
-                with open(engine_path, "rb") as f, trt.Runtime(self.logger) as runtime:
+                print(f"[AI] Loading TensorRT Engine: {os.path.basename(self.engine_path)}...")
+                with open(self.engine_path, "rb") as f, trt.Runtime(self.logger) as runtime:
                     self.engine = runtime.deserialize_cuda_engine(f.read())
                 
                 self.context = self.engine.create_execution_context()
@@ -51,17 +65,17 @@ class TensorRTModel:
                 except AttributeError:
                     self.input_name = self.engine.get_binding_name(0)
 
-                self.d_input = cp.zeros(input_shape, dtype=cp.float32)
-                self.d_output = cp.zeros((1, 1, input_shape[2], input_shape[3]), dtype=cp.float32)
+                self.d_input = cp.zeros(self.input_shape, dtype=cp.float32)
+                self.d_output = cp.zeros((1, 1, self.input_shape[2], self.input_shape[3]), dtype=cp.float32)
                 self.bindings = [int(self.d_input.data.ptr), int(self.d_output.data.ptr)]
                 
                 self.is_ready = True
-                print(f"[AI] Loaded TRT Engine: {os.path.basename(engine_path)}")
+                print(f"[AI] [OK] Engine Loaded: {os.path.basename(self.engine_path)}")
                 
             except Exception as e:
-                print(f"[ERROR] Failed to load {engine_path}: {e}")
+                print(f"[ERROR] Failed to load {self.engine_path}: {e}")
         else:
-            print(f"[WARNING] Engine not found: {engine_path}")
+            print(f"[WARNING] Engine not found: {self.engine_path}")
 
     def infer(self, img_gpu_norm):
         if not self.is_ready: return None
@@ -78,29 +92,21 @@ class ConsensusEngine:
     def __init__(self, root_dir):
         """
         [Hybrid Mode V8]
-        - Default: MODNet + ViTPose
+        - Default: MODNet + ViTPose (Lazy Loaded)
         - Personal: DualInferenceTRT (Student)
         """
         self.root_dir = root_dir
         self.model_dir = os.path.join(root_dir, "assets", "models")
         self.personal_dir = os.path.join(self.model_dir, "personal")
         
-        print("[AI] Initializing Hybrid Consensus Engine...")
+        print("[AI] Initializing Hybrid Consensus Engine (Lazy Mode)...")
 
-        # 1. Default Models (Always Loaded for Fallback)
+        # 1. Init Default Models Placeholders (Do NOT load yet)
         self.pose_model = None
-        try:
-            pose_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
-            if os.path.exists(pose_path) and VitPoseTrt:
-                self.pose_model = VitPoseTrt(pose_path)
-            else:
-                print("[WARNING] ViTPose not available.")
-        except Exception as e:
-            print(f"[WARNING] ViTPose Init Failed: {e}")
-
         self.modnet = TensorRTModel(
             os.path.join(self.model_dir, "segmentation", "modnet_544p.engine"),
-            input_shape=(1, 3, 544, 960)
+            input_shape=(1, 3, 544, 960),
+            lazy=True # Wait until needed
         )
 
         # 2. Personal Models State
@@ -111,6 +117,23 @@ class ConsensusEngine:
         # Preprocessing Constants
         self.mean = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
         self.std = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
+
+    def _ensure_default_models_loaded(self):
+        """Load default models only if they aren't loaded yet."""
+        if self.pose_model is None:
+            print("[AI] [Fallback] Loading ViTPose (Default Strategy)...")
+            try:
+                pose_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
+                if os.path.exists(pose_path) and VitPoseTrt:
+                    self.pose_model = VitPoseTrt(pose_path)
+                else:
+                    print("[WARNING] ViTPose engine not found.")
+            except Exception as e:
+                print(f"[WARNING] ViTPose Init Failed: {e}")
+        
+        if not self.modnet.is_ready:
+            print("[AI] [Fallback] Loading MODNet (Default Strategy)...")
+            self.modnet.load()
 
     def set_profile(self, profile_name):
         """
@@ -138,37 +161,32 @@ class ConsensusEngine:
                 self.current_student = student
                 self.use_personal = True
                 print(f"[AI] >>> Strategy Switched: PERSONALIZED MODEL ({profile_name})")
+                # [Optimization] We do NOT load ViTPose/MODNet here.
                 return
 
         # Fallback to Default
+        print(f"[AI] No personal model for '{profile_name}' or load failed.")
+        self._ensure_default_models_loaded() # Load heavy models NOW
+        
         self.use_personal = False
         self.current_student = None
         print(f"[AI] >>> Strategy Switched: DEFAULT MODEL (MODNet + ViTPose)")
 
     def process(self, frame_gpu):
         """
-        Returns: (matte_1080, kpts)
+        Returns: (matte_1080_gpu, kpts_cpu)
         """
         if frame_gpu is None: return None, None
         
         # ==========================================================
-        # STRATEGY A: Personal Model (Student)
+        # STRATEGY A: Personal Model (Student) [OPTIMIZED]
         # ==========================================================
         if self.use_personal and self.current_student:
-            # Student expects CPU BGR image (via OpenCV)
-            # Future Optimization: Update Student to accept GPU tensor directly
-            if hasattr(frame_gpu, 'get'):
-                frame_cpu = frame_gpu.get()
-            else:
-                frame_cpu = frame_gpu
+            # Full GPU Pipeline
+            mask_gpu, kpts = self.current_student.infer(frame_gpu)
             
-            mask, kpts = self.current_student.infer(frame_cpu)
-            
-            # Mask to GPU (if needed by downstream)
-            if mask is not None:
-                mask_gpu = cp.asarray(mask).astype(cp.float32) / 255.0
-            else:
-                h, w = frame_cpu.shape[:2]
+            if mask_gpu is None:
+                h, w = frame_gpu.shape[:2]
                 mask_gpu = cp.zeros((h, w), dtype=cp.float32)
                 
             return mask_gpu, kpts
@@ -176,6 +194,10 @@ class ConsensusEngine:
         # ==========================================================
         # STRATEGY B: Default (MODNet + ViTPose)
         # ==========================================================
+        # Ensure default models are ready (just in case)
+        if not self.modnet.is_ready:
+            self._ensure_default_models_loaded()
+
         h, w = frame_gpu.shape[:2]
         
         # 1. MODNet (Background)
@@ -200,6 +222,7 @@ class ConsensusEngine:
         kpts = None
         if self.pose_model:
             try:
+                # ViTPose wrapper logic
                 if hasattr(frame_gpu, 'get'):
                     frame_cpu = frame_gpu.get()
                 else:

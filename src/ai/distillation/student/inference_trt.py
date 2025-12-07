@@ -1,12 +1,15 @@
 # Project MUSE - inference_trt.py
 # Dual TensorRT Inference (Seg & Pose Split)
+# Optimized: Full GPU Pipeline (Zero-Copy) using Pure CuPy
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
 import cupy as cp
-import cv2
 import os
 import numpy as np
+
+# [Note] Removing cv2 dependency for core inference to ensure GPU purity.
+# If needed for debugging, import it locally.
 
 class DualInferenceTRT:
     """
@@ -59,37 +62,79 @@ class DualInferenceTRT:
         self.bindings_seg = [int(self.d_input.data.ptr), int(self.d_seg.data.ptr)]
         self.bindings_pose = [int(self.d_input.data.ptr), int(self.d_pose.data.ptr)]
 
-    def infer(self, frame_bgr):
-        if not self.is_ready or frame_bgr is None: return None, None
+    def _resize_gpu_nearest(self, img, new_h, new_w):
+        """
+        Pure CuPy Nearest Neighbor Resizing.
+        Fastest method, sufficient for model input.
+        img: (H, W, C)
+        """
+        h, w = img.shape[:2]
         
-        h_orig, w_orig = frame_bgr.shape[:2]
+        # Generate grid
+        # We want to sample from the original image at these coordinates
+        # Using integer division for nearest neighbor behavior
         
-        # 1. Preprocess (One time)
-        img_resized = cv2.resize(frame_bgr, (self.input_w, self.input_h))
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        # y_indices: (new_h, 1)
+        y_indices = (cp.arange(new_h, dtype=cp.int32) * h // new_h).reshape(-1, 1)
+        # x_indices: (1, new_w)
+        x_indices = (cp.arange(new_w, dtype=cp.int32) * w // new_w).reshape(1, -1)
         
-        img_gpu = cp.asarray(img_rgb).transpose(2,0,1).astype(cp.float32) / 255.0
-        img_gpu = img_gpu.reshape(1, 3, self.input_h, self.input_w)
-        img_gpu = (img_gpu - self.mean) / self.std
+        # Broadcast to (new_h, new_w, C)
+        resized = img[y_indices, x_indices, :]
+        return resized
+
+    def infer(self, frame_input):
+        """
+        :param frame_input: Could be CPU numpy or GPU cupy array (BGR)
+        :return: mask_gpu (1080p), keypoints_cpu
+        """
+        if not self.is_ready or frame_input is None: return None, None
         
-        cp.copyto(self.d_input, img_gpu)
+        # 1. Input Handling (Zero-Copy if possible)
+        if hasattr(frame_input, 'device'):
+            img_gpu_src = frame_input
+            h_orig, w_orig = frame_input.shape[:2]
+        else:
+            # Fallback: Upload CPU -> GPU
+            img_gpu_src = cp.asarray(frame_input)
+            h_orig, w_orig = frame_input.shape[:2]
+
+        # 2. Preprocess on GPU (Pure CuPy)
+        # Resize: 1080p -> 544p
+        img_resized = self._resize_gpu_nearest(img_gpu_src, self.input_h, self.input_w)
+
+        # BGR -> RGB & Normalize
+        # Slice [..., ::-1] converts BGR to RGB
+        # Transpose: (H, W, C) -> (B, C, H, W) where B=1
+        img_pre = img_resized[..., ::-1].transpose(2,0,1).astype(cp.float32) / 255.0
+        img_pre = img_pre.reshape(1, 3, self.input_h, self.input_w)
+        img_pre = (img_pre - self.mean) / self.std
         
-        # 2. Execute (Sequential execution on GPU is very fast)
-        # Could use CUDA streams for parallel execution, but sequential is fine for this size
+        # Copy to Engine Buffer
+        cp.copyto(self.d_input, img_pre)
+        
+        # 3. Execute
         self.ctx_seg.execute_v2(bindings=self.bindings_seg)
         self.ctx_pose.execute_v2(bindings=self.bindings_pose)
         
-        # 3. Postprocess Seg
-        mask_gpu = 1.0 / (1.0 + cp.exp(-self.d_seg)) # Sigmoid
-        mask_gpu = (mask_gpu > 0.5).astype(cp.float32).squeeze()
-        mask_cpu = cp.asnumpy(mask_gpu * 255).astype(np.uint8)
-        mask_final = cv2.resize(mask_cpu, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
+        # 4. Postprocess Seg (Keep on GPU)
+        # Sigmoid: 1 / (1 + exp(-x))
+        mask_prob = 1.0 / (1.0 + cp.exp(-self.d_seg)) 
+        mask_small = (mask_prob > 0.5).astype(cp.float32).squeeze() # (544, 960)
         
-        # 4. Postprocess Pose
+        # Upscale Mask to Original Resolution (GPU Nearest)
+        # We can reuse the same resizing logic but for 2D array
+        # _resize_gpu_nearest expects (H, W, C), so we add a dim temporarily
+        mask_small_3d = mask_small[..., None] # (H, W, 1)
+        mask_final_gpu = self._resize_gpu_nearest(mask_small_3d, h_orig, w_orig)
+        mask_final_gpu = mask_final_gpu.squeeze() # (H, W)
+
+        # 5. Postprocess Pose (CPU for Parsing)
+        # Heatmap extraction logic is complex on GPU without kernels, keeping on CPU for now
         heatmaps = cp.asnumpy(self.d_pose.squeeze())
         keypoints = self._parse_heatmaps(heatmaps, (w_orig, h_orig))
         
-        return mask_final, keypoints
+        return mask_final_gpu, keypoints
 
     def _parse_heatmaps(self, heatmaps, original_size):
         kpts = []
@@ -97,7 +142,10 @@ class DualInferenceTRT:
         _, h_map, w_map = heatmaps.shape
         scale_x = w_orig / w_map
         scale_y = h_orig / h_map
-
+        
+        # Use OpenCV minMaxLoc on CPU (Fast enough for 17 small heatmaps)
+        import cv2 
+        
         for i in range(17):
             hm = heatmaps[i]
             min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(hm)
