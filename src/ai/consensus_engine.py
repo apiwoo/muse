@@ -1,5 +1,5 @@
 # Project MUSE - consensus_engine.py
-# V7 Hybrid: MODNet (Matting) + ViTPose (Body Morphing Support)
+# V8 Hybrid: Dynamic Switching (Personalized Student vs Default MODNet+ViTPose)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
@@ -17,12 +17,18 @@ except ImportError:
     HAS_CUPYX = False
     print("[WARNING] cupyx not found. GPU resizing might differ.")
 
-# Import ViTPose (Teacher B) - 체형 보정을 위해 필수
+# Import ViTPose (Teacher B)
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from ai.tracking.vitpose_trt import VitPoseTrt
 except ImportError:
     VitPoseTrt = None
+
+# Import Student (Personalized)
+try:
+    from ai.distillation.student.inference_trt import DualInferenceTRT
+except ImportError:
+    DualInferenceTRT = None
 
 class TensorRTModel:
     """Generic TensorRT Wrapper for Segmentation Models"""
@@ -40,19 +46,13 @@ class TensorRTModel:
                 
                 self.context = self.engine.create_execution_context()
                 
-                # [Fix] 입력 텐서 이름 찾기 (TensorRT 8.5+ 호환)
                 try:
                     self.input_name = self.engine.get_tensor_name(0)
                 except AttributeError:
-                    # 구버전 API Fallback
                     self.input_name = self.engine.get_binding_name(0)
 
-                # Buffer Allocation
                 self.d_input = cp.zeros(input_shape, dtype=cp.float32)
-                # Output shape: (1, 1, H, W) for matte
                 self.d_output = cp.zeros((1, 1, input_shape[2], input_shape[3]), dtype=cp.float32)
-                
-                # 바인딩 주소 연결
                 self.bindings = [int(self.d_input.data.ptr), int(self.d_output.data.ptr)]
                 
                 self.is_ready = True
@@ -64,139 +64,159 @@ class TensorRTModel:
             print(f"[WARNING] Engine not found: {engine_path}")
 
     def infer(self, img_gpu_norm):
-        """
-        img_gpu_norm: (1, 3, H, W) Normalized CuPy Array
-        """
         if not self.is_ready: return None
-        
-        # [CRITICAL FIX] 동적 쉐이프 엔진은 실행 전 반드시 입력 크기를 명시해야 함
         if self.input_name:
             self.context.set_input_shape(self.input_name, img_gpu_norm.shape)
         else:
-            # 구버전 방식 (인덱스 기반)
             self.context.set_binding_shape(0, img_gpu_norm.shape)
 
         cp.copyto(self.d_input, img_gpu_norm)
-        
-        # 추론 실행 (V2 비동기 실행)
         self.context.execute_v2(bindings=self.bindings)
-        
         return self.d_output
 
 class ConsensusEngine:
     def __init__(self, root_dir):
         """
-        [Hybrid Mode] MODNet + ViTPose
-        - 배경 분리: MODNet 단독 (속도 최적화)
-        - 체형 보정: ViTPose 활성화 (필수)
+        [Hybrid Mode V8]
+        - Default: MODNet + ViTPose
+        - Personal: DualInferenceTRT (Student)
         """
         self.root_dir = root_dir
-        model_dir = os.path.join(root_dir, "assets", "models")
+        self.model_dir = os.path.join(root_dir, "assets", "models")
+        self.personal_dir = os.path.join(self.model_dir, "personal")
         
-        print("[AI] Initializing Hybrid Engine (MODNet + ViTPose)...")
+        print("[AI] Initializing Hybrid Consensus Engine...")
 
-        # 1. ViTPose (Body Morphing Guide)
-        # 체형 보정을 위해 반드시 필요합니다.
+        # 1. Default Models (Always Loaded for Fallback)
+        self.pose_model = None
         try:
-            pose_path = os.path.join(model_dir, "tracking", "vitpose_huge.engine")
+            pose_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
             if os.path.exists(pose_path) and VitPoseTrt:
                 self.pose_model = VitPoseTrt(pose_path)
             else:
-                self.pose_model = None
-                print("[WARNING] ViTPose engine not found or module missing. Body morphing will be disabled.")
+                print("[WARNING] ViTPose not available.")
         except Exception as e:
-            self.pose_model = None
             print(f"[WARNING] ViTPose Init Failed: {e}")
 
-        # 2. MODNet (Detailer) - Optimized for 544p (qHD+)
-        # Resolution: 960x544 (16:9 Aspect Ratio, Stride 32)
-        self.target_w = 960
-        self.target_h = 544
-        
         self.modnet = TensorRTModel(
-            os.path.join(model_dir, "segmentation", "modnet_544p.engine"),
-            input_shape=(1, 3, self.target_h, self.target_w)
+            os.path.join(self.model_dir, "segmentation", "modnet_544p.engine"),
+            input_shape=(1, 3, 544, 960)
         )
 
+        # 2. Personal Models State
+        self.student_models = {} # Cache loaded students
+        self.current_student = None
+        self.use_personal = False
+        
         # Preprocessing Constants
         self.mean = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
         self.std = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
 
+    def set_profile(self, profile_name):
+        """
+        Switch AI Strategy based on Profile.
+        Checks for 'student_seg_{profile}.engine' and 'student_pose_{profile}.engine'.
+        """
+        seg_path = os.path.join(self.personal_dir, f"student_seg_{profile_name}.engine")
+        pose_path = os.path.join(self.personal_dir, f"student_pose_{profile_name}.engine")
+        
+        # Check if personal model exists
+        if os.path.exists(seg_path) and os.path.exists(pose_path) and DualInferenceTRT:
+            print(f"[AI] Found Personal Model for '{profile_name}'.")
+            
+            # Load if not in cache
+            if profile_name not in self.student_models:
+                print(f"[AI] Loading Student Engine into VRAM...")
+                try:
+                    self.student_models[profile_name] = DualInferenceTRT(seg_path, pose_path)
+                except Exception as e:
+                    print(f"[ERROR] Student Load Failed: {e}")
+            
+            # Activate
+            student = self.student_models.get(profile_name)
+            if student and student.is_ready:
+                self.current_student = student
+                self.use_personal = True
+                print(f"[AI] >>> Strategy Switched: PERSONALIZED MODEL ({profile_name})")
+                return
+
+        # Fallback to Default
+        self.use_personal = False
+        self.current_student = None
+        print(f"[AI] >>> Strategy Switched: DEFAULT MODEL (MODNet + ViTPose)")
+
     def process(self, frame_gpu):
         """
-        Hybrid Pipeline:
-        1. MODNet: Generate Alpha Matte (Background Removal)
-        2. ViTPose: Extract Body Keypoints (For Body Morphing)
-        
-        [Updated V7.1] ViTPose masking logic removed as requested.
-        Returns pure MODNet result and pure ViTPose result.
-        
         Returns: (matte_1080, kpts)
         """
         if frame_gpu is None: return None, None
-
-        h, w = frame_gpu.shape[:2] # Expect 1080, 1920
         
-        # [Step 1] Internal Downscaling (1080p -> 544p) for MODNet
-        # zoom factors calculation
-        zoom_h = self.target_h / h
-        zoom_w = self.target_w / w
+        # ==========================================================
+        # STRATEGY A: Personal Model (Student)
+        # ==========================================================
+        if self.use_personal and self.current_student:
+            # Student expects CPU BGR image (via OpenCV)
+            # Future Optimization: Update Student to accept GPU tensor directly
+            if hasattr(frame_gpu, 'get'):
+                frame_cpu = frame_gpu.get()
+            else:
+                frame_cpu = frame_gpu
+            
+            mask, kpts = self.current_student.infer(frame_cpu)
+            
+            # Mask to GPU (if needed by downstream)
+            if mask is not None:
+                mask_gpu = cp.asarray(mask).astype(cp.float32) / 255.0
+            else:
+                h, w = frame_cpu.shape[:2]
+                mask_gpu = cp.zeros((h, w), dtype=cp.float32)
+                
+            return mask_gpu, kpts
+
+        # ==========================================================
+        # STRATEGY B: Default (MODNet + ViTPose)
+        # ==========================================================
+        h, w = frame_gpu.shape[:2]
+        
+        # 1. MODNet (Background)
+        target_h, target_w = 544, 960
+        zoom_h = target_h / h
+        zoom_w = target_w / w
 
         if HAS_CUPYX:
             frame_small = cupyx.scipy.ndimage.zoom(frame_gpu, (zoom_h, zoom_w, 1), order=1)
         else:
             frame_cpu = cp.asnumpy(frame_gpu)
-            frame_small_cpu = cv2.resize(frame_cpu, (self.target_w, self.target_h))
+            frame_small_cpu = cv2.resize(frame_cpu, (target_w, target_h))
             frame_small = cp.asarray(frame_small_cpu)
         
-        # [Step 2] Normalize & CHW for MODNet
         img_norm = frame_small.astype(cp.float32) / 255.0
-        img_norm = img_norm.transpose(2, 0, 1).reshape(1, 3, self.target_h, self.target_w)
+        img_norm = img_norm.transpose(2, 0, 1).reshape(1, 3, target_h, target_w)
         img_norm = (img_norm - self.mean) / self.std 
         
-        # [Step 3] Inference (MODNet)
-        raw_matte = self.modnet.infer(img_norm) # (1, 1, 544, 960)
+        raw_matte = self.modnet.infer(img_norm)
         
-        # [Step 4] ViTPose Inference (Parallel-ish)
-        # ViTPose는 현재 CPU 입력을 받으므로 변환 필요
-        # (향후 GPU 입력 지원 ViTPose로 업그레이드 가능)
+        # 2. ViTPose (Keypoints)
         kpts = None
         if self.pose_model:
             try:
-                # MODNet이 GPU에서 도는 동안 CPU로 데이터 복사 준비
                 if hasattr(frame_gpu, 'get'):
                     frame_cpu = frame_gpu.get()
                 else:
                     frame_cpu = frame_gpu
-                
-                # ViTPose 실행 (Input: Original High-Res)
                 kpts = self.pose_model.inference(frame_cpu)
-            except Exception:
-                pass
+            except Exception: pass
         
-        # MODNet 결과 처리 (실패 시 빈 마스크 반환)
         if raw_matte is None:
             return cp.zeros((h, w), dtype=cp.float32), kpts
 
-        # [Changed] Apply Hull Mask Logic REMOVED
-        # 사용자 요청에 의해 MODNet 결과값을 ViTPose로 수정하지 않고 원본 그대로 사용합니다.
-        # 저해상도(544p) Matte 추출
-        matte_small = raw_matte[0, 0] # (544, 960)
+        matte_small = raw_matte[0, 0]
         
-        # (ViTPose 마스킹 로직 삭제됨)
-        # if kpts is not None:
-        #      kpts_small = kpts.copy() ...
-        #      hull_mask_small = ...
-        #      matte_small = matte_small * hull_mask_small
-
-        # [Step 5] Upscale Matte back to 1080p
-        # 마스킹 없이 순수 MODNet 결과를 업스케일링합니다.
+        # Upscale Matte
         if HAS_CUPYX:
-            zoom_h_inv = h / self.target_h
-            zoom_w_inv = w / self.target_w
+            zoom_h_inv = h / target_h
+            zoom_w_inv = w / target_w
             matte_1080 = cupyx.scipy.ndimage.zoom(matte_small, (zoom_h_inv, zoom_w_inv), order=1)
-            
-            # [Safety] Fix rounding errors in shape
             mh, mw = matte_1080.shape
             if mh != h or mw != w:
                 matte_1080 = matte_1080[:h, :w]
@@ -206,25 +226,3 @@ class ConsensusEngine:
             matte_1080 = cp.asarray(matte_1080_cpu)
 
         return matte_1080, kpts
-
-    def _create_hull_mask(self, kpts, w, h):
-        """
-        (Deprecated) Creates a convex hull mask from keypoints on GPU.
-        사용자 요청으로 인해 이 함수는 더 이상 메인 파이프라인에서 호출되지 않습니다.
-        """
-        # 신뢰도 0.2 이상인 점만 사용
-        valid_pts = kpts[kpts[:, 2] > 0.2, :2].astype(np.int32)
-        
-        mask = np.zeros((h, w), dtype=np.float32)
-        if len(valid_pts) > 4:
-            hull = cv2.convexHull(valid_pts)
-            cv2.fillConvexPoly(mask, hull, 1.0)
-            
-            # Dilate to include hair/accessories (넉넉하게 확장)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (80, 80))
-            mask = cv2.dilate(mask, kernel, iterations=1)
-        else:
-            # 감지된 포인트가 너무 적으면 마스킹을 하지 않음
-            return cp.ones((h, w), dtype=cp.float32)
-            
-        return cp.asarray(mask)

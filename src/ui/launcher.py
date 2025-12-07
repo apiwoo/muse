@@ -5,6 +5,8 @@
 import sys
 import os
 import cv2
+import glob
+import subprocess
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QListWidget, QListWidgetItem, QComboBox, QLineEdit, QMessageBox, 
@@ -13,7 +15,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap, QKeySequence
 
-# Try to import pygrabber for camera names
 try:
     from pygrabber.dshow_graph import FilterGraph
     HAS_PYGRABBER = True
@@ -27,19 +28,19 @@ class LauncherDialog(QDialog):
     [App Launcher]
     - 프로필 선택/생성/삭제
     - 카메라 ID 지정
-    - 배경 유무 확인
-    - 엔진 시작
+    - 배경 유무 확인 및 AI 모델 상태 표시
+    - 학습 도구(Studio) 실행 기능 추가
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MUSE 스튜디오 설정 (v5.1 - Hotkey Support)")
-        self.resize(850, 550)
+        self.setWindowTitle("MUSE 스튜디오 설정 (v5.2 - Hybrid Mode UI)")
+        self.resize(850, 600)
         self.setStyleSheet("""
             QDialog { background-color: #1E1E1E; color: #EEE; font-family: 'Segoe UI'; }
             QGroupBox { border: 1px solid #444; border-radius: 5px; margin-top: 20px; font-weight: bold; color: #00ADB5; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
             QListWidget { background-color: #252525; border: 1px solid #333; color: white; border-radius: 5px; font-size: 14px; }
-            QListWidget::item { padding: 8px; }
+            QListWidget::item { padding: 10px; }
             QListWidget::item:selected { background-color: #00ADB5; color: white; }
             QLabel { color: #CCC; }
             QLineEdit, QComboBox, QKeySequenceEdit { background-color: #333; border: 1px solid #555; padding: 5px; color: white; border-radius: 4px; }
@@ -49,11 +50,17 @@ class LauncherDialog(QDialog):
             QPushButton#Primary:hover { background-color: #00C4CC; }
             QPushButton#Danger { background-color: #D32F2F; }
             QPushButton#Danger:hover { background-color: #E53935; }
+            QPushButton#Accent { background-color: #E65100; color: white; font-weight: bold; } 
+            QPushButton#Accent:hover { background-color: #FF6F00; }
         """)
 
         self.pm = ProfileManager()
         self.selected_profile = None
         self.available_cameras = self._scan_cameras()
+        
+        # 모델 경로 확인용
+        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.model_dir = os.path.join(self.root_dir, "assets", "models", "personal")
 
         self._init_ui()
         self._refresh_list()
@@ -67,8 +74,6 @@ class LauncherDialog(QDialog):
                 for i, name in enumerate(devices):
                     cams.append((i, name))
             except: pass
-        
-        # Fallback if empty
         if not cams:
             for i in range(5):
                 cams.append((i, f"Camera Device {i}"))
@@ -93,16 +98,13 @@ class LauncherDialog(QDialog):
         # Create New
         grp_create = QGroupBox("새 프로필 생성")
         create_layout = QVBoxLayout()
-        
         self.input_new_name = QLineEdit()
         self.input_new_name.setPlaceholderText("프로필 이름 (예: side_cam)")
         
-        # [New] Hotkey Input for creation
         hk_layout = QHBoxLayout()
         hk_layout.addWidget(QLabel("단축키:"))
         self.input_new_hotkey = QKeySequenceEdit()
         self.input_new_hotkey.setKeySequence(QKeySequence(""))
-        self.input_new_hotkey.setToolTip("이 프로필을 불러올 단축키를 입력하세요 (예: F1, Ctrl+1)")
         hk_layout.addWidget(self.input_new_hotkey)
         
         btn_create = QPushButton("생성")
@@ -111,38 +113,45 @@ class LauncherDialog(QDialog):
         create_layout.addWidget(self.input_new_name)
         create_layout.addLayout(hk_layout)
         create_layout.addWidget(btn_create)
-        
         grp_create.setLayout(create_layout)
         left_panel.addWidget(grp_create)
+        
+        # [New] Studio Launch Button
+        btn_launch_studio = QPushButton("🎥 AI 모델 학습 스튜디오 열기")
+        btn_launch_studio.setObjectName("Accent")
+        btn_launch_studio.setFixedHeight(45)
+        btn_launch_studio.setToolTip("데이터 녹화 및 AI 학습 도구를 실행합니다.")
+        btn_launch_studio.clicked.connect(self._launch_studio_tool)
+        left_panel.addWidget(btn_launch_studio)
 
         main_layout.addLayout(left_panel, stretch=2)
 
         # === RIGHT: Settings ===
         right_panel = QVBoxLayout()
         
-        # Info Group
         grp_info = QGroupBox("선택된 프로필 설정")
         info_layout = QVBoxLayout()
         info_layout.setSpacing(15)
         
-        # Camera Select
         info_layout.addWidget(QLabel("연결된 카메라:"))
         self.combo_cam = QComboBox()
         for idx, name in self.available_cameras:
             self.combo_cam.addItem(f"[{idx}] {name}", idx)
         info_layout.addWidget(self.combo_cam)
         
-        # [New] Hotkey Edit
         info_layout.addWidget(QLabel("지정 단축키:"))
         self.edit_hotkey = QKeySequenceEdit()
         info_layout.addWidget(self.edit_hotkey)
         
-        # Background Status
+        # Status Labels
         self.lbl_bg_status = QLabel("배경 상태: 확인 중...")
         self.lbl_bg_status.setStyleSheet("font-size: 12px; color: #888;")
         info_layout.addWidget(self.lbl_bg_status)
+        
+        self.lbl_model_status = QLabel("모델 상태: 확인 중...")
+        self.lbl_model_status.setStyleSheet("font-size: 12px; color: #888;")
+        info_layout.addWidget(self.lbl_model_status)
 
-        # Save Button
         btn_save = QPushButton("설정 저장")
         btn_save.clicked.connect(self._save_current_settings)
         info_layout.addWidget(btn_save)
@@ -150,7 +159,6 @@ class LauncherDialog(QDialog):
         grp_info.setLayout(info_layout)
         right_panel.addWidget(grp_info)
 
-        # Delete Button
         btn_delete = QPushButton("프로필 삭제")
         btn_delete.setObjectName("Danger")
         btn_delete.clicked.connect(self._delete_profile)
@@ -158,11 +166,10 @@ class LauncherDialog(QDialog):
 
         right_panel.addStretch()
 
-        # Start Button
         self.btn_start = QPushButton("MUSE 방송 시작  🚀")
         self.btn_start.setObjectName("Primary")
         self.btn_start.setFixedHeight(50)
-        self.btn_start.clicked.connect(self.accept) # Close dialog with Accepted result
+        self.btn_start.clicked.connect(self.accept)
         right_panel.addWidget(self.btn_start)
 
         main_layout.addLayout(right_panel, stretch=3)
@@ -177,9 +184,18 @@ class LauncherDialog(QDialog):
             hotkey = cfg.get("hotkey", "")
             if not hotkey: hotkey = "(없음)"
             
-            item_text = f"[{hotkey}]  {p.upper()}"
+            # [New] Check for Model
+            has_model = self._check_model_exists(p)
+            status_tag = "[모델 보유]" if has_model else "[기본 엔진]"
+            
+            item_text = f"{status_tag}  {p.upper()}  (Key: {hotkey})"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, p)
+            
+            # Highlight if model exists
+            if has_model:
+                item.setForeground(Qt.cyan)
+                
             self.list_widget.addItem(item)
         
         if self.list_widget.count() > 0:
@@ -187,11 +203,15 @@ class LauncherDialog(QDialog):
                 self.list_widget.setCurrentRow(0)
                 self._on_profile_selected(self.list_widget.item(0))
             else:
-                # Keep selection if possible
                 items = self.list_widget.findItems(self.selected_profile.upper(), Qt.MatchContains)
                 if items:
                     self.list_widget.setCurrentItem(items[0])
                     self._on_profile_selected(items[0])
+
+    def _check_model_exists(self, profile_name):
+        seg_path = os.path.join(self.model_dir, f"student_seg_{profile_name}.engine")
+        pose_path = os.path.join(self.model_dir, f"student_pose_{profile_name}.engine")
+        return os.path.exists(seg_path) and os.path.exists(pose_path)
 
     def _on_profile_selected(self, item):
         p_name = item.data(Qt.UserRole)
@@ -201,11 +221,9 @@ class LauncherDialog(QDialog):
         cam_id = config.get("camera_id", 0)
         hotkey = config.get("hotkey", "")
         
-        # Set Combo
         idx = self.combo_cam.findData(cam_id)
         if idx >= 0: self.combo_cam.setCurrentIndex(idx)
         
-        # Set Hotkey
         self.edit_hotkey.setKeySequence(QKeySequence(hotkey))
         
         # Check Background
@@ -216,14 +234,19 @@ class LauncherDialog(QDialog):
         else:
             self.lbl_bg_status.setText("⚠️ 배경 없음 (방송 시작 후 'B'를 눌러 촬영하세요)")
             self.lbl_bg_status.setStyleSheet("color: #FFA726;")
+            
+        # Check Model
+        if self._check_model_exists(p_name):
+            self.lbl_model_status.setText("✅ 개인화 모델 학습됨 (고품질)")
+            self.lbl_model_status.setStyleSheet("color: #00ADB5;")
+        else:
+            self.lbl_model_status.setText("ℹ️ 기본 모델 사용 (MODNet+ViTPose)")
+            self.lbl_model_status.setStyleSheet("color: #BBB;")
 
     def _create_profile(self):
         name = self.input_new_name.text().strip()
         if not name: return
-        
-        # Default to selected camera
         cam_id = self.combo_cam.currentData()
-        # [New] Get Hotkey
         hotkey_seq = self.input_new_hotkey.keySequence().toString(QKeySequence.NativeText)
         
         if self.pm.create_profile(name, cam_id, hotkey_seq):
@@ -243,7 +266,7 @@ class LauncherDialog(QDialog):
         self.pm.update_hotkey(self.selected_profile, hotkey_seq)
         
         QMessageBox.information(self, "저장", f"[{self.selected_profile}] 설정이 저장되었습니다.")
-        self._refresh_list() # Update list label
+        self._refresh_list()
 
     def _delete_profile(self):
         if not self.selected_profile: return
@@ -251,13 +274,23 @@ class LauncherDialog(QDialog):
             QMessageBox.warning(self, "불가", "기본 프로필은 삭제할 수 없습니다.")
             return
             
-        ret = QMessageBox.question(self, "삭제 확인", f"정말 '{self.selected_profile}' 프로필을 삭제하시겠습니까?\n(모든 학습 데이터가 삭제됩니다)", 
+        ret = QMessageBox.question(self, "삭제 확인", f"정말 '{self.selected_profile}' 프로필을 삭제하시겠습니까?", 
                                    QMessageBox.Yes | QMessageBox.No)
         if ret == QMessageBox.Yes:
             self.pm.delete_profile(self.selected_profile)
-            self.selected_profile = None # Clear selection
+            self.selected_profile = None 
             self._refresh_list()
 
+    def _launch_studio_tool(self):
+        """별도 프로세스로 학습 스튜디오 실행"""
+        studio_script = os.path.join(self.root_dir, "tools", "muse_studio.py")
+        if os.path.exists(studio_script):
+            try:
+                subprocess.Popen([sys.executable, studio_script])
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"스튜디오 실행 실패: {e}")
+        else:
+            QMessageBox.critical(self, "오류", f"파일을 찾을 수 없습니다: {studio_script}")
+
     def get_start_config(self):
-        """Return selected profile name to start engine with"""
         return self.selected_profile

@@ -1,109 +1,172 @@
-Project MUSE: High-Fidelity Tri-Core Engine (V5)
+Project MUSE: The Visual Singularity Engine (V11 Hybrid)
 
-핵심 철학 (Core Philosophy)
-"Zero Compromise on Accuracy"
+1. 프로젝트 비전 및 철학
 
-속도 개선을 위해 입력 해상도를 줄이거나(Downscaling) 화질을 희생하지 않음.
+"Hybrid Precision: General Stability & Personal Accuracy"
 
-모든 Segmentation 모델은 Native 1080p (FHD) 해상도에서 구동하여 머리카락 한 올의 디테일까지 보존함.
+MUSE는 범용 모델의 안정성과 개인화 모델의 정밀함을 결합한 하이브리드(Hybrid) 방송 엔진입니다.
+단일 모델에 의존하지 않고, 상황에 따라 최적의 AI 모델을 동적으로 선택하여 RTX 3060급 하드웨어에서도 4K 60fps 방송이 가능한 환경을 제공합니다.
 
-엔진 파이프라인: "The Guided High-Res Flow"
-graph TD
-Input[Camera Input 1080p] --> ViTPose[ViTPose TensorRT]
-Input --> DeepLab[DeepLabV3+ (1080p)]
-Input --> MODNet[MODNet (1080p)]
+2. 핵심 엔진 아키텍처: "The Priority Switching System"
 
-ViTPose -->|Bone Coordinates| Skeleton[Spatial Anchor]
-Skeleton -->|Valid Hull Mask| Consensus
+A. 하이브리드 추론 로직 (Hybrid Inference Logic)
 
-DeepLab -->|Semantic Mask| Consensus
-MODNet -->|Alpha Matte| Consensus
+엔진은 시작 시 **'학습된 모델(Personalized Student)'**의 존재 여부를 스캔하고, 우선순위에 따라 작동 모드를 결정합니다.
 
-Consensus[Tri-Core Logic] -->|High-Res Alpha| FinalMask
+Priority 1: Personalized Mode (학습된 모델 존재 시)
 
-Input --> Warper[Morphing Engine]
-Skeleton --> Warper
-FinalMask --> Warper
+Segmentor: Student_Seg_TRT (사용자 데이터로 과적합된 초경량 모델)
 
-Warper --> HoleFilling[Smart In-painting]
-BackgroundBuffer --> HoleFilling
+Pose: Student_Pose_TRT (특정 앵글에 최적화된 키포인트)
 
-HoleFilling --> Output[Broadcast Output]
+장점: 완벽한 배경 분리, 옷/액세서리 디테일 보존, 극도로 빠른 속도.
 
-상세 기술 명세
+Priority 2: Base Mode (학습 데이터 없음/Fallback)
 
-A. High-Fidelity Model Inference (고정밀 추론)
-모든 Segmentation 모델은 TensorRT의 Dynamic Shape 기능을 사용하여 1920x1080 입력을 직접 처리함.
+Segmentor: MODNet_TRT (Webcam Optimized, 544p Processing)
 
-MODNet (Detailer):
+Pose: ViTPose_TRT (General High-Accuracy)
 
-Input: 1920x1080 (Native)
+장점: 별도 학습 없이 즉시 사용 가능, 범용적인 안정성.
 
-Optimization: FP16 (Half Precision)만 적용, 해상도는 유지.
+B. Teacher-Student Distillation (지식 증류 파이프라인)
 
-역할: 고해상도 Alpha Matting을 통해 머리카락, 옷 주름 등의 디테일 보존.
+고성능 무거운 모델(Teacher)의 지식을 가벼운 모델(Student)에 주입하여 실시간성을 확보합니다.
 
-DeepLabV3+ (Validator):
+Teacher A (Segmentation): SAM 2.1 (Segment Anything Model 2)
 
-Input: 1920x1080 (Native)
+역할: 영상 전체를 분석하여 프레임 단위의 완벽한 마스크(Ground Truth) 생성.
 
-역할: 고해상도에서도 객체(사람)와 배경을 정확히 분리.
+Teacher B (Pose): ViTPose-Huge
 
-ViTPose (Guide):
+역할: 관절 좌표를 추출하여 마스킹의 가이드라인 제공 및 성형 기준점 마련.
 
-Input: 256x192 (Pose estimation standard)
+Student (Real-time): SegFormer / MobileNetV3 (Custom Head)
 
-Output: 1080p 좌표계로 Upscaling된 정밀 좌표.
+역할: Teacher들이 만든 데이터를 학습하여 TensorRT로 경량화.
 
-역할: Spatial Anchor. ViTPose가 감지한 뼈대 영역(Hull) 밖의 모든 픽셀은 배경으로 강제 할당 (노이즈 0%).
+3. 하드웨어 요구사항 (Dual Track Specification)
 
-B. 성형 및 배경 복원 (Morphing & Healing)
-고해상도 마스크를 사용하여 성형 시 경계선이 깨지거나 계단 현상(Aliasing)이 생기는 것을 방지.
+MUSE는 개발(학습) 환경과 사용자(송출) 환경을 명확히 구분하여 설계되었습니다.
 
-Warping (성형):
+Track A: Training Machine (개발 및 모델 생성)
 
-1080p 마스크와 원본 이미지를 동기화하여 변형.
+Target: 오프라인 고속 학습 및 데이터 가공
 
-Hole Filling (빈 공간 채우기):
+GPU: RTX 4090 or 3090 (24GB VRAM 권장)
 
-성형으로 이동한 픽셀의 뒷공간을 Background_Buffer에서 복원.
+SAM 2.1 Large + ViTPose Huge 동시 로드 및 배치 처리를 위해 고용량 VRAM 필수.
 
-경계면은 Poisson Blending 또는 Gaussian Feathering으로 자연스럽게 처리.
+Role: Auto-Labeling, Student Model Training, TensorRT Conversion.
 
-C. 적응형 배경 업데이트 (Adaptive Background)
+Track B: Streaming Machine (실제 방송 송출)
 
-초기화: B 키 입력 시 1080p 배경 버퍼 생성.
+Target: 실시간 추론 및 OBS 송출
 
-적응형 로직:
+GPU: RTX 3060 12GB 이상 (4060 Ti 권장)
 
-Tri-Core가 "확실한 배경"이라고 합의한 영역(1080p Pixel-wise check)에 한해, 배경 버퍼를 현재 프레임 값으로 미세 업데이트 (Learning Rate: 0.005).
+FP16 가속을 통해 4K 60fps 방어.
 
-조명 변화에 부드럽게 대응.
+Role: Real-time Inference (Student/MODNet), OBS Virtual Cam Output.
 
-구현 로드맵 (Action Plan)
+4. 기술 스택 (Tech Stack Update)
 
-Step 1: 고정밀 TensorRT 변환기 (tools/convert_models_to_trt.py)
+Core AI & Vision
 
-기능: MODNet, DeepLabV3+ 등의 ONNX 모델을 1920x1080 해상도에 최적화된 TensorRT 엔진으로 변환.
+Backbone: PyTorch 2.x (Training), TensorRT 10.0.1 (Inference)
 
-설정: min=(1,3,512,512), opt=(1,3,1080,1920), max=(1,3,1080,1920) 프로파일 적용.
+GPU Acceleration: CuPy (Zero-Copy Processing), CUDA Kernels (Warping)
 
-Step 2: 통합 추론 모듈 (src/ai/consensus_engine.py)
+Teacher Models: SAM 2.1 Hiera-Large, ViTPose-Huge
 
-3개 모델 병렬 로딩 및 동기화.
+Base Models: MODNet (ONNX -> TRT)
 
-ViTPose 가이드를 적용한 최종 마스크 합성 로직 구현.
+Application Layer
 
-Step 3: 적응형 배경 버퍼 (src/graphics/adaptive_bg.py)
+Language: Python 3.10+
 
-배경 업데이트 및 Hole Filling 커널 구현.
+GUI: PySide6 (Modern Dark Theme), OpenGL (High-Perf Viewport)
 
-Step 4: 메인 통합
+I/O: OpenCV (DSHOW Forced), OBS Virtual Camera (pyvirtualcam)
 
-run_muse.py에서 학습 로직을 제거하고 이 새로운 파이프라인으로 연결.
+5. 주요 기능 명세 (Feature Specs)
 
-하드웨어 요구 사항
+5.1. MUSE Studio (All-in-One Launcher)
 
-VRAM: 1080p 모델 2개(MODNet, DeepLab) + ViTPose 로드 시 약 6~8GB 예상. (RTX 3060 12GB 안전함)
+프로파일 관리: 카메라 앵글별(정면, 측면 등) 독립된 데이터셋 및 모델 관리.
 
-속도: FP16 가속 필수. (30fps 방어 목표, 미달 시 1080p 유지하되 DeepLab만 경량화 고려)
+원클릭 데이터 수집: 배경 촬영(Clean Plate) 및 영상 녹화 자동화.
+
+자동 학습 파이프라인:
+
+Analyze: SAM 2.1을 이용한 프리뷰 및 데이터 검증.
+
+Labeling: Teacher 모델들을 이용한 정밀 라벨링.
+
+Train: OHEM Loss를 적용한 Hard Example 집중 학습.
+
+Convert: ONNX -> TensorRT 자동 변환 및 엔진 교체.
+
+5.2. Visual Engine (Beauty & Rendering)
+
+Adaptive Background: 인물이 없는 영역을 실시간으로 감지하여 배경 버퍼를 미세 업데이트 (Ghosting 방지).
+
+Morphing Logic: 얼굴(Eyes, V-line) 및 전신(Shoulder, Waist, Hip) 성형 지원.
+
+Virtual Output: OBS 등 방송 송출 프로그램으로 1080p 무손실 신호 전송.
+
+6. 배포 및 패키징 전략 (Deployment Strategy)
+
+최종 사용자가 복잡한 환경 설정 없이 즉시 사용할 수 있도록 "Self-Contained Installer" 형태로 배포합니다.
+
+6.1. 빌드 프로세스
+
+DLL 수집 (tools/collect_libs.py):
+
+시스템에 흩어진 NVIDIA 핵심 DLL(cuDNN, TensorRT, cuBLAS 등)을 프로젝트 내 libs/ 폴더로 자동 수집.
+
+코드 프리징 (PyInstaller):
+
+Python 인터프리터와 소스코드를 단일 실행 파일 또는 폴더로 패키징.
+
+리소스 병합:
+
+assets/ (모델, 쉐이더) 및 libs/ 폴더를 빌드 결과물에 포함.
+
+6.2. 런타임 메커니즘 (src/utils/cuda_helper.py)
+
+프로그램 실행 시 libs/ 폴더를 최우선 DLL search path로 등록.
+
+사용자 PC의 CUDA 버전이나 환경 변수 설정과 무관하게 내장된 라이브러리로 구동 보장.
+
+7. 상세 개발 로드맵 (Detailed Milestones)
+
+Phase 1: Foundation (완료)
+
+[x] 하이브리드 엔진 통합 (MODNet + Student)
+
+[x] TensorRT 10.x 마이그레이션 및 버전 고정
+
+[x] Muse Studio 기본 GUI 구현 (녹화/학습)
+
+Phase 2: Refinement (현재 진행 중)
+
+[ ] Week 1: 학습 품질 고도화
+
+OHEM Loss 튜닝으로 경계선 인식률 향상.
+
+filter_bad_data.py 로직 개선 (이상치 제거 강화).
+
+[ ] Week 2: Studio UX 개선
+
+학습 진행률(Progress) 시각화 상세화.
+
+오류 발생 시 자동 복구(Safe Mode) 기능 추가.
+
+Phase 3: Expansion (예정)
+
+실시간 조명 보정 (Relighting): 쉐이더 기반 가상 조명 효과.
+
+멀티캠 동시 지원: 2개 이상의 카메라 입력을 스위칭 없이 동시 처리 (PIP 등).
+
+VRM 아바타 연동: 트래킹 데이터를 3D 아바타로 연결.

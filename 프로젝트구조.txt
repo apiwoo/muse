@@ -1,61 +1,78 @@
-Project MUSE - File Structure (V5 High-Fidelity Engine)
+Project MUSE - Directory Structure (v11 Hybrid Layout)
 
 MUSE_Project/
-├── assets/                     # [Resource Layer]
-│   ├── models/                 # (TRT Engine Files)
-│   │   ├── tracking/           # ViTPose (Guide)
-│   │   └── segmentation/       # MODNet (1080p), DeepLabV3+
-│   └── shaders/                # [Visual Core]
-│       ├── beauty/             # Warping & Healing
-│       │   ├── background_fill.glsl
-│       │   ├── warping.glsl
-│       │   └── ...
-│       └── post/               # Color Grading
-│           └── color_grade.glsl
+├── recorded_data/              # [Data Lake] 사용자 데이터 저장소
+│   ├── personal_data/          # 프로파일별 데이터 루트
+│   │   ├── default/            # [Example Profile]
+│   │   │   ├── background.jpg  # 빈 배경 이미지 (필수)
+│   │   │   ├── config.json     # 프로파일 설정 (카메라ID, 파라미터)
+│   │   │   ├── train_video_xx.mp4 # 원본 녹화 영상
+│   │   │   ├── images/         # 학습용 추출 프레임
+│   │   │   ├── masks/          # SAM 2.1이 생성한 마스크
+│   │   │   └── labels/         # ViTPose가 생성한 JSON
+│   │   └── ...
+│   └── backup/                 # 데이터 리셋 시 자동 백업 경로
 │
-├── src/                        # [Source Code]
-│   ├── main.py                 # 앱 엔트리 (UI 구동)
+├── assets/                     # [Assets] 정적 리소스
+│   ├── models/                 # AI 모델 웨이트
+│   │   ├── tracking/           # ViTPose (Teacher/Base)
+│   │   │   └── vitpose_huge.engine
+│   │   ├── segmentation/       # MODNet (Base)
+│   │   │   └── modnet_544p.engine
+│   │   ├── segment_anything/   # SAM 2.1 (Teacher)
+│   │   │   └── sam2.1_hiera_large.pt
+│   │   └── personal/           # [Student] 학습된 개인화 모델
+│   │       ├── student_seg_{profile}.engine
+│   │       └── student_pose_{profile}.engine
 │   │
-│   ├── core/                   # [System Layer]
-│   │   ├── engine_loop.py      # 메인 루프 (Consensus Engine 호출)
-│   │   ├── input_manager.py    # 1080p Camera Input
-│   │   ├── virtual_cam.py      # OBS 송출
-│   │   └── profiler.py         # 성능 모니터링
-│   │
-│   ├── ai/                     # [Intelligence Layer: Tri-Core]
-│   │   ├── consensus_engine.py # [New] Tri-Core Logic (ViTPose+MODNet+DeepLab)
-│   │   └── tracking/           # ViTPose Wrapper
-│   │       ├── vitpose_trt.py
-│   │       └── facemesh.py
-│   │
-│   ├── graphics/               # [Visuals Layer]
-│   │   ├── beauty_engine.py    # [Modified] High-Res Warping Logic
-│   │   ├── adaptive_bg.py      # [New] Adaptive Background Buffer
-│   │   ├── renderer.py         # OpenGL Renderer
-│   │   ├── shader_loader.py    # GLSL Loader
-│   │   ├── kernels/            # CUDA Kernels (Morphing/Composite)
-│   │   │   └── cuda_kernels.py
-│   │   └── processors/         # Deformation Math
-│   │       └── morph_logic.py
-│   │
-│   ├── ui/                     # [Control Layer]
-│   │   ├── main_window.py
-│   │   ├── beauty_panel.py
-│   │   ├── viewport.py
-│   │   └── controls/
-│   │       └── sliders.py
-│   │
-│   └── utils/                  # [Utility Layer]
-│       ├── config.py           # 설정 관리
-│       ├── cuda_helper.py      # DLL Path Fix
-│       └── logger.py
+│   ├── sam2_configs/           # SAM 2.1 설정 파일 (YAML)
+│   └── shaders/                # OpenGL/CUDA 쉐이더 (GLSL)
+│       ├── beauty/             # 성형 및 워핑 로직
+│       └── post/               # 색보정 및 업스케일링
 │
-├── tools/                      # [Utilities]
-│   ├── convert_models_to_trt.py # [Core] 고정밀 엔진 변환기 (1080p Profile)
-│   ├── run_muse.py             # (Legacy CLI)
-│   ├── clean_launch.py         # 캐시 삭제 실행
-│   └── check_gpu.py            # GPU 가속 확인
+├── src/                        # [Source Code] 핵심 소스
+│   ├── main.py                 # 어플리케이션 엔트리 포인트
+│   │
+│   ├── core/                   # [Core System]
+│   │   ├── engine_loop.py      # 메인 처리 루프 (FPS 제어)
+│   │   ├── input_manager.py    # 카메라 입력 관리 (DSHOW/NVDEC)
+│   │   └── virtual_cam.py      # 가상 카메라 송출
+│   │
+│   ├── ai/                     # [AI Brain]
+│   │   ├── consensus_engine.py # 하이브리드 추론 로직 (MODNet/Student 스위칭)
+│   │   ├── tracking/           # 트래킹 모듈
+│   │   │   ├── body_tracker.py # 신체 키포인트 추적
+│   │   │   ├── facemesh.py     # 얼굴 랜드마크 (MediaPipe)
+│   │   │   └── vitpose_trt.py  # ViTPose 래퍼
+│   │   └── distillation/       # [Training] 학습 관련
+│   │       ├── trainer.py      # 학습기 (OHEM/Dice Loss)
+│   │       ├── teacher/        # 교사 모델 (AutoLabeler, SAM Wrapper)
+│   │       └── student/        # 학생 모델 (Inference, Architecture)
+│   │
+│   ├── graphics/               # [Visual Pipeline]
+│   │   ├── beauty_engine.py    # 이미지 처리 및 성형 엔진
+│   │   ├── adaptive_bg.py      # 배경 복원 및 합성
+│   │   ├── renderer.py         # 렌더링 유틸리티
+│   │   ├── kernels/            # CUDA 커널 (Fast Processing)
+│   │   └── processors/         # 성형 수학 로직 (Morphing)
+│   │
+│   ├── ui/                     # [User Interface]
+│   │   ├── main_window.py      # 메인 뷰어
+│   │   ├── beauty_panel.py     # 우측 제어 패널
+│   │   ├── launcher.py         # 초기 실행 설정창
+│   │   └── controls/           # 커스텀 위젯
+│   │
+│   └── utils/                  # 유틸리티 (Config, Logger, CUDA Helper)
 │
-├── libs/                       # NVIDIA Core DLLs
-├── requirements.txt
-└── .gitignore
+├── tools/                      # [Tools & Studio]
+│   ├── muse_studio.py          # [GUI] 통합 스튜디오 실행 파일
+│   ├── studio/                 # 스튜디오 UI 컴포넌트 (Pages, Widgets)
+│   ├── auto_labeling/          # 데이터 라벨링 스크립트
+│   ├── train_student.py        # 학습 실행 스크립트
+│   ├── convert_models_to_trt.py # 기본 모델 변환기
+│   ├── convert_student_to_trt.py # 학습 모델 변환기
+│   ├── download_models.py      # 모델 다운로더
+│   └── ... (기타 유지보수 툴)
+│
+├── libs/                       # [Portable] 필수 DLL 모음 (CUDA/cuDNN)
+└── requirements.txt            # 파이썬 의존성 목록
