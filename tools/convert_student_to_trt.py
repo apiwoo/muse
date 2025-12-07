@@ -1,5 +1,5 @@
 # Project MUSE - convert_student_to_trt.py
-# Updates: Handles separate Seg/Pose models & Single Profile Support
+# Updates: Stop Flag Check & Smart Skip (Engine exists)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -21,6 +21,7 @@ def get_resolution(mode):
 def convert_all(target_profile=None):
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_dir = os.path.join(base_dir, "assets", "models", "personal")
+    stop_flag = os.path.join(base_dir, "recorded_data", "personal_data", "stop_training.flag")
     
     # Define patterns based on target
     if target_profile:
@@ -44,7 +45,19 @@ def convert_all(target_profile=None):
     print(f"[LOOP] Found {total} models to convert.")
 
     for i, pth in enumerate(all_files):
+        # [Stop Check]
+        if os.path.exists(stop_flag):
+            print("\n[STOP] Conversion interrupted by user.")
+            break
+
         filename = os.path.basename(pth)
+        
+        # Check if engine exists (Skip)
+        engine_path = pth.replace(".pth", ".engine")
+        if os.path.exists(engine_path):
+            print(f"[{i+1}/{total}] [SKIP] Engine already exists: {os.path.basename(engine_path)}")
+            continue
+
         print(f"\n[{i+1}/{total}] Processing: {filename}")
         
         # Determine mode
@@ -56,7 +69,6 @@ def convert_all(target_profile=None):
             continue
 
         onnx_path = pth.replace(".pth", ".onnx")
-        engine_path = pth.replace(".pth", ".engine")
         
         base_progress = int((i / total) * 100)
         print(f"[PROGRESS] {base_progress}")

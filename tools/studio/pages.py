@@ -26,10 +26,10 @@ except ImportError:
     HAS_PYGRABBER = False
 
 # ==============================================================================
-# [PAGE 1] Profile Selection
+# [PAGE 1] Profile Selection (No Change)
 # ==============================================================================
 class Page1_ProfileSelect(QWidget):
-    profile_confirmed = Signal(str, str) # name, mode ('append' or 'reset')
+    profile_confirmed = Signal(str, str)
 
     def __init__(self, personal_data_dir):
         super().__init__()
@@ -122,7 +122,7 @@ class Page1_ProfileSelect(QWidget):
             self.profile_confirmed.emit(name, 'reset')
 
 # ==============================================================================
-# [PAGE 2] Camera Connection
+# [PAGE 2] Camera Connection (No Change)
 # ==============================================================================
 class Page2_CameraConnect(QWidget):
     camera_ready = Signal(int)
@@ -235,7 +235,7 @@ class Page2_CameraConnect(QWidget):
         QMessageBox.warning(self, "연결 오류", msg)
 
 # ==============================================================================
-# [PAGE 3] Data Collection
+# [PAGE 3] Data Collection (No Change)
 # ==============================================================================
 
 class RecorderWorker(QThread):
@@ -264,10 +264,9 @@ class RecorderWorker(QThread):
         self.accumulated_time = 0.0
         self.last_reported_int_time = -1
         
-        # [New] Auto Split
         self.split_counter = 0
         self.last_split_time = 0.0
-        self.MAX_SPLIT = 60.0 # 1 minute
+        self.MAX_SPLIT = 60.0 
 
     def _calc_existing_duration(self, folder):
         total = 0.0
@@ -562,7 +561,7 @@ class Page3_DataCollection(QWidget):
             self.gl_widget.cleanup()
 
 # ==============================================================================
-# [PAGE 4] AI Training (Redesigned: 2-Step)
+# [PAGE 4] AI Training (Redesigned: 2-Step with Time Info)
 # ==============================================================================
 class Page4_AiTraining(QWidget):
     go_home = Signal()
@@ -585,11 +584,21 @@ class Page4_AiTraining(QWidget):
 
         # Progress
         self.pbar = QProgressBar()
+        # [New] Show Percentage inside Bar
+        self.pbar.setFormat("%p%") 
+        self.pbar.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.pbar)
+        
+        # [New] Status & Time Info
         self.lbl_status = QLabel("준비됨")
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setStyleSheet("color: #AAA;")
+        self.lbl_status.setStyleSheet("color: #AAA; font-size: 14px;")
         layout.addWidget(self.lbl_status)
+        
+        self.lbl_time_info = QLabel("총 소요: 00:00 | 현재 단계: 00:00")
+        self.lbl_time_info.setAlignment(Qt.AlignCenter)
+        self.lbl_time_info.setStyleSheet("color: #00ADB5; font-size: 13px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(self.lbl_time_info)
 
         # --- Content Area (Stacked Logic replaced by Visibility) ---
         
@@ -645,15 +654,13 @@ class Page4_AiTraining(QWidget):
         self.btn_home.clicked.connect(self.go_home.emit)
         
         # Layout Assembly
-        # 1. Main Action Buttons (Left/Center) - 3의 비율로 넓게
         btn_layout.addWidget(self.btn_step1, stretch=3)
         btn_layout.addWidget(self.btn_step2, stretch=3)
         
-        # 2. Control/Nav Buttons (Right - Split Space) - 1의 비율로 좁게 (홈/중단 공유)
         nav_layout = QHBoxLayout()
         nav_layout.setSpacing(10)
-        nav_layout.addWidget(self.btn_stop, stretch=1) # 중단 버튼 (보일 때만 공간 차지)
-        nav_layout.addWidget(self.btn_home, stretch=1) # 홈 버튼
+        nav_layout.addWidget(self.btn_stop, stretch=1) 
+        nav_layout.addWidget(self.btn_home, stretch=1)
         
         btn_layout.addLayout(nav_layout, stretch=1)
         
@@ -669,6 +676,7 @@ class Page4_AiTraining(QWidget):
         
         self.worker = PipelineWorker(self.root_dir, mode="analyze")
         self.worker.log_signal.connect(self.log_view.append)
+        self.worker.progress_signal.connect(self.on_progress)
         self.worker.finished_signal.connect(self.on_analysis_finished)
         self.worker.start()
 
@@ -695,7 +703,6 @@ class Page4_AiTraining(QWidget):
                 vid_name = os.path.basename(f).replace(".jpg", ".mp4")
                 vid_path = os.path.join(data_dir, p, vid_name)
                 
-                # [New] Video Info Extraction (Frame Count & Duration)
                 info_text = ""
                 if os.path.exists(vid_path):
                     try:
@@ -712,11 +719,9 @@ class Page4_AiTraining(QWidget):
                 if not info_text:
                     info_text = "Unknown Info"
 
-                # Item Widget
                 item = QListWidgetItem(self.list_widget)
-                item.setSizeHint(QSize(260, 200)) # Increased height for Info Label
+                item.setSizeHint(QSize(260, 200)) 
                 
-                # Custom Widget for Item
                 w = QWidget()
                 vbox = QVBoxLayout(w)
                 vbox.setContentsMargins(5,5,5,5)
@@ -729,17 +734,15 @@ class Page4_AiTraining(QWidget):
                 vbox.addWidget(img_lbl)
                 
                 chk = QCheckBox(vid_name)
-                chk.setChecked(True) # Default checked
+                chk.setChecked(True) 
                 chk.setStyleSheet("color: white; font-weight: bold;")
                 vbox.addWidget(chk)
                 
-                # [New] Info Label
                 lbl_info = QLabel(f"[INFO] {info_text}")
                 lbl_info.setStyleSheet("color: #AAA; font-size: 11px;")
                 lbl_info.setAlignment(Qt.AlignLeft)
                 vbox.addWidget(lbl_info)
                 
-                # Store data in item
                 item.setData(Qt.UserRole, {
                     "chk": chk, 
                     "vid_path": vid_path,
@@ -759,7 +762,6 @@ class Page4_AiTraining(QWidget):
             chk = data["chk"]
             
             if not chk.isChecked():
-                # Delete video & preview
                 try:
                     if os.path.exists(data["vid_path"]): os.remove(data["vid_path"])
                     if os.path.exists(data["preview_path"]): os.remove(data["preview_path"])
@@ -774,8 +776,8 @@ class Page4_AiTraining(QWidget):
 
         self.btn_step2.setEnabled(False)
         self.btn_step2.setText("학습 진행 중... (창을 닫지 마세요)")
-        self.btn_step2.setVisible(False) # 숨김
-        self.btn_stop.setVisible(True)   # 중단 버튼 보임
+        self.btn_step2.setVisible(False) 
+        self.btn_stop.setVisible(True)   
         self.btn_stop.setEnabled(True)
         self.btn_stop.setText("🛑 학습 중단")
         
@@ -787,10 +789,16 @@ class Page4_AiTraining(QWidget):
 
         self.worker = PipelineWorker(self.root_dir, mode="train")
         self.worker.log_signal.connect(self.log_view.append)
-        self.worker.progress_signal.connect(lambda v, t: (self.pbar.setValue(v), self.lbl_status.setText(t)))
+        self.worker.progress_signal.connect(self.on_progress)
         self.worker.finished_signal.connect(self.on_training_finished)
         self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "오류", e))
         self.worker.start()
+
+    def on_progress(self, percent, status_text, time_info):
+        """[Updated] Handle new progress signal with time info"""
+        self.pbar.setValue(percent)
+        self.lbl_status.setText(status_text)
+        self.lbl_time_info.setText(time_info)
 
     def stop_training(self):
         if self.worker:

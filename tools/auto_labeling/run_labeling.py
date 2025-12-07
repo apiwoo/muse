@@ -69,38 +69,22 @@ class AutoLabeler:
         out.release()
 
     def _create_strided_video(self, source_path, target_path, interval=5):
-        """
-        [Real Optimization] 
-        원본 영상을 읽어서 interval 간격으로 프레임을 추출해 새로운 단축 영상을 만듭니다.
-        SAM 2가 처리해야 할 프레임 수 자체를 물리적으로 줄입니다.
-        """
         cap = cv2.VideoCapture(source_path)
         if not cap.isOpened(): return False, 0, 0, 0
 
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # 임시 파일 생성
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        # FPS는 유지하거나 줄여도 되지만, 호환성을 위해 30 유지 (재생 속도만 빨라짐)
-        out = cv2.VideoWriter(target_path, fourcc, 30, (w, h))
+        out = cv2.VideoWriter(target_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
         
         count = 0
         written_count = 0
-        
-        # print(f"      [ENC] Compressing video (1/{interval})...")
-        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
-            
             if count % interval == 0:
                 out.write(frame)
                 written_count += 1
             count += 1
-            
         cap.release()
         out.release()
         return True, w, h, written_count
@@ -122,7 +106,6 @@ class AutoLabeler:
             for i, video_path in enumerate(video_paths):
                 vid_name = os.path.basename(video_path)
                 preview_path = os.path.join(preview_dir, vid_name + ".jpg")
-                
                 if os.path.exists(preview_path): continue
                 
                 print(f"   [{i+1}/{len(video_paths)}] Analyzing: {vid_name}...", end=" ", flush=True)
@@ -138,13 +121,11 @@ class AutoLabeler:
         cap = cv2.VideoCapture(video_path)
         ret, frame = cap.read()
         cap.release()
-        
         if not ret: return
 
         try:
             self._create_temp_proxy(frame, temp_proxy_path)
             self.sam_wrapper.init_state(temp_proxy_path)
-            
             keypoints = self.pose_model.inference(frame)
             if keypoints is None: return
 
@@ -153,27 +134,16 @@ class AutoLabeler:
 
             points = np.array(valid_kpts, dtype=np.float32)
             labels = np.ones(len(points), dtype=np.int32)
-            
             mask_logits = self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
-            
             mask_gpu = (mask_logits[0] > 0.0).cpu().numpy().astype(np.uint8)
             if mask_gpu.ndim > 2: mask_gpu = np.squeeze(mask_gpu)
             
-            # [Updated Visual Style] Cyan Outline + Light Tint
-            # 1. Create Cyan base mask (BGR: 255, 255, 0)
             colored_mask = np.zeros_like(frame)
             colored_mask[mask_gpu > 0] = [255, 255, 0] # Cyan
-            
-            # 2. Apply very light tint (15% opacity) instead of heavy 50%
-            # 원본 영상이 잘 보이도록 투명도(beta)를 0.15로 대폭 낮춤
             overlay = cv2.addWeighted(frame, 1.0, colored_mask, 0.15, 0)
-            
-            # 3. Draw Contours for clear boundary (Cyan, Thickness 2)
             contours, _ = cv2.findContours(mask_gpu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(overlay, contours, -1, (255, 255, 0), 2)
-            
             cv2.imwrite(output_path, overlay)
-            
         except Exception as e:
             print(f"[ERROR] {e}")
 
@@ -204,19 +174,20 @@ class AutoLabeler:
         
         global_idx = self._get_next_index(out_imgs)
         newly_processed = []
-
-        # [Config] 모든 프레임 라벨링 (30fps 기준 초당 30장 - 데이터 손실 방지)
-        # Verify 단계에서의 데이터 손실을 보완하기 위해 모든 프레임을 저장합니다.
+        
         FRAME_INTERVAL = 1
-        # 임시 압축 영상 경로
         temp_video_path = os.path.join(profile_dir, "temp_processing_strided.mp4")
-
-        # [Added] Student Pose Resolution Target (352p)
-        # Teacher가 352p에서 뼈대를 찾도록 제한하여 Student의 눈높이와 맞춤
-        TARGET_POSE_W = 640
-        TARGET_POSE_H = 352
+        TARGET_POSE_W, TARGET_POSE_H = 640, 352
+        
+        # [Added] Stop Flag Path
+        stop_flag = os.path.join(self.root_data_dir, "stop_training.flag")
 
         for v_idx, video_path in enumerate(video_paths):
+            # [Check Stop] Check before starting new video
+            if os.path.exists(stop_flag):
+                print(f"\n[STOP] Labeling interrupted by user (Video {v_idx+1}/{len(video_paths)})")
+                break
+
             vid_name = os.path.basename(video_path)
             
             if vid_name in processed_videos:
@@ -229,35 +200,23 @@ class AutoLabeler:
             print(f"[PROGRESS] {current_progress}")
             
             try:
-                # 1. 압축 영상 생성 (물리적 프레임 수 감소)
-                # print("      [1/3] Creating strided video...")
                 ok, w, h, frames = self._create_strided_video(video_path, temp_video_path, FRAME_INTERVAL)
                 if not ok or frames == 0:
                     print("      [ERROR] Video read failed.")
                     continue
                 
-                # print(f"      -> Compressed: {frames} frames to process.")
-
-                # 2. SAM 초기화 (압축된 영상으로)
                 self.sam_wrapper.init_state(temp_video_path)
                 
-                # 3. 첫 프레임 프롬프트 (압축 영상의 첫 프레임 읽기)
                 cap = cv2.VideoCapture(temp_video_path)
                 ret, first_frame = cap.read()
                 if not ret:
-                    cap.release()
-                    continue
+                    cap.release(); continue
                 
-                # [Optimization] Resize for Teacher Pose Inference
-                # Teacher also looks at 352p to match Student's future capability
                 frame_small = cv2.resize(first_frame, (TARGET_POSE_W, TARGET_POSE_H))
-                
-                # Pose 추론 (Low Res)
                 keypoints_small = self.pose_model.inference(frame_small)
                 if keypoints_small is None:
                     cap.release(); continue
 
-                # Restore Coordinates to 1080p
                 scale_x = w / TARGET_POSE_W
                 scale_y = h / TARGET_POSE_H
                 
@@ -274,7 +233,6 @@ class AutoLabeler:
                 
                 self.sam_wrapper.add_prompt(frame_idx=0, points=points, labels=labels)
 
-                # 4. 전파 (압축된 영상 내에서만 전파하므로 매우 빠름)
                 print(f"      [SAM] Propagating ({frames} frames)...")
                 video_masks = {}
                 for frame_idx, obj_ids, mask_logits in self.sam_wrapper.propagate():
@@ -283,23 +241,18 @@ class AutoLabeler:
                     if mask.ndim > 2: mask = np.squeeze(mask)
                     video_masks[frame_idx] = mask
 
-                # 5. 저장 (압축 영상의 모든 프레임 저장)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 curr_f_idx = 0
                 
-                # print("      [SAVE] Saving dataset...")
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: break
                     
-                    # [Optimization] Apply the same resizing logic for every frame
                     frame_small = cv2.resize(frame, (TARGET_POSE_W, TARGET_POSE_H))
                     kpts_small = self.pose_model.inference(frame_small)
-                    
                     mask = video_masks.get(curr_f_idx, None)
                     
                     if kpts_small is not None and mask is not None:
-                        # Restore Scale
                         kpts = kpts_small.copy()
                         kpts[:, 0] *= scale_x
                         kpts[:, 1] *= scale_y
@@ -330,7 +283,6 @@ class AutoLabeler:
                 print(f"      [ERROR] {e}")
             finally:
                 self._force_clear_memory()
-                # 임시 파일 삭제
                 if os.path.exists(temp_video_path):
                     try: os.remove(temp_video_path)
                     except: pass

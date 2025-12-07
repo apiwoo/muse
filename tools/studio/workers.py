@@ -1,10 +1,11 @@
 # Project MUSE - workers.py
-# Updated for Dual-Task Training Workflow
+# Updated for Smart Resume & Stop Logic
 
 import sys
 import os
 import cv2
 import subprocess
+import time
 from PySide6.QtCore import QThread, Signal
 
 class CameraLoader(QThread):
@@ -31,14 +32,12 @@ class CameraLoader(QThread):
 
 class PipelineWorker(QThread):
     """
-    [Updated V4] Multi-Step Pipeline (Targeted)
-    1. Filter Bad Data (Target Only)
-    2. Train Seg (Target Only)
-    3. Train Pose (Target Only)
-    4. Convert (Target Only)
+    [Updated V6] Smart Stop & Resume Logic
+    - Checks 'stop_training.flag' between steps.
+    - Aborts immediately if stop is requested.
     """
     log_signal = Signal(str)
-    progress_signal = Signal(int, str) 
+    progress_signal = Signal(int, str, str) # percent, status, time
     finished_signal = Signal()
     error_signal = Signal(str)
 
@@ -50,6 +49,13 @@ class PipelineWorker(QThread):
         self.current_process = None
         
         self.target_profile = self._detect_active_profile()
+        
+        # Flag Path
+        self.stop_flag_path = os.path.join(self.root_dir, "recorded_data", "personal_data", "stop_training.flag")
+        
+        # Time Tracking
+        self.start_time = 0.0
+        self.step_start_time = 0.0
 
     def _detect_active_profile(self):
         data_root = os.path.join(self.root_dir, "recorded_data", "personal_data")
@@ -62,15 +68,37 @@ class PipelineWorker(QThread):
         return os.path.basename(latest_profile)
 
     def request_early_stop(self):
-        flag_path = os.path.join(self.root_dir, "recorded_data", "personal_data", "stop_training.flag")
         try:
-            with open(flag_path, "w") as f: f.write("STOP")
-            self.log_signal.emit("\n[CMD] 중단 요청 신호 전송 완료.")
+            with open(self.stop_flag_path, "w") as f: f.write("STOP")
+            self.log_signal.emit("\n[CMD] 중단 요청 신호 전송 완료. 현재 작업이 끝나면 멈춥니다.")
         except Exception as e:
             self.log_signal.emit(f"\n[ERROR] 중단 신호 생성 실패: {e}")
 
+    def _check_stop(self):
+        """Returns True if stop is requested."""
+        if os.path.exists(self.stop_flag_path):
+            self.log_signal.emit("\n[STOP] 파이프라인이 사용자 요청에 의해 중단되었습니다.")
+            return True
+        return False
+
+    def _fmt_duration(self, seconds):
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m:02d}분 {s:02d}초"
+
+    def _get_time_info(self):
+        now = time.time()
+        total_elapsed = now - self.start_time
+        step_elapsed = now - self.step_start_time
+        return f"총 소요: {self._fmt_duration(total_elapsed)} | 현재 단계: {self._fmt_duration(step_elapsed)}"
+
     def run(self):
         try:
+            # Clear previous stop flag on start
+            if os.path.exists(self.stop_flag_path):
+                os.remove(self.stop_flag_path)
+
+            self.start_time = time.time()
             self.log_signal.emit(f"[INFO] Target Profile Detected: {self.target_profile}")
             
             if self.mode == "analyze":
@@ -80,62 +108,87 @@ class PipelineWorker(QThread):
             else:
                 raise ValueError("Invalid Mode")
             
-            self.finished_signal.emit()
+            if not self._check_stop():
+                self.finished_signal.emit()
             
         except Exception as e:
             self.error_signal.emit(str(e))
 
     def _run_analysis(self):
-        self.progress_signal.emit(0, "영상 분석 중 (첫 프레임 추출)...")
-        # run_labeling.py currently scans all, but preview is fast enough. 
-        # Future optimization: Make labeling script accept profile arg too.
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(0, "영상 분석 중 (첫 프레임 추출)...", self._get_time_info())
+        
         self.run_script(
             os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), 
-            ["personal_data", "--mode", "preview"]
+            ["personal_data", "--mode", "preview"],
+            weight_range=(0, 100)
         )
-        self.progress_signal.emit(100, "분석 완료")
+        
+        if not self._check_stop():
+            self.progress_signal.emit(100, "분석 완료", self._get_time_info())
 
     def _run_training_pipeline(self):
         # 1. Full Labeling
-        self.progress_signal.emit(10, "Step 1/5: 정밀 라벨링 (Auto Labeling)...")
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(0, "Step 1/5: 정밀 라벨링 (이어하기 가능)...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), 
-            ["personal_data", "--mode", "full"]
+            ["personal_data", "--mode", "full"],
+            weight_range=(0, 20)
         )
         
-        # 2. Data Filtering (Target Only)
-        self.progress_signal.emit(25, f"Step 2/5: 데이터 정제 ({self.target_profile})...")
+        # 2. Data Filtering
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(20, f"Step 2/5: 데이터 정제 ({self.target_profile})...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "auto_labeling", "filter_bad_data.py"), 
-            [self.target_profile]
+            [self.target_profile],
+            weight_range=(20, 22)
         )
 
-        # 3. Train Segmentation (Target Only)
-        self.progress_signal.emit(40, f"Step 3/5: Seg 학습 ({self.target_profile})...")
+        # 3. Train Segmentation (Skip if exists)
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(22, f"Step 3/5: Seg 학습 ({self.target_profile})...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "train_student.py"), 
-            ["personal_data", "--task", "seg", "--profile", self.target_profile]
+            ["personal_data", "--task", "seg", "--profile", self.target_profile],
+            weight_range=(22, 59)
         )
 
-        # 4. Train Pose (Target Only)
-        self.progress_signal.emit(65, f"Step 4/5: Pose 학습 ({self.target_profile})...")
+        # 4. Train Pose (Skip if exists)
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(59, f"Step 4/5: Pose 학습 ({self.target_profile})...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "train_student.py"), 
-            ["personal_data", "--task", "pose", "--profile", self.target_profile]
+            ["personal_data", "--task", "pose", "--profile", self.target_profile],
+            weight_range=(59, 95)
         )
         
-        # 5. Conversion (Target Only)
-        self.progress_signal.emit(85, f"Step 5/5: 변환 및 최적화 ({self.target_profile})...")
+        # 5. Conversion (Skip if exists)
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(95, f"Step 5/5: 변환 및 최적화 ({self.target_profile})...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "convert_student_to_trt.py"), 
-            ["--profile", self.target_profile]
+            ["--profile", self.target_profile],
+            weight_range=(95, 100)
         )
         
-        self.progress_signal.emit(100, "선택된 프로파일 학습 완료!")
+        if not self._check_stop():
+            self.progress_signal.emit(100, "선택된 프로파일 학습 완료!", self._get_time_info())
 
-    def run_script(self, script_path, args):
+    def run_script(self, script_path, args, weight_range=(0, 100)):
         cmd = [sys.executable, script_path] + args
-        self.log_signal.emit(f"\n[START] Executing: {os.path.basename(script_path)} {' '.join(args)}")
+        script_name = os.path.basename(script_path)
+        self.log_signal.emit(f"\n[START] Executing: {script_name} {' '.join(args)}")
+        
+        w_start, w_end = weight_range
+        w_span = w_end - w_start
         
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -146,11 +199,40 @@ class PipelineWorker(QThread):
             startupinfo=startupinfo
         )
         
+        last_update_time = 0
+        
         for line in self.current_process.stdout:
             line = line.strip()
-            if line:
-                self.log_signal.emit(line)
+            if not line: continue
+            
+            self.log_signal.emit(line)
+            
+            if "[PROGRESS]" in line:
+                try:
+                    parts = line.split("[PROGRESS]")
+                    if len(parts) > 1:
+                        val_str = parts[1].strip().split()[0]
+                        local_p = int(float(val_str))
+                        global_p = int(w_start + (local_p / 100.0) * w_span)
+                        
+                        now = time.time()
+                        if now - last_update_time > 0.1 or local_p == 100:
+                            self.progress_signal.emit(global_p, f"진행 중: {script_name} ({local_p}%)", self._get_time_info())
+                            last_update_time = now
+                except: pass
+            
+            now = time.time()
+            if now - last_update_time > 1.0:
+                self.progress_signal.emit(int(w_start), f"실행 중: {script_name}", self._get_time_info())
+                last_update_time = now
         
         self.current_process.wait()
+        
+        # If stop flag exists, simply return (don't raise error, caller handles it)
+        if self._check_stop():
+            return
+
         if self.current_process.returncode != 0:
             raise RuntimeError(f"Script failed with code {self.current_process.returncode}")
+        
+        self.progress_signal.emit(w_end, f"완료: {script_name}", self._get_time_info())

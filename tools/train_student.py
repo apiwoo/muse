@@ -1,6 +1,7 @@
 # Project MUSE - train_student.py
 # (C) 2025 MUSE Corp.
 # Supports --task and --profile for targeted training
+# Updated: Skip if model exists (Smart Resume)
 
 import os
 import sys
@@ -26,6 +27,21 @@ def main():
         print(f"   [TARGET] Profile: {target_profile}")
     print("========================================================")
     
+    # [Smart Resume Logic]
+    # Check if the output model already exists.
+    # Expected Path: assets/models/personal/student_{task}_{profile}.pth
+    base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    model_save_dir = os.path.join(base_path, "assets", "models", "personal")
+    
+    if target_profile:
+        save_name = f"student_{task}_{target_profile}.pth"
+        save_path = os.path.join(model_save_dir, save_name)
+        
+        if os.path.exists(save_path):
+            print(f"\n[SKIP] Model already exists: {save_name}")
+            print("   -> To retrain, delete this file or use 'Reset' mode.")
+            return
+
     epochs = 50 
     
     trainer = Trainer(session_name, task=task, target_profile=target_profile, epochs=epochs, batch_size=8)
