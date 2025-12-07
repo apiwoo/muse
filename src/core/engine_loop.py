@@ -108,6 +108,12 @@ class BeautyWorker(QThread):
         no_frame_tick = 0
         prev_time = time.time()
         
+        # [Performance Monitoring]
+        acc_read = 0.0
+        acc_ai = 0.0
+        acc_beauty = 0.0
+        acc_write = 0.0
+        
         print("[ENGINE] >>> Entering Main Loop <<<")
 
         while self.running:
@@ -179,11 +185,40 @@ class BeautyWorker(QThread):
             
             self.frame_processed.emit(frame_out_gpu)
 
+            # [Metrics Calculation]
+            t_read_ms = (t_read_end - t_read_start) * 1000.0
+            t_ai_ms = (t_ai_end - t_ai_start) * 1000.0
+            t_beauty_ms = (t_beauty_end - t_beauty_start) * 1000.0
+            t_write_ms = (t_send_end - t_send_start) * 1000.0
+            
+            acc_read += t_read_ms
+            acc_ai += t_ai_ms
+            acc_beauty += t_beauty_ms
+            acc_write += t_write_ms
+
             frame_count += 1
-            if time.time() - prev_time >= 1.0:
-                # print(f"[FPS] {frame_count} ...")
+            curr_time = time.time()
+            if curr_time - prev_time >= 1.0:
+                elapsed = curr_time - prev_time
+                fps = frame_count / elapsed
+                
+                avg_read = acc_read / frame_count
+                avg_ai = acc_ai / frame_count
+                avg_beauty = acc_beauty / frame_count
+                avg_write = acc_write / frame_count
+                
+                # 순수 처리 지연 시간 (Read + AI + Beauty) + Write(대기 포함)
+                total_process = avg_read + avg_ai + avg_beauty
+                
+                print(f"[FPS: {fps:.1f}] Latency: {total_process:.1f}ms (+Write {avg_write:.1f}ms) | "
+                      f"R: {avg_read:.1f}, AI: {avg_ai:.1f}, B: {avg_beauty:.1f}, W: {avg_write:.1f}")
+                
                 frame_count = 0
-                prev_time = time.time()
+                acc_read = 0.0
+                acc_ai = 0.0
+                acc_beauty = 0.0
+                acc_write = 0.0
+                prev_time = curr_time
 
         print("[ENGINE] Loop Finished.")
         self.cleanup()

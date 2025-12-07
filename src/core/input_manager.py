@@ -2,9 +2,8 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 # Optimization: No-Lag Switching & NVDEC Support
 # [2025-05 Update] Enhanced Camera Init with Warm-up & Detailed Logging
-# [Critical Fix] Forced DSHOW to match Launcher backend (Fixes 10s MSMF Timeout)
-# [Critical Fix] Init Order: Res -> MJPG -> FPS (Fixes 1FPS issue completely)
-# [Debug] Added Ultra-Verbose Logging for hang detection
+# [Critical Fix] Reverted to 'recorder.py' style simple initialization.
+# No forced backend, no forced codec. Let OS/Driver handle optimizations.
 
 import cv2
 import numpy as np
@@ -82,9 +81,6 @@ class NVDECCapture:
             _ = self.process.stdout.read(self.frame_len)
         return True
 
-# [Critical Change] CaptureWorker removed to fix DSHOW thread affinity issues.
-# InputManager now handles reading directly in the calling thread.
-
 class InputManager:
     def __init__(self, camera_indices=[0], width=1920, height=1080, fps=30):
         self.caps = {}
@@ -94,103 +90,44 @@ class InputManager:
         self.fps = fps
         
         unique_sources = list(dict.fromkeys(camera_indices))
-        print(f"\n[CAM] [InputManager] === Debug Mode: Ultra Verbose Init ===")
+        print(f"\n[CAM] [InputManager] === Initialization (Simple Mode) ===")
         print(f"[CAM] [InputManager] Target Resolution: {width}x{height} @ {fps}fps")
-        print(f"[CAM] [InputManager] Target Sources: {unique_sources}")
         
         for source in unique_sources:
             cid = source
             if isinstance(source, int):
-                # Webcam Initialization Logic
-                print(f"   -> [Init] Attempting to open Webcam ID {source} (Force DSHOW)...")
+                # Webcam Initialization Logic (Simplified like recorder.py)
+                print(f"   -> [Init] Opening Webcam ID {source} (Auto Backend)...")
                 
-                # Debug Log: Opening
-                # [FIX] MSMF causes 10s hang if Launcher accessed camera via DSHOW.
-                # We enforce cv2.CAP_DSHOW to align backends.
-                print(f"      [DEBUG] Calling cv2.VideoCapture({source}, CAP_DSHOW)... ", end="", flush=True)
-                t_start = time.time()
-                cap = cv2.VideoCapture(source, cv2.CAP_DSHOW)
-                print(f"Done in {time.time()-t_start:.4f}s")
+                # [FIX] Do NOT force CAP_DSHOW. Let OpenCV/OS decide (usually MSMF).
+                cap = cv2.VideoCapture(source)
                 
-                backend_name = cap.getBackendName()
-                print(f"      [Backend] {backend_name}")
-
                 if cap.isOpened():
-                    # [CRITICAL FIX] Correct Order for DSHOW High-Res:
-                    # 1. Set Resolution (Forces Codec reset)
-                    # 2. Set MJPG Codec (Enables Bandwidth)
-                    # 3. Set FPS (Locks Timing - MUST BE LAST)
+                    # [FIX] Simple Setup Sequence (Same as recorder.py)
+                    # 1. Width
+                    # 2. Height
+                    # 3. FPS
+                    # No Codec forcing, No Auto-Exposure messing.
                     
-                    print(f"      [DEBUG] Setting Width {width}...", end="", flush=True)
-                    t0 = time.time()
-                    ret_w = cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-                    print(f" Result: {ret_w} ({time.time()-t0:.4f}s)")
-
-                    print(f"      [DEBUG] Setting Height {height}...", end="", flush=True)
-                    t0 = time.time()
-                    ret_h = cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-                    print(f" Result: {ret_h} ({time.time()-t0:.4f}s)")
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                    cap.set(cv2.CAP_PROP_FPS, fps)
                     
-                    print(f"      [DEBUG] Setting MJPG Codec...", end="", flush=True)
-                    t0 = time.time()
-                    ret_cc = cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
-                    print(f" Result: {ret_cc} ({time.time()-t0:.4f}s)")
-
-                    # [FPS MUST BE LAST]
-                    print(f"      [DEBUG] Setting FPS {fps} (LAST)...", end="", flush=True)
-                    t0 = time.time()
-                    ret_fps = cap.set(cv2.CAP_PROP_FPS, fps)
-                    print(f" Result: {ret_fps} ({time.time()-t0:.4f}s)")
-                    
-                    # [Optimization] Low Latency Buffer (from pages.py)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-                    # 3. Validate Settings
+                    # Log actual settings
                     real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
                     real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
                     real_fps = cap.get(cv2.CAP_PROP_FPS)
+                    backend = cap.getBackendName()
                     
-                    try:
-                        fcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-                        fcc_str = "".join([chr((fcc >> 8 * i) & 0xFF) for i in range(4)])
-                    except Exception as e:
-                        fcc_str = f"Error({e})"
+                    print(f"      [OK] Opened: {int(real_w)}x{int(real_h)} @ {real_fps:.1f}fps (Backend: {backend})")
                     
-                    print(f"      [Settings Check] {int(real_w)}x{int(real_h)} @ {real_fps:.1f}fps (Codec: {fcc_str})")
-
-                    # 4. Warm-up Loop (Still needed for stability)
-                    print("      [Warm-up] Starting frame stabilization loop...")
-                    success = False
-                    max_retries = 20 # Try for ~2 seconds
-                    
-                    for i in range(max_retries):
-                        print(f"      [DEBUG] Attempt {i+1}: Calling read()... ", end="", flush=True)
-                        t_read = time.time()
-                        ret, frame = cap.read()
-                        t_end = time.time()
-                        print(f"Returned in {t_end - t_read:.4f}s | Ret: {ret}")
+                    # Warm-up (Just a few frames to wake up sensor)
+                    for _ in range(5):
+                        cap.read()
                         
-                        if ret:
-                            if frame is None:
-                                print(f"      [DEBUG] !!! Ret is True but Frame is None !!!")
-                            elif frame.size == 0:
-                                print(f"      [DEBUG] !!! Frame size is 0 !!!")
-                            else:
-                                print(f"      [DEBUG] Frame Valid! Shape: {frame.shape}")
-                                success = True
-                                break
-                        else:
-                            print(f"      [DEBUG] Read Failed. Sleeping 0.1s...")
-                            time.sleep(0.1)
-                    
-                    if success:
-                        self.caps[cid] = cap
-                        print(f"      -> [SUCCESS] Camera {source} Ready.")
-                    else:
-                        print(f"\n      -> [FAILED] Camera opened but returned NO frames after {max_retries} attempts.")
-                        cap.release()
+                    self.caps[cid] = cap
                 else:
-                    print(f"      -> [ERROR] Could not open device (Occupied or not found).")
+                    print(f"      [ERROR] Could not open device.")
             
             elif isinstance(source, str):
                 # File/Stream (NVDEC)
@@ -207,13 +144,7 @@ class InputManager:
             if self.active_id is None and cid in self.caps:
                 self.active_id = cid
 
-        print(f"[CAM] [InputManager] === Initialization Complete. Active Cams: {len(self.caps)} ===\n")
-
-        if not self.caps:
-            print("[CRITICAL WARNING] No cameras found! InputManager running in EMPTY mode.")
-        
-        # [Thread Affinity Fix] Do NOT start a separate worker thread.
-        # We will read directly in the read() method.
+        print(f"[CAM] [InputManager] === Ready. Active Cams: {len(self.caps)} ===\n")
 
     def select_camera(self, camera_id):
         if camera_id == self.active_id: return True
@@ -228,13 +159,12 @@ class InputManager:
 
     def read(self):
         # [Direct Read Mode]
-        # Reads directly from the OpenCV object in the calling thread (BeautyWorker).
-        # This prevents DSHOW thread affinity issues.
-        
         if self.active_id is None or self.active_id not in self.caps:
             return None, False
 
         cap = self.caps[self.active_id]
+        
+        # Simple read
         ret, frame_cpu = cap.read()
         
         frame_gpu = None
@@ -242,7 +172,7 @@ class InputManager:
              if HAS_CUDA:
                  frame_gpu = cp.asarray(frame_cpu)
              else:
-                 frame_gpu = frame_cpu # Fallback for CPU-only
+                 frame_gpu = frame_cpu 
         
         return frame_gpu, ret
 

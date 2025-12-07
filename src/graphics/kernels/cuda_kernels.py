@@ -1,8 +1,9 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
+# Updated: "No-Distortion" Logic (Differential Blending)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-# [Kernel 1] Grid Generation (TPS Logic) - 기존 유지
+# [Kernel 1] Grid Generation (TPS Logic) - 유지
 WARP_KERNEL_CODE = r'''
 extern "C" __global__
 void warp_kernel(
@@ -54,14 +55,16 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Alpha Compositing (Soft Edge Support)
-# MODNet의 Soft Alpha를 지원하기 위해 로직을 완전히 변경했습니다.
+# [Kernel 2] Smart Composite (Differential Logic)
+# 변경점: OriginalAlpha와 WarpedAlpha를 비교하여, 
+# "알파값이 줄어든 만큼(Hole)"만 배경을 보여줍니다. 
+# 변화가 없으면(No Morph) 배경을 전혀 섞지 않고 100% 라이브 영상을 사용합니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
     const unsigned char* src,  
     const unsigned char* mask, // Alpha Matte (0~255)
-    const unsigned char* bg,   
+    const unsigned char* bg,   // Static Clean Plate
     unsigned char* dst,        
     const float* dx_small,     
     const float* dy_small,     
@@ -75,7 +78,18 @@ void composite_kernel(
 
     if (x >= width || y >= height) return;
 
-    // 1. Warping Field Interpolation
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    // --- 1. Get Alpha Values ---
+    
+    // A. Original Alpha (Current Position)
+    float original_alpha = 0.0f;
+    if (use_bg) {
+        original_alpha = (float)mask[idx] / 255.0f;
+    }
+
+    // B. Warped Alpha (Source Position)
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -85,51 +99,71 @@ void composite_kernel(
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
 
-    // Source Coordinates with Deformation
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
-    int dst_idx = (y * width + x) * 3;
-    int bg_idx = dst_idx; // Background matches destination coords
+    float warped_alpha = 0.0f;
+    float fg_b = 0.0f, fg_g = 0.0f, fg_r = 0.0f;
 
-    // Boundary Check (If warped pixel is outside, show BG)
-    if (u < 0 || u >= width || v < 0 || v >= height) {
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx = v * width + u;
+        int warped_idx_rgb = warped_idx * 3;
+
         if (use_bg) {
-            dst[dst_idx+0] = bg[bg_idx+0];
-            dst[dst_idx+1] = bg[bg_idx+1];
-            dst[dst_idx+2] = bg[bg_idx+2];
+            warped_alpha = (float)mask[warped_idx] / 255.0f;
         } else {
-            dst[dst_idx+0] = 0; dst[dst_idx+1] = 0; dst[dst_idx+2] = 0;
+            warped_alpha = 1.0f; 
         }
-        return;
+        
+        // Fetch Warped Foreground
+        if (warped_alpha > 0.0f) {
+            fg_b = (float)src[warped_idx_rgb+0];
+            fg_g = (float)src[warped_idx_rgb+1];
+            fg_r = (float)src[warped_idx_rgb+2];
+        }
     }
 
-    int src_idx = (v * width + u) * 3;
-    int mask_idx = v * width + u;
-
-    // 2. Alpha Blending Logic
-    float alpha = 0.0f;
+    // --- 2. Calculate "Hole" Visibility (Differential) ---
+    // 구멍(Hole)이란? "원래 사람이었는데(Original), 워핑 후 사람이 없어진(Warped) 정도"
+    // 예: Original=1.0, Warped=0.0 -> Hole=1.0 (배경 100% 필요)
+    // 예: Original=0.5, Warped=0.5 -> Hole=0.0 (배경 필요 없음, 라이브 영상 유지)
     
-    // Mask Value (0~255) -> Alpha (0.0~1.0)
-    if (use_bg) {
-        alpha = (float)mask[mask_idx] / 255.0f;
-    } else {
-        // No background mode: just copy source
-        alpha = 1.0f; 
+    float hole_alpha = 0.0f;
+    if (original_alpha > warped_alpha) {
+        hole_alpha = original_alpha - warped_alpha;
     }
 
-    // [Optimization] Branchless Mixing
-    // Out = Src * Alpha + BG * (1 - Alpha)
-    float src_b = (float)src[src_idx+0];
-    float src_g = (float)src[src_idx+1];
-    float src_r = (float)src[src_idx+2];
+    // --- 3. Base Layer Construction ---
+    // Hole만큼만 Static BG를 보여주고, 나머지는 Live Src를 보여줍니다.
+    // 이렇게 하면 성형 안 한 부분(Hole=0)은 100% Live Src가 되어 왜곡이 사라집니다.
+    
+    float src_live_b = (float)src[idx_rgb+0];
+    float src_live_g = (float)src[idx_rgb+1];
+    float src_live_r = (float)src[idx_rgb+2];
+    
+    float base_b = src_live_b;
+    float base_g = src_live_g;
+    float base_r = src_live_r;
 
-    float bg_b = (float)bg[bg_idx+0];
-    float bg_g = (float)bg[bg_idx+1];
-    float bg_r = (float)bg[bg_idx+2];
+    // Only read BG if we actually have a hole
+    if (hole_alpha > 0.0f) {
+        float bg_b = (float)bg[idx_rgb+0];
+        float bg_g = (float)bg[idx_rgb+1];
+        float bg_r = (float)bg[idx_rgb+2];
+        
+        // Base = BG * Hole + Src * (1 - Hole)
+        // (여기서 Src는 Live Src입니다. 즉, 구멍 난 곳만 BG로 메꿈)
+        base_b = bg_b * hole_alpha + src_live_b * (1.0f - hole_alpha);
+        base_g = bg_g * hole_alpha + src_live_g * (1.0f - hole_alpha);
+        base_r = bg_r * hole_alpha + src_live_r * (1.0f - hole_alpha);
+    }
 
-    dst[dst_idx+0] = (unsigned char)(src_b * alpha + bg_b * (1.0f - alpha));
-    dst[dst_idx+1] = (unsigned char)(src_g * alpha + bg_g * (1.0f - alpha));
-    dst[dst_idx+2] = (unsigned char)(src_r * alpha + bg_r * (1.0f - alpha));
+    // --- 4. Final Composite ---
+    // Final = Foreground + Base(Behind)
+    // Foreground는 WarpedAlpha만큼, Base는 나머지(1-WarpedAlpha)만큼 보입니다.
+    
+    dst[idx_rgb+0] = (unsigned char)(fg_b * warped_alpha + base_b * (1.0f - warped_alpha));
+    dst[idx_rgb+1] = (unsigned char)(fg_g * warped_alpha + base_g * (1.0f - warped_alpha));
+    dst[idx_rgb+2] = (unsigned char)(fg_r * warped_alpha + base_r * (1.0f - warped_alpha));
 }
 '''
