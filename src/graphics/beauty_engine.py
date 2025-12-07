@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# V15.2: Float32 Mask Compatibility Update
+# V16.0: Dynamic Smoothing & Bokeh Background Logic
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -22,7 +22,7 @@ except ImportError:
 
 class BeautyEngine:
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V15.2 Alpha Blending Ready")
+        print("[BEAUTY] [BeautyEngine] V16.0 Dynamic Smoothing Ready")
         self.map_scale = 0.25 
         self.cache_w = 0
         self.cache_h = 0
@@ -36,10 +36,14 @@ class BeautyEngine:
         self.bg_buffers = {}
         self.active_profile = 'default'
         self.bg_gpu = None
+        self.bg_blur_gpu = None # [New] Blurred Background for Hole Filling
         self.has_bg = False
         
         self.morph_logic = MorphLogic()
         self.current_alpha = 0.85
+        
+        # [New] Temporal Smoothing Variables
+        self.gpu_mask_prev = None
         
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
@@ -74,12 +78,18 @@ class BeautyEngine:
             self.active_profile = profile_name
             self.bg_buffers[profile_name] = {'cpu': None, 'gpu': None}
             self.has_bg = False
+        
+        # Reset Smoothing States
+        self.gpu_mask_prev = None 
+        self.bg_blur_gpu = None
 
     def reset_background(self, frame):
         if not HAS_CUDA or frame is None: return
         with self.stream:
             new_bg_gpu = cp.array(frame) if not hasattr(frame, 'device') else cp.copy(frame)
             self.bg_gpu = new_bg_gpu
+            self.bg_blur_gpu = None # Reset blur buffer to force regeneration
+            
             if self.active_profile not in self.bg_buffers:
                 self.bg_buffers[self.active_profile] = {'cpu': None, 'gpu': None}
             self.bg_buffers[self.active_profile]['gpu'] = new_bg_gpu
@@ -104,10 +114,12 @@ class BeautyEngine:
                 h, w = frame.shape[:2]
                 frame_gpu = cp.asarray(frame)
 
+            # Init Buffers
             if self.cache_w != w or self.cache_h != h:
                 self.cache_w, self.cache_h = w, h
                 self.gpu_initialized = False
                 self._init_bg_buffers(w, h, frame_gpu)
+                self.gpu_mask_prev = None # Reset mask buffer on resize
                 
                 if self.active_profile in self.bg_buffers:
                     gpu_bg = self.bg_buffers[self.active_profile]['gpu']
@@ -127,23 +139,71 @@ class BeautyEngine:
                 self.bg_gpu = cp.copy(frame_gpu)
                 self.has_bg = True
 
-            # [CRITICAL FIX] Type Safety for Mask (Float32 -> Uint8)
-            # MODNet returns 0.0~1.0 float32, but Kernel expects 0~255 uint8
+            # ==================================================================
+            # [1] Mask Processing: Smoothing & Dynamics
+            # ==================================================================
+            mask_kernel_input = None
+            use_bg = 0
+
             if self.has_bg and mask is not None:
+                # Convert to float32 (0.0 ~ 1.0) for processing
                 if hasattr(mask, 'device'): 
-                    mask_gpu = mask
+                    mask_gpu = mask.astype(cp.float32)
                 else: 
-                    mask_gpu = cp.asarray(mask)
+                    mask_gpu = cp.asarray(mask).astype(cp.float32)
                 
-                # Auto-conversion if float
-                if mask_gpu.dtype == cp.float32 or mask_gpu.dtype == cp.float16:
-                    mask_gpu = (mask_gpu * 255.0).astype(cp.uint8)
-                
+                # Normalize if input is 0~255
+                if mask_gpu.max() > 1.0:
+                    mask_gpu /= 255.0
+
+                # A. Temporal Smoothing (Dynamic Response)
+                # "빠르면 빠르게, 느리면 느리게"
+                if self.gpu_mask_prev is None:
+                    self.gpu_mask_prev = mask_gpu
+                else:
+                    # 마스크 변화량 계산 (전체 평균)
+                    # 움직임이 크면 diff 값이 커짐
+                    mask_diff = cp.abs(mask_gpu - self.gpu_mask_prev).mean()
+                    
+                    # Diff 맵핑: 0.0(정지) -> Alpha 0.1, 0.05(빠름) -> Alpha 0.9
+                    # 작은 떨림(노이즈)은 무시하고, 큰 움직임은 즉시 반영
+                    target_alpha = 0.1 + (mask_diff * 20.0)
+                    target_alpha = cp.clip(target_alpha, 0.1, 0.9)
+                    
+                    # Exponential Moving Average (EMA)
+                    self.gpu_mask_prev = self.gpu_mask_prev * (1.0 - target_alpha) + mask_gpu * target_alpha
+                    mask_gpu = self.gpu_mask_prev
+
+                # B. Spatial Smoothing (Soft Edges)
+                # 경계선을 흐릿하게 만들어 합성이 자연스럽게 함
+                mask_gpu = cupyx.scipy.ndimage.gaussian_filter(mask_gpu, sigma=1.5)
+
+                # Kernel expects uint8 (0~255)
+                mask_kernel_input = (mask_gpu * 255.0).astype(cp.uint8)
                 use_bg = 1
             else:
-                mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
+                mask_kernel_input = cp.zeros((h, w), dtype=cp.uint8)
                 use_bg = 0
 
+            # ==================================================================
+            # [2] Background Blur Logic (Bokeh Effect)
+            # ==================================================================
+            bg_for_kernel = self.bg_gpu
+            
+            if self.has_bg:
+                # 배경이 업데이트 되었거나 블러 버퍼가 없으면 생성
+                # 매 프레임 생성하면 Adaptive Update로 인한 조명 변화도 블러 배경에 반영됨
+                # 성능 고려: 5ms 이내면 허용 (RTX 3060 기준 1080p Gaussian은 빠름)
+                
+                bg_float = self.bg_gpu.astype(cp.float32)
+                # Sigma=5.0: 꽤 흐릿하게 처리하여 왜곡을 감춤
+                self.bg_blur_gpu = cupyx.scipy.ndimage.gaussian_filter(bg_float, sigma=5.0)
+                self.bg_blur_gpu = self.bg_blur_gpu.astype(cp.uint8)
+                bg_for_kernel = self.bg_blur_gpu
+
+            # ==================================================================
+            # [3] Warping Logic
+            # ==================================================================
             self.morph_logic.clear()
             has_deformation = False
             
@@ -208,9 +268,10 @@ class BeautyEngine:
                 grid_dim = ((w + block_dim[0] - 1) // block_dim[0], (h + block_dim[1] - 1) // block_dim[1])
                 scale = int(1.0 / self.map_scale)
                 
+                # Pass 'bg_for_kernel' (Blurred BG) instead of sharp bg_gpu
                 self.composite_kernel(
                     grid_dim, block_dim,
-                    (frame_gpu, mask_gpu, self.bg_gpu, result_gpu, self.gpu_dx, self.gpu_dy, 
+                    (frame_gpu, mask_kernel_input, bg_for_kernel, result_gpu, self.gpu_dx, self.gpu_dy, 
                      w, h, sw, sh, scale, use_bg)
                 )
 
