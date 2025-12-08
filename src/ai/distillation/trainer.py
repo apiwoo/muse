@@ -230,8 +230,8 @@ class Trainer:
         self.ohem_loss = OhemBCELoss(thresh=0.7) 
         self.dice_loss = DiceLoss()
         
-        # SmoothL1: More robust regression for Pose heatmaps
-        self.pose_loss = nn.SmoothL1Loss(beta=1.0)
+        # [Modified] SmoothL1 -> MSELoss for sharper heatmap peaks
+        self.pose_loss = nn.MSELoss()
 
         print(f"[TRAINER] Initialized for TASK: {self.task.upper()} (w/ OHEM & SmoothL1)")
 
@@ -301,11 +301,10 @@ class Trainer:
                     elif self.task == 'pose':
                         heatmaps = heatmaps.to(self.device, non_blocking=True)
                         
-                        # [Modified] SmoothL1 Loss (Robust Regression)
-                        # Scaling factor 1000.0 keeps loss magnitude visible
-                        l_pose = self.pose_loss(output, heatmaps) * 1000.0 
+                        # [Modified] MSE Loss with higher scale (1000.0 -> 10000.0)
+                        l_pose = self.pose_loss(output, heatmaps) * 10000.0
                         loss = l_pose
-                        pbar.set_postfix_str(f"Pose(L1): {loss.item():.4f}")
+                        pbar.set_postfix_str(f"Pose(MSE): {loss.item():.4f}")
                 
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)

@@ -2,6 +2,7 @@
 # Dual TensorRT Inference (Seg & Pose Split)
 # Optimized: Full GPU Pipeline (Zero-Copy) using Pure CuPy
 # Updated: Hybrid Resolution (544p Seg / 352p Pose)
+# Fixed: Pose Output Buffer Sizing (Full Res)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
@@ -60,8 +61,11 @@ class DualInferenceTRT:
         # Output Buffers
         # Seg: (1, 1, 544, 960)
         self.d_seg = cp.zeros((1, 1, self.seg_h, self.seg_w), dtype=cp.float32)
-        # Pose: (1, 17, 88, 160) -> 352p input -> 1/4 heatmap resolution
-        self.d_pose = cp.zeros((1, 17, self.pose_h // 4, self.pose_w // 4), dtype=cp.float32)
+        
+        # [CRITICAL FIX] Pose Output Buffer Size
+        # Model architecture uses interpolate(scale=4), so output matches input resolution (352x640).
+        # Previous code assumed 1/4 scale (88x160) which caused cudaErrorIllegalAddress.
+        self.d_pose = cp.zeros((1, 17, self.pose_h, self.pose_w), dtype=cp.float32)
         
         # Bindings
         # Assuming model export order: input (0) -> output (1)
@@ -148,7 +152,7 @@ class DualInferenceTRT:
     def _parse_heatmaps(self, heatmaps, original_size):
         kpts = []
         w_orig, h_orig = original_size
-        _, h_map, w_map = heatmaps.shape # (17, 88, 160) for 352p input
+        _, h_map, w_map = heatmaps.shape 
         
         scale_x = w_orig / w_map
         scale_y = h_orig / h_map

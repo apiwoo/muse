@@ -1,6 +1,6 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: "No-Distortion" Logic (Differential Blending)
+# Updated: Ghosting Fix (Partition of Unity Blending)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -55,10 +55,9 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (Differential Logic)
-# 변경점: OriginalAlpha와 WarpedAlpha를 비교하여, 
-# "알파값이 줄어든 만큼(Hole)"만 배경을 보여줍니다. 
-# 변화가 없으면(No Morph) 배경을 전혀 섞지 않고 100% 라이브 영상을 사용합니다.
+# [Kernel 2] Smart Composite (Ghosting Fix)
+# 변경점: 배경 레이어(Base) 생성 로직을 'Hole(차이)' 기반에서 'Original Alpha(원본)' 기반으로 변경
+# 이를 통해 인물이 조금이라도 있었던 픽셀은 Live 영상(인물 잔상 포함) 대신 Clean BG를 강제로 사용합니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -84,12 +83,14 @@ void composite_kernel(
     // --- 1. Get Alpha Values ---
     
     // A. Original Alpha (Current Position)
+    // 이 픽셀에 '원래 인물'이 얼마나 있었는지 확인합니다.
     float original_alpha = 0.0f;
     if (use_bg) {
         original_alpha = (float)mask[idx] / 255.0f;
     }
 
     // B. Warped Alpha (Source Position)
+    // 성형 후 이 픽셀에 '변형된 인물'이 얼마나 오게 되는지 확인합니다.
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -123,19 +124,14 @@ void composite_kernel(
         }
     }
 
-    // --- 2. Calculate "Hole" Visibility (Differential) ---
-    // 구멍(Hole)이란? "원래 사람이었는데(Original), 워핑 후 사람이 없어진(Warped) 정도"
-    // 예: Original=1.0, Warped=0.0 -> Hole=1.0 (배경 100% 필요)
-    // 예: Original=0.5, Warped=0.5 -> Hole=0.0 (배경 필요 없음, 라이브 영상 유지)
+    // --- 2. Base Layer Construction (Fixed Logic) ---
+    // 잔상 문제 해결의 핵심입니다.
+    // 기존 로직은 'Hole(차이)'만큼만 배경을 썼기 때문에, 차이가 적은 경계선에서
+    // 원본 인물(Live Src)이 배경 레이어에 섞여 들어가는 문제가 있었습니다.
     
-    float hole_alpha = 0.0f;
-    if (original_alpha > warped_alpha) {
-        hole_alpha = original_alpha - warped_alpha;
-    }
-
-    // --- 3. Base Layer Construction ---
-    // Hole만큼만 Static BG를 보여주고, 나머지는 Live Src를 보여줍니다.
-    // 이렇게 하면 성형 안 한 부분(Hole=0)은 100% Live Src가 되어 왜곡이 사라집니다.
+    // 수정된 로직: 
+    // "원래 인물이 있던 자리(original_alpha > 0)"라면 -> 무조건 Clean BG를 사용.
+    // "원래 인물이 없던 자리(original_alpha == 0)"라면 -> Live Src(배경)를 사용.
     
     float src_live_b = (float)src[idx_rgb+0];
     float src_live_g = (float)src[idx_rgb+1];
@@ -145,22 +141,23 @@ void composite_kernel(
     float base_g = src_live_g;
     float base_r = src_live_r;
 
-    // Only read BG if we actually have a hole
-    if (hole_alpha > 0.0f) {
+    // 만약 이 픽셀이 조금이라도 '원본 인물' 영역이었다면, 
+    // 그 부분은 Live 화면(인물 포함) 대신 깨끗한 배경(BG)으로 덮어써야 합니다.
+    if (original_alpha > 0.0f) {
         float bg_b = (float)bg[idx_rgb+0];
         float bg_g = (float)bg[idx_rgb+1];
         float bg_r = (float)bg[idx_rgb+2];
         
-        // Base = BG * Hole + Src * (1 - Hole)
-        // (여기서 Src는 Live Src입니다. 즉, 구멍 난 곳만 BG로 메꿈)
-        base_b = bg_b * hole_alpha + src_live_b * (1.0f - hole_alpha);
-        base_g = bg_g * hole_alpha + src_live_g * (1.0f - hole_alpha);
-        base_r = bg_r * hole_alpha + src_live_r * (1.0f - hole_alpha);
+        // Linear Interpolation: Alpha만큼 BG를 섞습니다.
+        // Alpha가 1.0이면 100% BG가 되어 인물이 완전히 지워집니다.
+        base_b = bg_b * original_alpha + src_live_b * (1.0f - original_alpha);
+        base_g = bg_g * original_alpha + src_live_g * (1.0f - original_alpha);
+        base_r = bg_r * original_alpha + src_live_r * (1.0f - original_alpha);
     }
 
-    // --- 4. Final Composite ---
-    // Final = Foreground + Base(Behind)
-    // Foreground는 WarpedAlpha만큼, Base는 나머지(1-WarpedAlpha)만큼 보입니다.
+    // --- 3. Final Composite ---
+    // 최종 결과 = (변형된 인물) + (배경 레이어 * 인물 투명도 반전)
+    // Standard Over Operator: result = FG * alpha + BG * (1 - alpha)
     
     dst[idx_rgb+0] = (unsigned char)(fg_b * warped_alpha + base_b * (1.0f - warped_alpha));
     dst[idx_rgb+1] = (unsigned char)(fg_g * warped_alpha + base_g * (1.0f - warped_alpha));
