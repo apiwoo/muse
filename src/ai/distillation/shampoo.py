@@ -2,7 +2,7 @@
 # Shampoo: Preconditioned Stochastic Tensor Optimization (2nd Order)
 # Reference: https://arxiv.org/abs/1802.09568
 # [Fixed] Correct dimension handling for Convolutional Layers (Flattened Matrix View)
-# [Optimization] Lazy Update (update_freq=10) with Stability Fixes (NaN Guard, SVD Clamping)
+# [Optimization] Lazy Update (update_freq=10 -> 5) with Stability Fixes (NaN Guard, SVD Clamping)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import torch
@@ -15,7 +15,7 @@ class Shampoo(Optimizer):
     It captures correlation between parameters (curvature) to accelerate training.
     """
     def __init__(self, params, lr=1e-3, momentum=0.0, weight_decay=0.0,
-                 epsilon=1e-4, update_freq=10):  # [Config] Default updated to 10
+                 epsilon=1e-4, update_freq=5):  # [Config] Default updated to 5 (Stability Boost)
         defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay,
                         epsilon=epsilon, update_freq=update_freq)
         super(Shampoo, self).__init__(params, defaults)
