@@ -2,6 +2,7 @@
 # (C) 2025 MUSE Corp.
 # Supports --task and --profile for targeted training
 # Updated: Skip if model exists (Smart Resume)
+# [Optimization] Increased Batch Size (8 -> 16) to utilize VRAM and reduce Shampoo overhead steps
 
 import os
 import sys
@@ -44,7 +45,11 @@ def main():
 
     epochs = 50 
     
-    trainer = Trainer(session_name, task=task, target_profile=target_profile, epochs=epochs, batch_size=8)
+    # [Tuning] Batch Size Increased 8 -> 16
+    # Reason: User reported 6.5GB/12GB usage. Shampoo overhead is per-step.
+    # Increasing batch size reduces total steps/epoch, significantly speeding up training
+    # while utilizing free VRAM.
+    trainer = Trainer(session_name, task=task, target_profile=target_profile, epochs=epochs, batch_size=16)
     
     try:
         trainer.train_all_profiles()
