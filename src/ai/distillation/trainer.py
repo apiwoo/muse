@@ -1,6 +1,6 @@
 # Project MUSE - trainer.py
 # Multi-Profile Training Engine (Dual Mode & Single Profile Support)
-# Updated v2.0: OHEM (Hard Example Mining) & SmoothL1 for Higher Accuracy
+# Updated v2.1: 2nd Order Optimization (Shampoo) & OHEM
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -20,6 +20,14 @@ import gc
 # Ensure paths
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 from src.ai.distillation.student.model_arch import MuseStudentModel
+
+# [New] Import 2nd Order Optimizer
+try:
+    from src.ai.distillation.shampoo import Shampoo
+    HAS_SHAMPOO = True
+except ImportError:
+    HAS_SHAMPOO = False
+    print("[TRAINER] Shampoo optimizer not found. Fallback to AdamW.")
 
 try:
     import albumentations as A
@@ -233,7 +241,7 @@ class Trainer:
         # [Modified] SmoothL1 -> MSELoss for sharper heatmap peaks
         self.pose_loss = nn.MSELoss()
 
-        print(f"[TRAINER] Initialized for TASK: {self.task.upper()} (w/ OHEM & SmoothL1)")
+        print(f"[TRAINER] Initialized for TASK: {self.task.upper()} (w/ OHEM & Shampoo)")
 
     def train_all_profiles(self):
         total = len(self.profiles)
@@ -251,7 +259,18 @@ class Trainer:
         # Init Model based on Task
         model = MuseStudentModel(num_keypoints=17, pretrained=True, mode=self.task).to(self.device)
         
-        optimizer = optim.AdamW(model.parameters(), lr=6e-5, weight_decay=0.01)
+        # [Optimization Strategy Upgrade]
+        # Replace AdamW with Shampoo (2nd Order) if available
+        # 2nd Order Methods converge faster, so we might need fewer epochs or slightly different LR
+        if HAS_SHAMPOO:
+            print("[TRAINER] Applying 2nd Order Optimization (Shampoo)...")
+            # Shampoo typically handles curvature, so lower LR or standard LR works well.
+            # Momentum is handled internally.
+            optimizer = Shampoo(model.parameters(), lr=1e-3, momentum=0.9, epsilon=1e-4)
+        else:
+            print("[TRAINER] Applying 1st Order Optimization (AdamW)...")
+            optimizer = optim.AdamW(model.parameters(), lr=6e-5, weight_decay=0.01)
+        
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs)
         
         try:
