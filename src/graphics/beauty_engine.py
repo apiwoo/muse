@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# V15.2: Float32 Mask Compatibility Update
+# V15.3: Motion-Adaptive Smoothing (Anti-Lag Update)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -22,7 +22,7 @@ except ImportError:
 
 class BeautyEngine:
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V15.2 Alpha Blending Ready")
+        print("[BEAUTY] [BeautyEngine] V15.3 Motion-Adaptive Logic Ready")
         self.map_scale = 0.25 
         self.cache_w = 0
         self.cache_h = 0
@@ -39,7 +39,12 @@ class BeautyEngine:
         self.has_bg = False
         
         self.morph_logic = MorphLogic()
-        self.current_alpha = 0.85
+        
+        # [Tuning] Adaptive Smoothing Parameters
+        # 움직임에 따라 Alpha값(관성)을 0.0(즉시반응) ~ 0.85(떨림방지) 사이에서 자동 조절합니다.
+        self.base_alpha = 0.85       # 정지 시 최대 관성 (떨림 방지용)
+        self.min_alpha = 0.0         # 빠른 이동 시 최소 관성 (반응성 확보용)
+        self.motion_sensitivity = 5.0 # 움직임 감도 (높을수록 작은 움직임에도 민감하게 반응하여 관성을 끔)
         
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
@@ -198,7 +203,8 @@ class BeautyEngine:
                 self.warp_kernel(grid_dim, block_dim, (self.gpu_dx, self.gpu_dy, params_gpu, len(warp_params), sw, sh))
                 
             if has_deformation or (self.prev_gpu_dx is not None):
-                self._apply_temporal_smoothing_fast(self.current_alpha)
+                # [Updated] Motion-Adaptive Smoothing Call
+                self._apply_temporal_smoothing_fast()
                 
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=5, output=self.gpu_dx)
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=5, output=self.gpu_dy)
@@ -228,17 +234,38 @@ class BeautyEngine:
                 else:
                     data['gpu'] = cp.zeros_like(tmpl)
 
-    def _apply_temporal_smoothing_fast(self, alpha):
+    def _apply_temporal_smoothing_fast(self):
+        """
+        [Motion-Adaptive Smoothing]
+        움직임 강도(Delta)를 측정하여, Alpha(관성) 값을 동적으로 조절합니다.
+        - 움직임 큼 -> Alpha 낮춤 (즉시 반영, Lag 제거)
+        - 움직임 작음 -> Alpha 높임 (떨림 방지, Jitter 제거)
+        """
         if self.prev_gpu_dx is None:
             self.prev_gpu_dx = self.gpu_dx.copy()
             self.prev_gpu_dy = self.gpu_dy.copy()
             return
 
-        beta = 1.0 - alpha
+        # 1. 움직임 변화량 측정 (GPU 연산)
+        diff_x = cp.abs(self.gpu_dx - self.prev_gpu_dx)
+        diff_y = cp.abs(self.gpu_dy - self.prev_gpu_dy)
+        avg_motion = cp.mean(diff_x + diff_y).item() # GPU->CPU Scalar Sync
+
+        # 2. 적응형 Alpha 계산
+        # 공식: Alpha = Base - (Motion * Sensitivity)
+        # 움직임(avg_motion)이 클수록 dynamic_alpha는 작아집니다.
+        dynamic_alpha = self.base_alpha - (avg_motion * self.motion_sensitivity)
+        
+        # 범위 제한: [Min Alpha ~ Base Alpha]
+        dynamic_alpha = max(self.min_alpha, min(dynamic_alpha, self.base_alpha))
+
+        # 3. 블렌딩 적용
+        beta = 1.0 - dynamic_alpha
+        
         self.gpu_dx *= beta
-        self.gpu_dx += self.prev_gpu_dx * alpha
+        self.gpu_dx += self.prev_gpu_dx * dynamic_alpha
         self.gpu_dy *= beta
-        self.gpu_dy += self.prev_gpu_dy * alpha
+        self.gpu_dy += self.prev_gpu_dy * dynamic_alpha
         
         self.prev_gpu_dx[:] = self.gpu_dx
         self.prev_gpu_dy[:] = self.gpu_dy

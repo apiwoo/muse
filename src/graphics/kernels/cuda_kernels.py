@@ -1,6 +1,6 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: Ghosting Fix (Partition of Unity Blending)
+# Updated: Ghosting Fix (Hard Replacement Logic)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -56,8 +56,8 @@ void warp_kernel(
 '''
 
 # [Kernel 2] Smart Composite (Ghosting Fix)
-# 변경점: 배경 레이어(Base) 생성 로직을 'Hole(차이)' 기반에서 'Original Alpha(원본)' 기반으로 변경
-# 이를 통해 인물이 조금이라도 있었던 픽셀은 Live 영상(인물 잔상 포함) 대신 Clean BG를 강제로 사용합니다.
+# 변경점: 배경 레이어(Base) 생성 로직을 'Interpolation(섞기)'에서 'Hard Replacement(대체)'로 변경
+# 인물이 조금이라도 있던 영역(original_alpha > 0)은 Live 영상 대신 100% Clean BG를 사용하여 잔상을 제거합니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -124,14 +124,10 @@ void composite_kernel(
         }
     }
 
-    // --- 2. Base Layer Construction (Fixed Logic) ---
-    // 잔상 문제 해결의 핵심입니다.
-    // 기존 로직은 'Hole(차이)'만큼만 배경을 썼기 때문에, 차이가 적은 경계선에서
-    // 원본 인물(Live Src)이 배경 레이어에 섞여 들어가는 문제가 있었습니다.
-    
-    // 수정된 로직: 
-    // "원래 인물이 있던 자리(original_alpha > 0)"라면 -> 무조건 Clean BG를 사용.
-    // "원래 인물이 없던 자리(original_alpha == 0)"라면 -> Live Src(배경)를 사용.
+    // --- 2. Base Layer Construction (Ghost Removal Logic) ---
+    // [Fix] 잔상 제거를 위한 로직 변경
+    // 기존: BG * alpha + Src * (1-alpha) -> 경계면(0.5)에서 Src(원본 인물)가 50% 섞여 잔상 발생
+    // 수정: original_alpha > 0.05 (인물 영역) -> 무조건 Clean BG 사용
     
     float src_live_b = (float)src[idx_rgb+0];
     float src_live_g = (float)src[idx_rgb+1];
@@ -141,18 +137,12 @@ void composite_kernel(
     float base_g = src_live_g;
     float base_r = src_live_r;
 
-    // 만약 이 픽셀이 조금이라도 '원본 인물' 영역이었다면, 
-    // 그 부분은 Live 화면(인물 포함) 대신 깨끗한 배경(BG)으로 덮어써야 합니다.
-    if (original_alpha > 0.0f) {
-        float bg_b = (float)bg[idx_rgb+0];
-        float bg_g = (float)bg[idx_rgb+1];
-        float bg_r = (float)bg[idx_rgb+2];
-        
-        // Linear Interpolation: Alpha만큼 BG를 섞습니다.
-        // Alpha가 1.0이면 100% BG가 되어 인물이 완전히 지워집니다.
-        base_b = bg_b * original_alpha + src_live_b * (1.0f - original_alpha);
-        base_g = bg_g * original_alpha + src_live_g * (1.0f - original_alpha);
-        base_r = bg_r * original_alpha + src_live_r * (1.0f - original_alpha);
+    // 만약 이 픽셀이 '원래 인물' 영역이었다면 (임계값 0.05로 노이즈 회피)
+    // 원본 영상(Live Src)을 버리고, 깨끗한 배경(BG)으로 강제 교체합니다.
+    if (original_alpha > 0.05f) {
+        base_b = (float)bg[idx_rgb+0];
+        base_g = (float)bg[idx_rgb+1];
+        base_r = (float)bg[idx_rgb+2];
     }
 
     // --- 3. Final Composite ---
