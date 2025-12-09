@@ -56,7 +56,7 @@ class VirtualCamera:
         # [Sleep 복구]
         # 입력이 정상적인 30fps라면, 이 함수는 프레임을 깎아먹지 않고
         # 송출 타이밍을 일정하게 맞춰주는(Jitter 방지) 역할을 합니다.
-        self.cam.sleep_until_next_frame()
+        # self.cam.sleep_until_next_frame()
 
     def close(self):
         if self.cam:

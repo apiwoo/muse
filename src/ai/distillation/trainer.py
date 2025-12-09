@@ -1,6 +1,6 @@
 # Project MUSE - trainer.py
 # Multi-Profile Training Engine (Dual Mode & Single Profile Support)
-# Updated v2.1: 2nd Order Optimization (Shampoo) & OHEM
+# Updated v2.2: Fixed Grayscale Augmentation Warning & AMP Deprecation
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -106,14 +106,15 @@ class MuseDataset(Dataset):
         mask_path = os.path.join(self.mask_dir, f"{basename}.png")
         label_path = os.path.join(self.label_dir, f"{basename}.json")
 
-        img = cv2.imread(img_path)
+        # [Fix 1] Force Load as Color (BGR) -> Fixes Albumentations Grayscale Warning
+        img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        
         if img is None:
+            # Create black image if load fails
             img = np.zeros((self.input_size[1], self.input_size[0], 3), dtype=np.uint8)
         
-        # Robust Channel Handling
-        if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif len(img.shape) == 3 and img.shape[2] == 4: img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
-        elif len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # BGR -> RGB Conversion
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         h_orig, w_orig = img.shape[:2]
         
@@ -145,8 +146,9 @@ class MuseDataset(Dataset):
                 mask_tensor = transformed['mask'].float().unsqueeze(0) / 255.0
                 mask_tensor = (mask_tensor > 0.5).float()
                 transformed_kpts = transformed['keypoints']
-            except Exception:
-                # Fallback
+            except Exception as e:
+                # print(f"[WARN] Albumentations failed: {e}, using fallback.")
+                # Fallback logic
                 img_resized = cv2.resize(img, self.input_size)
                 mask_resized = cv2.resize(mask, self.input_size, interpolation=cv2.INTER_NEAREST)
                 img_tensor = torch.from_numpy(img_resized).permute(2,0,1).float() / 255.0
@@ -299,7 +301,9 @@ class Trainer:
                 imgs = imgs.to(self.device, non_blocking=True)
                 
                 optimizer.zero_grad()
-                with torch.cuda.amp.autocast():
+                
+                # [Fix 2] Use modern autocast syntax
+                with torch.amp.autocast('cuda'):
                     output = model(imgs)
                     
                     if self.task == 'seg':
