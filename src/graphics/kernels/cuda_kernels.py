@@ -1,6 +1,6 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: Ghosting Fix (Hard Replacement Logic)
+# Updated: Ghosting Fix V2 (Displacement-Aware Replacement)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -55,9 +55,9 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (Ghosting Fix)
-# 변경점: 배경 레이어(Base) 생성 로직을 'Interpolation(섞기)'에서 'Hard Replacement(대체)'로 변경
-# 인물이 조금이라도 있던 영역(original_alpha > 0)은 Live 영상 대신 100% Clean BG를 사용하여 잔상을 제거합니다.
+# [Kernel 2] Smart Composite (Ghosting Fix V2)
+# 변경점: 무조건적인 배경 교체가 아닌, '픽셀이 이동했을 때만' 배경을 교체하도록 로직 개선
+# 이를 통해 보정이 없는 영역(또는 보정 기능 OFF 시)은 원본 영상(Live Src)을 100% 보존합니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -83,23 +83,26 @@ void composite_kernel(
     // --- 1. Get Alpha Values ---
     
     // A. Original Alpha (Current Position)
-    // 이 픽셀에 '원래 인물'이 얼마나 있었는지 확인합니다.
     float original_alpha = 0.0f;
     if (use_bg) {
         original_alpha = (float)mask[idx] / 255.0f;
     }
 
-    // B. Warped Alpha (Source Position)
-    // 성형 후 이 픽셀에 '변형된 인물'이 얼마나 오게 되는지 확인합니다.
+    // B. Warped Alpha & Displacement Check (Source Position)
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
     if (sy >= small_height) sy = small_height - 1;
     int s_idx = sy * small_width + sx;
 
+    // 변위량(Shift) 가져오기
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
 
+    // 변형 강도 계산 (제곱합)
+    float displacement_sq = shift_x * shift_x + shift_y * shift_y;
+
+    // 워핑된 좌표 계산
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
@@ -116,7 +119,6 @@ void composite_kernel(
             warped_alpha = 1.0f; 
         }
         
-        // Fetch Warped Foreground
         if (warped_alpha > 0.0f) {
             fg_b = (float)src[warped_idx_rgb+0];
             fg_g = (float)src[warped_idx_rgb+1];
@@ -124,10 +126,9 @@ void composite_kernel(
         }
     }
 
-    // --- 2. Base Layer Construction (Ghost Removal Logic) ---
-    // [Fix] 잔상 제거를 위한 로직 변경
-    // 기존: BG * alpha + Src * (1-alpha) -> 경계면(0.5)에서 Src(원본 인물)가 50% 섞여 잔상 발생
-    // 수정: original_alpha > 0.05 (인물 영역) -> 무조건 Clean BG 사용
+    // --- 2. Base Layer Construction (Ghost Removal V2) ---
+    // 수정: '원래 인물 영역'이더라도, '변형'이 거의 없다면 원본 영상을 그대로 씁니다.
+    // 변형이 일어난 곳만 Clean Plate(bg)로 채워서 잔상을 지웁니다.
     
     float src_live_b = (float)src[idx_rgb+0];
     float src_live_g = (float)src[idx_rgb+1];
@@ -137,18 +138,20 @@ void composite_kernel(
     float base_g = src_live_g;
     float base_r = src_live_r;
 
-    // 만약 이 픽셀이 '원래 인물' 영역이었다면 (임계값 0.05로 노이즈 회피)
-    // 원본 영상(Live Src)을 버리고, 깨끗한 배경(BG)으로 강제 교체합니다.
-    if (original_alpha > 0.05f) {
+    // 잔상 제거 조건:
+    // 1. 여기가 원래 사람 영역이었음 (original_alpha > 0.05)
+    // 2. AND 실제로 픽셀이 이동했음 (displacement_sq > 1.0) -> 약 1픽셀 이상 움직임
+    // 
+    // 즉, 사람이 가만히 있거나 보정을 껐다면(displacement ~ 0), 
+    // 이 조건문은 거짓이 되어 base = src_live(원본)가 유지됩니다.
+    
+    if (original_alpha > 0.05f && displacement_sq > 1.0f) {
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
     }
 
     // --- 3. Final Composite ---
-    // 최종 결과 = (변형된 인물) + (배경 레이어 * 인물 투명도 반전)
-    // Standard Over Operator: result = FG * alpha + BG * (1 - alpha)
-    
     dst[idx_rgb+0] = (unsigned char)(fg_b * warped_alpha + base_b * (1.0f - warped_alpha));
     dst[idx_rgb+1] = (unsigned char)(fg_g * warped_alpha + base_g * (1.0f - warped_alpha));
     dst[idx_rgb+2] = (unsigned char)(fg_r * warped_alpha + base_r * (1.0f - warped_alpha));
