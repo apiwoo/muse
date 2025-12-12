@@ -1,6 +1,6 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: Ghosting Fix V2 (Displacement-Aware Replacement)
+# Updated: Ghosting Fix V8 (Absolute Zero Threshold)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -55,9 +55,10 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (Ghosting Fix V2)
-# 변경점: 무조건적인 배경 교체가 아닌, '픽셀이 이동했을 때만' 배경을 교체하도록 로직 개선
-# 이를 통해 보정이 없는 영역(또는 보정 기능 OFF 시)은 원본 영상(Live Src)을 100% 보존합니다.
+# [Kernel 2] Smart Composite (Ghosting Fix V8 - Absolute Zero Logic)
+# 변경점: '몸' 판단 기준을 0.05(5%)에서 0.0(0%)으로 변경했습니다.
+# 이제 알파값이 1(약 0.0039)이라도 있으면 무조건 몸으로 인식합니다.
+# "0이 아니면 안 되는 이유" -> 0.05로 설정하면 1~12값(희미한 잔상)이 무시되어 잔상이 남기 때문입니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -80,29 +81,22 @@ void composite_kernel(
     int idx = y * width + x;
     int idx_rgb = idx * 3;
 
-    // --- 1. Get Alpha Values ---
-    
-    // A. Original Alpha (Current Position)
+    // --- 1. Original Alpha (Start State) ---
     float original_alpha = 0.0f;
     if (use_bg) {
         original_alpha = (float)mask[idx] / 255.0f;
     }
 
-    // B. Warped Alpha & Displacement Check (Source Position)
+    // --- 2. Warped Alpha (End State) ---
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
     if (sy >= small_height) sy = small_height - 1;
     int s_idx = sy * small_width + sx;
 
-    // 변위량(Shift) 가져오기
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
 
-    // 변형 강도 계산 (제곱합)
-    float displacement_sq = shift_x * shift_x + shift_y * shift_y;
-
-    // 워핑된 좌표 계산
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
@@ -126,32 +120,34 @@ void composite_kernel(
         }
     }
 
-    // --- 2. Base Layer Construction (Ghost Removal V2) ---
-    // 수정: '원래 인물 영역'이더라도, '변형'이 거의 없다면 원본 영상을 그대로 씁니다.
-    // 변형이 일어난 곳만 Clean Plate(bg)로 채워서 잔상을 지웁니다.
+    // --- 3. Base Layer Construction (Absolute Zero Decision) ---
+    // [Threshold: 0.0f]
+    // 8bit 이미지에서 1/255(약 0.004) 값이라도 존재하면 "몸"으로 판단합니다.
+    // 아주 미세한 테두리 잔상(1~5%)까지 확실하게 잡기 위함입니다.
     
-    float src_live_b = (float)src[idx_rgb+0];
-    float src_live_g = (float)src[idx_rgb+1];
-    float src_live_r = (float)src[idx_rgb+2];
+    bool was_body = (original_alpha > 0.0f); // 0이 아니면 무조건 Yes
+    bool is_now_empty = (warped_alpha < 0.5f); // 지금 비어있는가?
     
-    float base_b = src_live_b;
-    float base_g = src_live_g;
-    float base_r = src_live_r;
+    // [Logic] Gap Detection
+    // 원래 몸이었는데(Was Body) && 지금 비어있다(Is Empty) = 잔상 발생 지점(Gap)
+    // -> 이 경우에만 배경(BG)을 사용하여 덮습니다.
+    bool is_gap = (was_body && is_now_empty);
 
-    // 잔상 제거 조건:
-    // 1. 여기가 원래 사람 영역이었음 (original_alpha > 0.05)
-    // 2. AND 실제로 픽셀이 이동했음 (displacement_sq > 1.0) -> 약 1픽셀 이상 움직임
-    // 
-    // 즉, 사람이 가만히 있거나 보정을 껐다면(displacement ~ 0), 
-    // 이 조건문은 거짓이 되어 base = src_live(원본)가 유지됩니다.
-    
-    if (original_alpha > 0.05f && displacement_sq > 1.0f) {
+    float base_b, base_g, base_r;
+
+    if (is_gap) {
+        // [CASE 1] 잔상 부위 -> 미리 찍어둔 배경(Clean Plate)으로 강제 치환
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
+    } else {
+        // [CASE 2] 그 외 (몸 안쪽이거나, 원래 배경이던 곳) -> 원본 영상(Live Feed) 유지
+        base_b = (float)src[idx_rgb+0];
+        base_g = (float)src[idx_rgb+1];
+        base_r = (float)src[idx_rgb+2];
     }
 
-    // --- 3. Final Composite ---
+    // --- 4. Final Composite ---
     dst[idx_rgb+0] = (unsigned char)(fg_b * warped_alpha + base_b * (1.0f - warped_alpha));
     dst[idx_rgb+1] = (unsigned char)(fg_g * warped_alpha + base_g * (1.0f - warped_alpha));
     dst[idx_rgb+2] = (unsigned char)(fg_r * warped_alpha + base_r * (1.0f - warped_alpha));
