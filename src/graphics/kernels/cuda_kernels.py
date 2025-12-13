@@ -1,6 +1,6 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: Ghosting Fix V8 (Absolute Zero Threshold)
+# Updated: Ghosting Fix V11 (Smart Loss Detection)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -55,10 +55,11 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (Ghosting Fix V8 - Absolute Zero Logic)
-# 변경점: '몸' 판단 기준을 0.05(5%)에서 0.0(0%)으로 변경했습니다.
-# 이제 알파값이 1(약 0.0039)이라도 있으면 무조건 몸으로 인식합니다.
-# "0이 아니면 안 되는 이유" -> 0.05로 설정하면 1~12값(희미한 잔상)이 무시되어 잔상이 남기 때문입니다.
+# [Kernel 2] Smart Composite (Ghosting Fix V11 - Smart Loss Logic)
+# 핵심 변경: "존재 여부"가 아닌 "변화 방향(줄어듦 vs 늘어남)"을 감지합니다.
+# 1. 줄어듦 (1.0 -> 0.0): 잔상 발생 -> 배경 사용
+# 2. 늘어남 (0.0 -> 1.0): 배경 불필요 -> 원본 사용
+# 3. 유지됨 (1.0 -> 1.0): 변화 없음 -> 원본 사용
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -81,13 +82,13 @@ void composite_kernel(
     int idx = y * width + x;
     int idx_rgb = idx * 3;
 
-    // --- 1. Original Alpha (Start State) ---
+    // --- 1. Original Alpha (Before) ---
     float original_alpha = 0.0f;
     if (use_bg) {
         original_alpha = (float)mask[idx] / 255.0f;
     }
 
-    // --- 2. Warped Alpha (End State) ---
+    // --- 2. Warped Alpha (After) ---
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -120,28 +121,32 @@ void composite_kernel(
         }
     }
 
-    // --- 3. Base Layer Construction (Absolute Zero Decision) ---
-    // [Threshold: 0.0f]
-    // 8bit 이미지에서 1/255(약 0.004) 값이라도 존재하면 "몸"으로 판단합니다.
-    // 아주 미세한 테두리 잔상(1~5%)까지 확실하게 잡기 위함입니다.
+    // --- 3. Base Layer Construction (Smart Loss Logic) ---
     
-    bool was_body = (original_alpha > 0.0f); // 0이 아니면 무조건 Yes
-    bool is_now_empty = (warped_alpha < 0.5f); // 지금 비어있는가?
-    
-    // [Logic] Gap Detection
-    // 원래 몸이었는데(Was Body) && 지금 비어있다(Is Empty) = 잔상 발생 지점(Gap)
-    // -> 이 경우에만 배경(BG)을 사용하여 덮습니다.
-    bool is_gap = (was_body && is_now_empty);
+    // [Check 1] 현재 확실한 몸체인가?
+    // 보정 후 알파값이 0.9 이상이면, 밑바탕이 무엇이든 거의 보이지 않습니다.
+    // 이 경우 안전하게 원본(Src)을 사용하여 몸 안쪽의 '문신/번개' 현상을 원천 봉쇄합니다.
+    bool is_solid_body = (warped_alpha > 0.9f);
+
+    // [Check 2] 알파값이 줄어들었는가? (Loss Detection)
+    // Original > Warped 인 경우만 '줄어듦(Shrink/Gap)'으로 판단합니다.
+    // 늘어난 경우(Expand)는 이 조건이 False가 되어 원본을 사용하게 됩니다. (번개 방지)
+    // 0.02의 마진은 미세한 연산 오차 무시용입니다.
+    bool is_alpha_loss = (original_alpha > warped_alpha + 0.02f);
 
     float base_b, base_g, base_r;
 
-    if (is_gap) {
-        // [CASE 1] 잔상 부위 -> 미리 찍어둔 배경(Clean Plate)으로 강제 치환
+    // [Final Decision]
+    // 1. 몸이 아니거나 반투명한 상태인데 (!is_solid_body)
+    // 2. 원래보다 알파값이 줄어들었다면 (is_alpha_loss)
+    // -> 이것은 "잔상(Ghost)"입니다. 배경(BG)으로 덮습니다.
+    if (!is_solid_body && is_alpha_loss) {
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
     } else {
-        // [CASE 2] 그 외 (몸 안쪽이거나, 원래 배경이던 곳) -> 원본 영상(Live Feed) 유지
+        // 그 외 (확실한 몸통, 늘어난 부위, 변화 없는 배경 등)
+        // -> 원본(Live Feed)을 유지합니다.
         base_b = (float)src[idx_rgb+0];
         base_g = (float)src[idx_rgb+1];
         base_r = (float)src[idx_rgb+2];
