@@ -1,6 +1,6 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: Ghosting Fix V11 (Smart Loss Detection)
+# Updated: Ghosting Fix V13 (Revert RGB Check, Optimize Loss Margin)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -55,11 +55,9 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (Ghosting Fix V11 - Smart Loss Logic)
-# 핵심 변경: "존재 여부"가 아닌 "변화 방향(줄어듦 vs 늘어남)"을 감지합니다.
-# 1. 줄어듦 (1.0 -> 0.0): 잔상 발생 -> 배경 사용
-# 2. 늘어남 (0.0 -> 1.0): 배경 불필요 -> 원본 사용
-# 3. 유지됨 (1.0 -> 1.0): 변화 없음 -> 원본 사용
+# [Kernel 2] Smart Composite (Ghosting Fix V13 - Logic Restore)
+# 색상 검증 로직(RGB Diff)을 제거하여 보정(Slimming) 기능을 복구합니다.
+# 대신 is_alpha_loss의 민감도를 조절하여 미세한 노이즈를 무시합니다.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -121,31 +119,29 @@ void composite_kernel(
         }
     }
 
-    // --- 3. Base Layer Construction (Smart Loss Logic) ---
+    // --- 3. Base Layer Construction (Smart Loss Logic Restored) ---
     
-    // [Check 1] 현재 확실한 몸체인가?
-    // 보정 후 알파값이 0.9 이상이면, 밑바탕이 무엇이든 거의 보이지 않습니다.
-    // 이 경우 안전하게 원본(Src)을 사용하여 몸 안쪽의 '문신/번개' 현상을 원천 봉쇄합니다.
+    // [Check 1] 현재 확실한 몸체인가? (이 픽셀은 보정 결과 몸으로 남아야 함)
     bool is_solid_body = (warped_alpha > 0.9f);
 
     // [Check 2] 알파값이 줄어들었는가? (Loss Detection)
-    // Original > Warped 인 경우만 '줄어듦(Shrink/Gap)'으로 판단합니다.
-    // 늘어난 경우(Expand)는 이 조건이 False가 되어 원본을 사용하게 됩니다. (번개 방지)
-    // 0.02의 마진은 미세한 연산 오차 무시용입니다.
-    bool is_alpha_loss = (original_alpha > warped_alpha + 0.02f);
+    // 보정으로 인해 공간이 비었는지 확인.
+    // Margin을 0.02 -> 0.05로 상향하여 미세한 연산 오차로 인한 깜빡임 방지
+    bool is_alpha_loss = (original_alpha > warped_alpha + 0.05f);
 
     float base_b, base_g, base_r;
 
     // [Final Decision]
     // 1. 몸이 아니거나 반투명한 상태인데 (!is_solid_body)
-    // 2. 원래보다 알파값이 줄어들었다면 (is_alpha_loss)
-    // -> 이것은 "잔상(Ghost)"입니다. 배경(BG)으로 덮습니다.
+    // 2. 원래보다 알파값이 확실히 줄어들었다면 (is_alpha_loss)
+    // -> "보정으로 인해 깎여나간 빈 공간"으로 간주하고 배경(BG)을 채웁니다.
+    // -> 이 로직이 작동해야 'Slimming' 효과가 나타납니다.
     if (!is_solid_body && is_alpha_loss) {
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
     } else {
-        // 그 외 (확실한 몸통, 늘어난 부위, 변화 없는 배경 등)
+        // 그 외 (확실한 몸통, 늘어난 부위 등)
         // -> 원본(Live Feed)을 유지합니다.
         base_b = (float)src[idx_rgb+0];
         base_g = (float)src[idx_rgb+1];

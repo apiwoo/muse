@@ -1,5 +1,5 @@
 # Project MUSE - beauty_engine.py
-# V16.0: Input Stabilization Architecture (Root Cause Fix)
+# V18.0: Gradual Response Stabilizer (Smooth Transition)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -22,13 +22,17 @@ except ImportError:
 
 class LandmarkStabilizer:
     """
-    [Input Stabilizer]
-    결과물을 섞는게 아니라, 원천 데이터(랜드마크)의 떨림을 잡습니다.
-    빠른 움직임(Speed)에는 민감하게(Low Alpha), 정지 상태(Jitter)에는 둔감하게(High Alpha) 반응합니다.
+    [Input Stabilizer V18 - Gradual Response]
+    - 속도에 비례하여 Beta 값을 동적으로 조절합니다.
+    - 갑작스러운 ON/OFF 스위칭 대신 부드러운 전환을 유도합니다.
+    - 빠른 움직임: Beta 증가 -> Lag 감소 (번개 방지)
+    - 느린 움직임: Beta 감소 -> Jitter 제거 (떨림 방지)
     """
-    def __init__(self, min_cutoff=0.01, beta=0.5):
-        self.min_cutoff = min_cutoff # 최소 움직임 임계값 (떨림 제거용)
-        self.beta = beta             # 속도 계수 (높을수록 빠른 움직임에 즉각 반응)
+    def __init__(self, min_cutoff=0.01, base_beta=5.0, high_speed_beta=50.0):
+        self.min_cutoff = min_cutoff
+        self.base_beta = base_beta
+        self.high_speed_beta = high_speed_beta # 최대 속도일 때의 Beta 한계치
+        
         self.prev_val = None
         self.prev_trend = None
         self.last_time = None
@@ -50,24 +54,37 @@ class LandmarkStabilizer:
         trend = dx / dt
         
         # Trend Smoothing (급격한 속도 변화 완화)
-        # alpha_trend = 0.5 (고정)
         trend_hat = 0.5 * dx + 0.5 * self.prev_trend
-
-        # 2. 적응형 Cutoff 계산
-        # 속도(abs_trend)가 빠를수록 cutoff가 높아져서 alpha가 1에 가까워짐(즉시 반응)
-        abs_trend = np.abs(trend_hat)
-        cutoff = self.min_cutoff + self.beta * abs_trend
         
-        # 3. Alpha 계산 (Low Pass Filter 계수)
-        # alpha = 1.0 -> 입력값 100% (No Lag)
-        # alpha = 0.1 -> 이전값 90% (Heavy Smoothing)
+        # 2. 동적 Beta 계산 (Dynamic Beta)
+        # 움직임의 크기(abs_trend)에 따라 Beta를 선형적으로 증가시킵니다.
+        # 움직임이 클수록(빠를수록) Beta가 커져서, Cutoff 주파수가 높아지고, 결과적으로 Lag가 줄어듭니다.
+        abs_trend = np.abs(trend_hat)
+        
+        # [TUNING POINT]
+        # 속도가 0에 가까우면 base_beta 사용 (떨림 방지)
+        # 속도가 빨라질수록 high_speed_beta 쪽으로 가중치 이동
+        # 하지만 무한정 커지지 않게 high_speed_beta로 클램핑하는 효과를 줍니다.
+        
+        # 간단한 선형 모델: beta = base + (speed * factor)
+        # 여기서 factor는 반응성을 결정합니다.
+        dynamic_beta = self.base_beta + (abs_trend * 0.5) 
+        
+        # 최대값 제한 (안전장치)
+        dynamic_beta = np.minimum(dynamic_beta, self.high_speed_beta)
+
+        # 3. Cutoff Frequency 계산
+        cutoff = self.min_cutoff + dynamic_beta * abs_trend
+        
+        # 4. Alpha 계산 (Low Pass Filter 계수)
         tau = 1.0 / (2 * np.pi * cutoff)
         alpha = 1.0 / (1.0 + tau / dt)
         
-        # 범위 클램핑 (안전장치)
+        # Alpha 클램핑 (0.0 ~ 1.0)
+        # alpha가 1.0에 가까울수록 원본을 그대로 반영 (Lag 없음)
         alpha = np.clip(alpha, 0.0, 1.0)
 
-        # 4. 최종 값 계산
+        # 5. 최종 값 계산
         curr_val = alpha * val_array + (1.0 - alpha) * self.prev_val
         
         self.prev_val = curr_val
@@ -77,20 +94,25 @@ class LandmarkStabilizer:
 
 class BeautyEngine:
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V16.0 Input Stabilization Logic Ready")
+        print("[BEAUTY] [BeautyEngine] V18.0 Gradual Stabilizer Ready")
         self.map_scale = 0.25 
         self.cache_w = 0
         self.cache_h = 0
         self.gpu_initialized = False
         
-        # 워핑 맵 버퍼 (스무딩 용도가 아닌 단순 렌더링용)
         self.gpu_dx = None
         self.gpu_dy = None
         
-        # [NEW] Stabilizers
-        # 랜드마크 떨림을 잡기 위한 필터 인스턴스
-        self.body_stabilizer = LandmarkStabilizer(min_cutoff=0.1, beta=10.0) # 몸은 움직임이 큼
-        self.face_stabilizer = LandmarkStabilizer(min_cutoff=0.5, beta=5.0)  # 얼굴은 미세 떨림 중요
+        # [TUNING] Stabilizer Parameters
+        # Body: 
+        # - base_beta=1.0: 정지 시 적당한 스무딩
+        # - high_speed_beta=100.0: 빠를 땐 거의 원본에 가깝게 (Lag 제거)
+        self.body_stabilizer = LandmarkStabilizer(min_cutoff=0.01, base_beta=1.0, high_speed_beta=100.0)
+        
+        # Face:
+        # - base_beta=5.0: 얼굴은 미세 떨림에 민감하므로 기본값을 좀 더 높게
+        # - high_speed_beta=50.0: 너무 빠르면 오히려 어색할 수 있어 제한
+        self.face_stabilizer = LandmarkStabilizer(min_cutoff=0.5, base_beta=5.0, high_speed_beta=50.0)
         
         self.bg_buffers = {}
         self.active_profile = 'default'
@@ -166,9 +188,10 @@ class BeautyEngine:
                 self.cache_w, self.cache_h = w, h
                 self.gpu_initialized = False
                 self._init_bg_buffers(w, h, frame_gpu)
-                # Reset Stabilizers on resolution change
-                self.body_stabilizer = LandmarkStabilizer(min_cutoff=0.1, beta=10.0)
-                self.face_stabilizer = LandmarkStabilizer(min_cutoff=0.5, beta=5.0)
+                
+                # Reset Stabilizers
+                self.body_stabilizer = LandmarkStabilizer(min_cutoff=0.01, base_beta=1.0, high_speed_beta=100.0)
+                self.face_stabilizer = LandmarkStabilizer(min_cutoff=0.5, base_beta=5.0, high_speed_beta=50.0)
                 
                 if self.active_profile in self.bg_buffers and self.bg_buffers[self.active_profile]['gpu'] is not None:
                     self.bg_gpu = self.bg_buffers[self.active_profile]['gpu']
@@ -202,11 +225,7 @@ class BeautyEngine:
             # (A) Body Processing
             raw_body = body_landmarks.get() if hasattr(body_landmarks, 'get') else body_landmarks
             if raw_body is not None:
-                # [CORE FIX] Stabilize Input Landmarks FIRST
-                # 입력값 자체의 노이즈를 제거하여 워핑 맵이 튀는 것을 방지
-                # 결과: 워핑 맵을 프레임 간 블렌딩할 필요가 없어짐 -> 번개 현상 제거
-                
-                # raw_body: (17, 3) [x, y, conf]
+                # [CORE FIX] Stabilize Input Landmarks
                 kpts_xy = raw_body[:, :2]
                 stable_kpts = self.body_stabilizer.update(kpts_xy)
                 
@@ -226,8 +245,7 @@ class BeautyEngine:
             
             # (B) Face Processing
             if faces:
-                # 얼굴은 첫 번째 감지된 얼굴만 처리 (Single User)
-                raw_face = faces[0].landmarks # (478, 2)
+                raw_face = faces[0].landmarks
                 stable_face = self.face_stabilizer.update(raw_face)
                 
                 lm_small = stable_face * self.map_scale
@@ -244,7 +262,6 @@ class BeautyEngine:
                     self.morph_logic.collect_head_params(lm_small, head_scale)
 
             # 3. Rendering: Zero-Lag Warping
-            # 매 프레임 워핑 맵을 초기화하고 새로 그립니다. (과거 잔재 없음)
             self.gpu_dx.fill(0)
             self.gpu_dy.fill(0)
 
@@ -258,9 +275,6 @@ class BeautyEngine:
                 grid_dim = ((sw + block_dim[0] - 1) // block_dim[0], (sh + block_dim[1] - 1) // block_dim[1])
                 self.warp_kernel(grid_dim, block_dim, (self.gpu_dx, self.gpu_dy, params_gpu, len(warp_params), sw, sh))
                 
-                # [Logic Change] Blur Minimized (5 -> 1)
-                # 랜드마크가 이미 안정화되었으므로 강한 블러가 필요 없음.
-                # 잔상 제거를 위해 최소한의 블러만 적용.
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=1, output=self.gpu_dx)
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=1, output=self.gpu_dy)
 
