@@ -1,5 +1,5 @@
 # Project MUSE - adaptive_bg.py
-# V3.5: Conservative & Safe Update (Anti-Ghosting Optimized)
+# V3.7: Static Lock & Inverse Difference Logic (Fix Background Corruption)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cupy as cp
@@ -11,24 +11,18 @@ class AdaptiveBackground:
     def __init__(self, width=1920, height=1080):
         self.w = width
         self.h = height
-        self.bg_buffer = None # Float32 for precision accumulation
+        self.bg_buffer = None # Float32
         
-        # [Config] Anti-Ghosting Parameters (Conservative Mode)
-        # 배경 업데이트를 매우 보수적으로 설정하여, 움직이는 사람의 잔상이
-        # 배경 버퍼에 기록되는 것을 방지합니다.
-        
-        self.base_learning_rate = 0.001 # 매우 느린 학습 (기존 0.005 대비 1/5)
-        self.adaptation_speed = 0.02    # 급격한 변화에 둔감하게 반응
-        self.max_update_rate = 0.05     # 한 번에 변할 수 있는 최대치 제한 (잔상 박제 방지)
+        # [Config] Safety Parameters
+        self.base_learning_rate = 0.005 
+        # [Critical Change] Difference Penalty
+        # 변화가 클수록 업데이트를 억제하는 계수입니다.
+        self.diff_penalty = 10.0 
         
         self.is_static_loaded = False
 
     def load_static_background(self, bg_source):
-        """
-        Load clean plate manually.
-        """
         frame_bgr = None
-        
         if isinstance(bg_source, str):
             if os.path.exists(bg_source):
                 frame_bgr = cv2.imread(bg_source)
@@ -42,38 +36,39 @@ class AdaptiveBackground:
         if frame_bgr is not None:
             if frame_bgr.shape[1] != self.w or frame_bgr.shape[0] != self.h:
                 frame_bgr = cv2.resize(frame_bgr, (self.w, self.h))
-            
             self.bg_buffer = cp.asarray(frame_bgr).astype(cp.float32)
             self.is_static_loaded = True
-            print("[BG] Static background applied to VRAM.")
+            print("[BG] Static Background Locked. Auto-update disabled.")
             return True
-            
         return False
 
     def reset(self, frame_gpu):
         if frame_gpu is None: return
+        # 정적 배경이 로드되어 있다면 리셋하지 않음 (보호)
         if self.is_static_loaded: return
-
+        
         self.bg_buffer = frame_gpu.astype(cp.float32)
         print("[BG] Background Buffer Reset (Initialized with Live Frame)")
 
     def update(self, frame_gpu, person_alpha):
         """
-        [Conservative Update Logic]
-        배경이 '확실한' 영역만 아주 천천히 업데이트합니다.
-        
-        - 문제: 사람이 빠르게 지나갈 때 그 잔상이 배경에 남음
-        - 해결: 
-          1. Learning Rate 대폭 감소
-          2. Safe Zone Masking (배경 확률 99% 이상인 곳만 업데이트)
+        [Corrected Update Logic]
+        1. Static Lock: 캡처된 배경이 있다면 절대 업데이트하지 않음 (완전 고정).
+        2. Inverse Diff: 변화가 큰 영역(사람 등)은 업데이트를 거부함.
         """
         if self.bg_buffer is None or frame_gpu is None:
             if frame_gpu is not None: self.reset(frame_gpu)
             return
 
+        # [FIX 1] Static Background Lock
+        # 사용자가 직접 찍은 배경은 신성불가침 영역으로 둡니다.
+        # 조명 변화 대응보다 원본 보존이 훨씬 중요합니다.
+        if self.is_static_loaded:
+            return
+
         current_frame_float = frame_gpu.astype(cp.float32)
 
-        # 1. Pixel Difference
+        # 1. Pixel Difference (0.0 ~ 1.0)
         diff = cp.abs(current_frame_float - self.bg_buffer)
         diff_mean = cp.mean(diff, axis=2, keepdims=True)
         diff_factor = diff_mean / 255.0
@@ -82,20 +77,20 @@ class AdaptiveBackground:
         bg_prob = 1.0 - person_alpha
         bg_prob = bg_prob[..., None]
         
-        # [Critical] Safe Zone Masking
-        # 배경일 확률이 99% 이상인 픽셀만 업데이트 후보로 선정
-        # 인물 경계선(Semi-transparent)이나 내부가 업데이트되는 것을 원천 차단
+        # Safe Zone: 배경 확률이 매우 높은 곳
         safe_zone_mask = (bg_prob > 0.99).astype(cp.float32)
 
-        # 3. Dynamic Rate Calculation
-        boosted_rate = self.base_learning_rate + (diff_factor * self.adaptation_speed)
-        boosted_rate = cp.clip(boosted_rate, 0.0, self.max_update_rate)
+        # [FIX 2] Inverse Difference Logic (The Ghosting Killer)
+        # 이전 로직: Rate + (diff * speed) -> 변화 크면 빨리 업데이트 (최악의 오판)
+        # 수정 로직: Rate / (1 + diff * penalty) -> 변화 크면 업데이트 안함 (정상)
+        # 변화가 0에 가까울 때만 base_rate로 업데이트되고,
+        # 사람이 난입하여 diff가 커지면 learning_rate가 0에 수렴합니다.
+        dynamic_rate = self.base_learning_rate / (1.0 + diff_factor * self.diff_penalty)
         
-        # 최종 가중치: (계산된 속도) * (안전 구역 마스크)
-        # 안전 구역이 아니면 가중치는 0이 되어 업데이트되지 않음
-        final_weight = boosted_rate * safe_zone_mask
+        # 최종 가중치 적용
+        final_weight = dynamic_rate * safe_zone_mask
         
-        # 4. Apply
+        # 3. Apply Update
         self.bg_buffer = self.bg_buffer * (1.0 - final_weight) + current_frame_float * final_weight
 
     def get_background(self):
