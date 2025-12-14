@@ -1,5 +1,5 @@
 # Project MUSE - adaptive_bg.py
-# Self-Healing Background Buffer (V3: Reliability-Based Adaptive Update)
+# V3.5: Conservative & Safe Update (Anti-Ghosting Optimized)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cupy as cp
@@ -13,21 +13,22 @@ class AdaptiveBackground:
         self.h = height
         self.bg_buffer = None # Float32 for precision accumulation
         
-        # [Config] Adaptive Parameters
-        self.base_learning_rate = 0.005 # 기본 학습률 (안정성 위주)
-        self.adaptation_speed = 0.15    # 신뢰도 높은 영역의 변화 적응 가속도
-        self.max_update_rate = 0.3      # 프레임당 최대 업데이트 비율 (플리커 방지 클램핑)
+        # [Config] Anti-Ghosting Parameters (Conservative Mode)
+        # 배경 업데이트를 매우 보수적으로 설정하여, 움직이는 사람의 잔상이
+        # 배경 버퍼에 기록되는 것을 방지합니다.
         
-        self.is_static_loaded = False   # Flag to prevent overwriting static BG
+        self.base_learning_rate = 0.001 # 매우 느린 학습 (기존 0.005 대비 1/5)
+        self.adaptation_speed = 0.02    # 급격한 변화에 둔감하게 반응
+        self.max_update_rate = 0.05     # 한 번에 변할 수 있는 최대치 제한 (잔상 박제 방지)
+        
+        self.is_static_loaded = False
 
     def load_static_background(self, bg_source):
         """
-        [New] Load background from file path or numpy array directly to GPU.
-        This fixes the 'Floating Ghost' issue by providing a clean plate.
+        Load clean plate manually.
         """
         frame_bgr = None
         
-        # 1. Load from Path
         if isinstance(bg_source, str):
             if os.path.exists(bg_source):
                 frame_bgr = cv2.imread(bg_source)
@@ -35,17 +36,13 @@ class AdaptiveBackground:
             else:
                 print(f"[BG] Background file not found: {bg_source}")
                 return False
-        
-        # 2. Load from Array
         elif isinstance(bg_source, np.ndarray):
             frame_bgr = bg_source
         
         if frame_bgr is not None:
-            # Resize if needed
             if frame_bgr.shape[1] != self.w or frame_bgr.shape[0] != self.h:
                 frame_bgr = cv2.resize(frame_bgr, (self.w, self.h))
             
-            # Upload to GPU
             self.bg_buffer = cp.asarray(frame_bgr).astype(cp.float32)
             self.is_static_loaded = True
             print("[BG] Static background applied to VRAM.")
@@ -54,67 +51,51 @@ class AdaptiveBackground:
         return False
 
     def reset(self, frame_gpu):
-        """
-        Force reset background to current frame.
-        Only used if no static background is available.
-        """
         if frame_gpu is None: return
-        
-        # [Safety] Don't overwrite if we successfully loaded a clean plate file
-        if self.is_static_loaded:
-            return
+        if self.is_static_loaded: return
 
         self.bg_buffer = frame_gpu.astype(cp.float32)
         print("[BG] Background Buffer Reset (Initialized with Live Frame)")
 
     def update(self, frame_gpu, person_alpha):
         """
-        Update background based on Reliability and Change Detection.
+        [Conservative Update Logic]
+        배경이 '확실한' 영역만 아주 천천히 업데이트합니다.
         
-        Algorithm:
-        1. Calculate Difference: |CurrentFrame - StoredBG|
-        2. Calculate Background Confidence: (1.0 - person_alpha)
-        3. Dynamic Rate = BaseRate + (Diff * Confidence * Speed)
-        
-        Result:
-        - High Confidence (Sure BG) + High Diff (Lighting Change) -> Fast Update
-        - Low Confidence (Person Boundary) -> Slow/No Update
+        - 문제: 사람이 빠르게 지나갈 때 그 잔상이 배경에 남음
+        - 해결: 
+          1. Learning Rate 대폭 감소
+          2. Safe Zone Masking (배경 확률 99% 이상인 곳만 업데이트)
         """
         if self.bg_buffer is None or frame_gpu is None:
             if frame_gpu is not None: self.reset(frame_gpu)
             return
 
-        # Ensure frame is float32 for calculation
         current_frame_float = frame_gpu.astype(cp.float32)
 
-        # 1. Calculate Pixel Difference (Change Magnitude)
-        # RGB 채널 평균 차이를 구하여 조명 변화 등의 강도를 측정합니다.
+        # 1. Pixel Difference
         diff = cp.abs(current_frame_float - self.bg_buffer)
-        diff_mean = cp.mean(diff, axis=2, keepdims=True) # (H, W, 1)
-        
-        # Normalize diff to 0.0 ~ 1.0 (assuming pixel range 0-255)
+        diff_mean = cp.mean(diff, axis=2, keepdims=True)
         diff_factor = diff_mean / 255.0
 
-        # 2. Background Probability (Reliability)
-        # person_alpha: 1.0 = Person, 0.0 = Background
-        # bg_prob: 1.0 = Definite Background (High Reliability)
+        # 2. Background Probability
         bg_prob = 1.0 - person_alpha
-        bg_prob = bg_prob[..., None] # Broadcast to (H, W, 1)
+        bg_prob = bg_prob[..., None]
         
-        # 3. Calculate Dynamic Update Rate
-        # 기본 학습률에 '변화량'과 '신뢰도'를 곱한 값을 더합니다.
-        # 변화가 크고 배경이 확실할수록 업데이트 속도가 빨라집니다.
+        # [Critical] Safe Zone Masking
+        # 배경일 확률이 99% 이상인 픽셀만 업데이트 후보로 선정
+        # 인물 경계선(Semi-transparent)이나 내부가 업데이트되는 것을 원천 차단
+        safe_zone_mask = (bg_prob > 0.99).astype(cp.float32)
+
+        # 3. Dynamic Rate Calculation
         boosted_rate = self.base_learning_rate + (diff_factor * self.adaptation_speed)
-        
-        # 최대 업데이트 속도 제한 (급격한 플리커링 방지)
         boosted_rate = cp.clip(boosted_rate, 0.0, self.max_update_rate)
         
-        # 최종 적용 가중치: 배경 확률이 높은 곳에만 부스팅된 속도 적용
-        # 배경이 아닌 곳(bg_prob ~ 0)은 업데이트 되지 않습니다.
-        final_weight = boosted_rate * bg_prob
+        # 최종 가중치: (계산된 속도) * (안전 구역 마스크)
+        # 안전 구역이 아니면 가중치는 0이 되어 업데이트되지 않음
+        final_weight = boosted_rate * safe_zone_mask
         
-        # 4. Apply Update (Exponential Moving Average)
-        # Buffer = Buffer * (1 - weight) + Frame * weight
+        # 4. Apply
         self.bg_buffer = self.bg_buffer * (1.0 - final_weight) + current_frame_float * final_weight
 
     def get_background(self):
