@@ -1,8 +1,10 @@
 # Project MUSE - adaptive_bg.py
-# V3.7: Static Lock & Inverse Difference Logic (Fix Background Corruption)
+# V3.8: Smart Fast-Update for Definite Backgrounds (Ghosting Killer)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cupy as cp
+# [New] For spatial filtering (neighbor check)
+import cupyx.scipy.ndimage 
 import cv2
 import numpy as np
 import os
@@ -13,10 +15,12 @@ class AdaptiveBackground:
         self.h = height
         self.bg_buffer = None # Float32
         
-        # [Config] Safety Parameters
-        self.base_learning_rate = 0.005 
-        # [Critical Change] Difference Penalty
-        # 변화가 클수록 업데이트를 억제하는 계수입니다.
+        # [Config] Learning Rates
+        self.base_learning_rate = 0.005 # 기본(느린) 업데이트 속도
+        self.fast_learning_rate = 0.1   # [New] 확실한 배경일 때의 빠른 속도
+        
+        # [Critical] Difference Penalty
+        # 변화가 클수록 업데이트를 억제하는 계수 (사람 보호용)
         self.diff_penalty = 10.0 
         
         self.is_static_loaded = False
@@ -52,46 +56,59 @@ class AdaptiveBackground:
 
     def update(self, frame_gpu, person_alpha):
         """
-        [Corrected Update Logic]
-        1. Static Lock: 캡처된 배경이 있다면 절대 업데이트하지 않음 (완전 고정).
-        2. Inverse Diff: 변화가 큰 영역(사람 등)은 업데이트를 거부함.
+        [Corrected Update Logic V3.8]
+        1. Static Lock: 캡처된 배경이 있다면 절대 업데이트하지 않음.
+        2. [New] Spatial Safety Check:
+           - 주변 픽셀(7x7)이 모두 배경이라면 -> "확실한 배경" -> Fast Update (잔상 제거)
+           - 주변에 사람이 있다면 -> "경계 영역" -> Slow Update (스탬핑 방지)
         """
         if self.bg_buffer is None or frame_gpu is None:
             if frame_gpu is not None: self.reset(frame_gpu)
             return
 
-        # [FIX 1] Static Background Lock
+        # [Rule 1] Static Background Lock
         # 사용자가 직접 찍은 배경은 신성불가침 영역으로 둡니다.
-        # 조명 변화 대응보다 원본 보존이 훨씬 중요합니다.
         if self.is_static_loaded:
             return
 
         current_frame_float = frame_gpu.astype(cp.float32)
 
         # 1. Pixel Difference (0.0 ~ 1.0)
+        # 현재 화면과 저장된 배경의 차이 계산
         diff = cp.abs(current_frame_float - self.bg_buffer)
         diff_mean = cp.mean(diff, axis=2, keepdims=True)
         diff_factor = diff_mean / 255.0
 
-        # 2. Background Probability
-        bg_prob = 1.0 - person_alpha
-        bg_prob = bg_prob[..., None]
+        # 2. Spatial Analysis (Neighbor Check)
+        # "주변 셀이 전부 배경이면 확실히 배경이다"
+        # alpha_2d: (H, W)
+        alpha_2d = person_alpha
+        if alpha_2d.ndim == 3: alpha_2d = alpha_2d.squeeze()
         
-        # Safe Zone: 배경 확률이 매우 높은 곳
-        safe_zone_mask = (bg_prob > 0.99).astype(cp.float32)
+        # 주변 7x7 영역 내의 '최대 알파값'을 찾습니다.
+        # 이 값이 0에 가깝다면, 주변 7x7 픽셀 모두가 배경이라는 뜻입니다.
+        neighbor_max_alpha = cupyx.scipy.ndimage.maximum_filter(alpha_2d, size=7)
+        neighbor_max_alpha = neighbor_max_alpha[..., None] # (H, W, 1)
 
-        # [FIX 2] Inverse Difference Logic (The Ghosting Killer)
-        # 이전 로직: Rate + (diff * speed) -> 변화 크면 빨리 업데이트 (최악의 오판)
-        # 수정 로직: Rate / (1 + diff * penalty) -> 변화 크면 업데이트 안함 (정상)
-        # 변화가 0에 가까울 때만 base_rate로 업데이트되고,
-        # 사람이 난입하여 diff가 커지면 learning_rate가 0에 수렴합니다.
-        dynamic_rate = self.base_learning_rate / (1.0 + diff_factor * self.diff_penalty)
+        # [Condition] Definite Background
+        # 주변에 살(Body)이 전혀 감지되지 않음 (Threshold 0.05)
+        is_definite_bg = (neighbor_max_alpha < 0.05).astype(cp.float32)
+
+        # 3. Dynamic Learning Rate Calculation
+        # Case A: 확실한 배경 (is_definite_bg == 1.0)
+        # -> Fast Rate 적용. Penalty 무시. (잔상 즉시 지움)
+        # Case B: 불확실한 경계 (is_definite_bg == 0.0)
+        # -> Slow Rate 적용. Penalty 적용. (사람 보호)
         
-        # 최종 가중치 적용
-        final_weight = dynamic_rate * safe_zone_mask
+        # Slow Logic (Inverse Diff)
+        conservative_rate = self.base_learning_rate / (1.0 + diff_factor * self.diff_penalty)
         
-        # 3. Apply Update
-        self.bg_buffer = self.bg_buffer * (1.0 - final_weight) + current_frame_float * final_weight
+        # Mix Rates
+        final_rate = is_definite_bg * self.fast_learning_rate + \
+                     (1.0 - is_definite_bg) * conservative_rate
+        
+        # 4. Apply Update
+        self.bg_buffer = self.bg_buffer * (1.0 - final_rate) + current_frame_float * final_rate
 
     def get_background(self):
         if self.bg_buffer is None:
