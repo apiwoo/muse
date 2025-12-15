@@ -1,9 +1,9 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
-# Updated: Topology Protection V20 (Deep Interior Protection using Neighbor Check)
+# Updated: Topology Protection V21 (Intrusion Logic Fix)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-# [Kernel 1] Grid Generation (TPS Logic) - 변경 없음
+# [Kernel 1] Grid Generation (TPS Logic) - 유지
 WARP_KERNEL_CODE = r'''
 extern "C" __global__
 void warp_kernel(
@@ -55,9 +55,9 @@ void warp_kernel(
 }
 '''
 
-# [Kernel 2] Smart Composite (Deep Interior Protection)
-# "사람 덩어리 안쪽은 배경이 절대 개입할 수 없다"는 논리를 물리적으로 구현.
-# 상하좌우 주변 픽셀을 검사하여, '완전한 내부(Deep Interior)'로 판단되면 배경 합성을 원천 차단함.
+# [Kernel 2] Smart Composite (Intrusion Handling)
+# "워핑에 의해 침범된 영역(Slimming Zone)"과 "단순 오류(Ghosting)"를 구분.
+# 워핑 벡터의 크기(Magnitude)를 핵심 판별 기준으로 사용.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -86,32 +86,7 @@ void composite_kernel(
         original_alpha = (float)mask[idx] / 255.0f;
     }
 
-    // --- 2. Deep Interior Check (Topology Protection) ---
-    // 핵심 논리: "배경이 들어올 경로가 없다면(안쪽이라면) 잘못된 상황이다."
-    // 현재 픽셀을 기준으로 상하좌우 일정 거리(margin)를 확인합니다.
-    // 4방향 모두 '살(Body)'이라면, 이곳은 '깊은 내부(Deep Interior)'입니다.
-    // 깊은 내부에서는 워핑 맵이 꼬이든 말든 절대 배경이 튀어나오면 안 됩니다.
-    
-    bool is_deep_interior = false;
-    
-    if (use_bg && original_alpha > 0.95f) { // 일단 현재 위치가 확실한 살이어야 함
-        int margin = 5; // 5픽셀 두께의 보호막 (이 값보다 안쪽은 절대 보호됨)
-        bool safe_left = false, safe_right = false, safe_top = false, safe_bottom = false;
-
-        // 경계 검사 포함하여 주변 마스크 확인
-        // (255에 가까운 값이면 살, 0에 가까우면 배경)
-        if (x - margin >= 0 && mask[idx - margin] > 200) safe_left = true;
-        if (x + margin < width && mask[idx + margin] > 200) safe_right = true;
-        if (y - margin >= 0 && mask[(y - margin) * width + x] > 200) safe_top = true;
-        if (y + margin < height && mask[(y + margin) * width + x] > 200) safe_bottom = true;
-
-        // 4방향 모두 살로 막혀있다면 -> 여기는 뚫려선 안 되는 내부다.
-        if (safe_left && safe_right && safe_top && safe_bottom) {
-            is_deep_interior = true;
-        }
-    }
-
-    // --- 3. Warped Alpha Calculation ---
+    // --- 2. Warping & Displacement ---
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -120,6 +95,15 @@ void composite_kernel(
 
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
+
+    // [Core Logic] 변위량(Displacement) 계산
+    // 워핑이 강하게 일어난 곳(=살을 깎은 곳)은 shift_sq가 큽니다.
+    // 반면, 몸통 안쪽이나 배경은 shift_sq가 0에 가깝습니다.
+    float shift_sq = shift_x * shift_x + shift_y * shift_y;
+    
+    // Threshold: 1.0 픽셀 이상 움직인 곳만 '유효한 보정'으로 인정
+    // 이 값이 너무 크면 보정이 씹히고, 너무 작으면 노이즈가 생깁니다.
+    bool is_significant_warp = (shift_sq > 1.0f); 
 
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
@@ -137,41 +121,44 @@ void composite_kernel(
             warped_alpha = 1.0f; 
         }
         
-        // 워핑된 위치의 원본 색상 가져오기
-        fg_b = (float)src[warped_idx_rgb+0];
-        fg_g = (float)src[warped_idx_rgb+1];
-        fg_r = (float)src[warped_idx_rgb+2];
+        if (warped_alpha > 0.0f) {
+            fg_b = (float)src[warped_idx_rgb+0];
+            fg_g = (float)src[warped_idx_rgb+1];
+            fg_r = (float)src[warped_idx_rgb+2];
+        }
     }
 
-    // --- 4. Final Decision (Ghosting Prevention) ---
+    // --- 3. Final Decision (Context-Aware Composite) ---
     
     // [Loss Check] 원래는 살이었는데, 워핑 후 빈 공간(배경)이 되었는가?
+    // Margin을 두어 미세한 오차는 무시 (0.05)
     bool is_alpha_loss = (original_alpha > warped_alpha + 0.05f);
 
     float base_b, base_g, base_r;
 
     // [Final Rule]
-    // 1. 살이 깎여나간 상황이고 (is_alpha_loss)
-    // 2. [New] 여기가 '깊은 내부'가 아니라면 (!is_deep_interior)
-    // -> 즉, "피부의 가장자리"라면 배경을 채웁니다. (Slimming 적용)
+    // Slimming(배경 합성)이 적용되려면 두 가지 조건이 모두 충족되어야 합니다.
+    // 1. is_alpha_loss: 살이 깎여나갔음.
+    // 2. is_significant_warp: 실제로 픽셀을 이동시킨 결과임. (단순 떨림 아님)
     //
-    // 반대로, '깊은 내부'라면 설령 is_alpha_loss가 True라도 (빠른 움직임으로 인한 오류),
-    // 배경을 채우지 않고 원본(src)을 유지하여 번쩍임을 막습니다.
+    // 이 2번 조건이 "몸 안쪽 보호" 역할을 수행합니다.
+    // 몸 안쪽은 워핑 벡터가 0에 가까우므로, 설령 알파값이 튀어서 is_alpha_loss가 True가 되더라도
+    // is_significant_warp가 False가 되어 배경 합성을 막습니다.
     
-    if (is_alpha_loss && !is_deep_interior) {
-        // 배경(Clean Plate) 합성
+    if (is_alpha_loss && is_significant_warp) {
+        // [Case A] Valid Slimming -> 배경(Clean Plate) 합성
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
     } else {
-        // 원본(Live Feed) 유지
-        // (내부에서 찢어짐이 발생해도 배경 대신 원본이 나옴 -> Ghosting 해결)
+        // [Case B] No Change or Internal Noise -> 원본(Live Feed) 유지
+        // 워핑이 없거나(몸 안쪽), 살이 늘어난 경우(Warped > Original) 등
         base_b = (float)src[idx_rgb+0];
         base_g = (float)src[idx_rgb+1];
         base_r = (float)src[idx_rgb+2];
     }
 
-    // --- 5. Composite ---
+    // --- 4. Final Composite ---
     dst[idx_rgb+0] = (unsigned char)(fg_b * warped_alpha + base_b * (1.0f - warped_alpha));
     dst[idx_rgb+1] = (unsigned char)(fg_g * warped_alpha + base_g * (1.0f - warped_alpha));
     dst[idx_rgb+2] = (unsigned char)(fg_r * warped_alpha + base_r * (1.0f - warped_alpha));
