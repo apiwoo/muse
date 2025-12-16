@@ -10,7 +10,7 @@ import subprocess
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QListWidget, QListWidgetItem, QComboBox, QLineEdit, QMessageBox, 
-    QGroupBox, QFrame, QKeySequenceEdit
+    QGroupBox, QFrame, QKeySequenceEdit, QRadioButton, QButtonGroup
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap, QKeySequence
@@ -28,13 +28,12 @@ class LauncherDialog(QDialog):
     [App Launcher]
     - 프로필 선택/생성/삭제
     - 카메라 ID 지정
-    - 배경 유무 확인 및 AI 모델 상태 표시
-    - 학습 도구(Studio) 실행 기능 추가
+    - [New] 구동 모드 선택 (Standard, High-Precision, Personal)
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MUSE 스튜디오 설정 (v5.2 - Hybrid Mode UI)")
-        self.resize(850, 600)
+        self.setWindowTitle("MUSE 스튜디오 설정 (v5.3 - LoRA Integration)")
+        self.resize(900, 650)
         self.setStyleSheet("""
             QDialog { background-color: #1E1E1E; color: #EEE; font-family: 'Segoe UI'; }
             QGroupBox { border: 1px solid #444; border-radius: 5px; margin-top: 20px; font-weight: bold; color: #00ADB5; }
@@ -52,13 +51,17 @@ class LauncherDialog(QDialog):
             QPushButton#Danger:hover { background-color: #E53935; }
             QPushButton#Accent { background-color: #E65100; color: white; font-weight: bold; } 
             QPushButton#Accent:hover { background-color: #FF6F00; }
+            QRadioButton { color: #BBB; spacing: 8px; }
+            QRadioButton::indicator { width: 16px; height: 16px; border-radius: 8px; border: 1px solid #666; background: #222; }
+            QRadioButton::indicator:checked { background: #00ADB5; border-color: #00ADB5; }
+            QRadioButton:disabled { color: #555; }
         """)
 
         self.pm = ProfileManager()
         self.selected_profile = None
+        self.selected_mode = "STANDARD" # Default
         self.available_cameras = self._scan_cameras()
         
-        # 모델 경로 확인용
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.model_dir = os.path.join(self.root_dir, "assets", "models", "personal")
 
@@ -116,11 +119,9 @@ class LauncherDialog(QDialog):
         grp_create.setLayout(create_layout)
         left_panel.addWidget(grp_create)
         
-        # [New] Studio Launch Button
         btn_launch_studio = QPushButton("🎥 AI 모델 학습 스튜디오 열기")
         btn_launch_studio.setObjectName("Accent")
         btn_launch_studio.setFixedHeight(45)
-        btn_launch_studio.setToolTip("데이터 녹화 및 AI 학습 도구를 실행합니다.")
         btn_launch_studio.clicked.connect(self._launch_studio_tool)
         left_panel.addWidget(btn_launch_studio)
 
@@ -143,14 +144,32 @@ class LauncherDialog(QDialog):
         self.edit_hotkey = QKeySequenceEdit()
         info_layout.addWidget(self.edit_hotkey)
         
-        # Status Labels
+        # Status
         self.lbl_bg_status = QLabel("배경 상태: 확인 중...")
         self.lbl_bg_status.setStyleSheet("font-size: 12px; color: #888;")
         info_layout.addWidget(self.lbl_bg_status)
+
+        # [New] Run Mode Selection
+        lbl_mode = QLabel("구동 모드 선택 (Runtime Mode):")
+        lbl_mode.setStyleSheet("margin-top: 10px; font-weight: bold; color: white;")
+        info_layout.addWidget(lbl_mode)
         
-        self.lbl_model_status = QLabel("모델 상태: 확인 중...")
-        self.lbl_model_status.setStyleSheet("font-size: 12px; color: #888;")
-        info_layout.addWidget(self.lbl_model_status)
+        self.mode_group = QButtonGroup(self)
+        
+        self.rb_standard = QRadioButton("기본 (Standard) - 범용 모델 [항상 가능]")
+        self.rb_high = QRadioButton("고정밀 (High-Precision) - LoRA 허리 보정")
+        self.rb_personal = QRadioButton("퍼스널 (Personal) - 초고속 경량화")
+        
+        self.mode_group.addButton(self.rb_standard, 0)
+        self.mode_group.addButton(self.rb_high, 1)
+        self.mode_group.addButton(self.rb_personal, 2)
+        
+        self.rb_standard.setChecked(True)
+        self.mode_group.buttonClicked.connect(self._on_mode_changed)
+        
+        info_layout.addWidget(self.rb_standard)
+        info_layout.addWidget(self.rb_high)
+        info_layout.addWidget(self.rb_personal)
 
         btn_save = QPushButton("설정 저장")
         btn_save.clicked.connect(self._save_current_settings)
@@ -184,17 +203,21 @@ class LauncherDialog(QDialog):
             hotkey = cfg.get("hotkey", "")
             if not hotkey: hotkey = "(없음)"
             
-            # [New] Check for Model
-            has_model = self._check_model_exists(p)
-            status_tag = "[모델 보유]" if has_model else "[기본 엔진]"
+            # Check availability
+            can_personal = self._check_personal(p)
+            can_lora = self._check_lora(p)
             
-            item_text = f"{status_tag}  {p.upper()}  (Key: {hotkey})"
+            tags = []
+            if can_personal: tags.append("Personal")
+            if can_lora: tags.append("LoRA")
+            
+            tag_str = f"[{'|'.join(tags)}]" if tags else "[Standard]"
+            
+            item_text = f"{tag_str}  {p.upper()}  (Key: {hotkey})"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, p)
             
-            # Highlight if model exists
-            if has_model:
-                item.setForeground(Qt.cyan)
+            if tags: item.setForeground(Qt.cyan)
                 
             self.list_widget.addItem(item)
         
@@ -208,10 +231,13 @@ class LauncherDialog(QDialog):
                     self.list_widget.setCurrentItem(items[0])
                     self._on_profile_selected(items[0])
 
-    def _check_model_exists(self, profile_name):
-        seg_path = os.path.join(self.model_dir, f"student_seg_{profile_name}.engine")
-        pose_path = os.path.join(self.model_dir, f"student_pose_{profile_name}.engine")
-        return os.path.exists(seg_path) and os.path.exists(pose_path)
+    def _check_personal(self, p):
+        s = os.path.join(self.model_dir, f"student_seg_{p}.engine")
+        k = os.path.join(self.model_dir, f"student_pose_{p}.engine")
+        return os.path.exists(s) and os.path.exists(k)
+
+    def _check_lora(self, p):
+        return os.path.exists(os.path.join(self.model_dir, f"vitpose_lora_{p}.engine"))
 
     def _on_profile_selected(self, item):
         p_name = item.data(Qt.UserRole)
@@ -226,22 +252,40 @@ class LauncherDialog(QDialog):
         
         self.edit_hotkey.setKeySequence(QKeySequence(hotkey))
         
-        # Check Background
         bg_path = os.path.join(self.pm.get_profile_path(p_name), "background.jpg")
         if os.path.exists(bg_path):
-            self.lbl_bg_status.setText("✅ 배경 이미지 있음 (준비됨)")
+            self.lbl_bg_status.setText("✅ 배경 이미지 있음")
             self.lbl_bg_status.setStyleSheet("color: #00ADB5;")
         else:
-            self.lbl_bg_status.setText("⚠️ 배경 없음 (방송 시작 후 'B'를 눌러 촬영하세요)")
+            self.lbl_bg_status.setText("⚠️ 배경 없음")
             self.lbl_bg_status.setStyleSheet("color: #FFA726;")
             
-        # Check Model
-        if self._check_model_exists(p_name):
-            self.lbl_model_status.setText("✅ 개인화 모델 학습됨 (고품질)")
-            self.lbl_model_status.setStyleSheet("color: #00ADB5;")
+        # Enable/Disable Modes
+        can_personal = self._check_personal(p_name)
+        can_lora = self._check_lora(p_name)
+        
+        self.rb_personal.setEnabled(can_personal)
+        self.rb_high.setEnabled(can_lora)
+        
+        # Logic to auto-select best available or default to standard
+        if can_personal:
+            self.rb_personal.setChecked(True)
+            self.selected_mode = "PERSONAL"
+        elif can_lora:
+            self.rb_high.setChecked(True)
+            self.selected_mode = "LORA"
         else:
-            self.lbl_model_status.setText("ℹ️ 기본 모델 사용 (MODNet+ViTPose)")
-            self.lbl_model_status.setStyleSheet("color: #BBB;")
+            self.rb_standard.setChecked(True)
+            self.selected_mode = "STANDARD"
+            
+        # Update styling for disabled items
+        self.rb_personal.setText(f"퍼스널 (Personal) - {'가능' if can_personal else '학습 필요'}")
+        self.rb_high.setText(f"고정밀 (High-Precision) - {'가능' if can_lora else '학습 필요'}")
+
+    def _on_mode_changed(self, btn):
+        if btn == self.rb_standard: self.selected_mode = "STANDARD"
+        elif btn == self.rb_high: self.selected_mode = "LORA"
+        elif btn == self.rb_personal: self.selected_mode = "PERSONAL"
 
     def _create_profile(self):
         name = self.input_new_name.text().strip()
@@ -261,36 +305,25 @@ class LauncherDialog(QDialog):
         if not self.selected_profile: return
         cam_id = self.combo_cam.currentData()
         hotkey_seq = self.edit_hotkey.keySequence().toString(QKeySequence.NativeText)
-        
         self.pm.update_camera_id(self.selected_profile, cam_id)
         self.pm.update_hotkey(self.selected_profile, hotkey_seq)
-        
-        QMessageBox.information(self, "저장", f"[{self.selected_profile}] 설정이 저장되었습니다.")
+        QMessageBox.information(self, "저장", "설정이 저장되었습니다.")
         self._refresh_list()
 
     def _delete_profile(self):
-        if not self.selected_profile: return
-        if self.selected_profile == "default":
-            QMessageBox.warning(self, "불가", "기본 프로필은 삭제할 수 없습니다.")
+        if not self.selected_profile or self.selected_profile == "default":
             return
-            
-        ret = QMessageBox.question(self, "삭제 확인", f"정말 '{self.selected_profile}' 프로필을 삭제하시겠습니까?", 
-                                   QMessageBox.Yes | QMessageBox.No)
+        ret = QMessageBox.question(self, "삭제 확인", f"정말 삭제하시겠습니까?", QMessageBox.Yes | QMessageBox.No)
         if ret == QMessageBox.Yes:
             self.pm.delete_profile(self.selected_profile)
             self.selected_profile = None 
             self._refresh_list()
 
     def _launch_studio_tool(self):
-        """별도 프로세스로 학습 스튜디오 실행"""
         studio_script = os.path.join(self.root_dir, "tools", "muse_studio.py")
         if os.path.exists(studio_script):
-            try:
-                subprocess.Popen([sys.executable, studio_script])
-            except Exception as e:
-                QMessageBox.critical(self, "오류", f"스튜디오 실행 실패: {e}")
-        else:
-            QMessageBox.critical(self, "오류", f"파일을 찾을 수 없습니다: {studio_script}")
+            subprocess.Popen([sys.executable, studio_script])
 
     def get_start_config(self):
-        return self.selected_profile
+        # Returns tuple: (profile_name, run_mode)
+        return self.selected_profile, self.selected_mode
