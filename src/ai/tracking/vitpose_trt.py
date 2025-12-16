@@ -19,21 +19,33 @@ except ImportError:
     pass
 
 class VitPoseTrt:
-    def __init__(self, engine_path="assets/models/tracking/vitpose_huge.engine"):
+    # [Modified] Default Path set to 'vitpose_base.engine'
+    def __init__(self, engine_path=None):
         """
         [High-End] ViTPose TensorRT Inference Engine
         - Backend: TensorRT 10.x + CuPy (Zero-Copy)
-        - Model: ViT-Huge (COCO 17 Keypoints)
+        - Model: ViTPose (Base/Huge)
         - V2.1 Update: Safe Loader (Memory Leak Fix)
         """
+        if engine_path is None:
+            # Auto-detect path relative to this file
+            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            engine_path = os.path.join(root_dir, "assets/models/tracking/vitpose_base.engine")
+
         if not os.path.exists(engine_path):
-            raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}\n-> Please run 'tools/trt_converter.py' to rebuild it.")
+            # Fallback to huge if base is missing
+            fallback = engine_path.replace("vitpose_base.engine", "vitpose_huge.engine")
+            if os.path.exists(fallback):
+                print(f"[ViTPose] Base engine not found. Fallback to Huge: {fallback}")
+                engine_path = fallback
+            else:
+                raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}\n-> Please run 'tools/trt_converter.py' to rebuild it.")
 
         # [Safety Check] File Size Validation
         file_size_mb = os.path.getsize(engine_path) / (1024 * 1024)
         print(f"[ViTPose] TensorRT Engine Loading: {os.path.basename(engine_path)} ({file_size_mb:.1f} MB)")
         
-        # 엔진 파일이 비정상적으로 크거나 작으면 경고 (보통 500MB~2GB 사이)
+        # 엔진 파일이 비정상적으로 크거나 작으면 경고 (보통 100MB~2GB 사이)
         if file_size_mb < 10 or file_size_mb > 8192:
             print(f"[WARNING] Engine file size seems abnormal. If it hangs, delete {engine_path} and rebuild.")
 
@@ -41,20 +53,16 @@ class VitPoseTrt:
         
         try:
             # 1. Load Engine to Memory
-            # 파일을 한 번에 읽어서 변수에 담습니다.
             with open(engine_path, "rb") as f:
                 engine_data = f.read()
             
             # 2. Deserialize (CPU RAM -> GPU VRAM)
-            # 런타임을 with 문으로 사용하여 리소스 자동 해제 유도
             with trt.Runtime(self.logger) as runtime:
                 self.engine = runtime.deserialize_cuda_engine(engine_data)
             
             # [CRITICAL] Delete raw binary from RAM immediately
-            # GPU로 로딩이 끝났으므로, CPU 램에 있는 수 GB짜리 바이너리 데이터는 즉시 삭제합니다.
             del engine_data
-            gc.collect() # 강제 가비지 컬렉션 실행
-            # print("   [MEM] Raw engine data cleared from RAM.")
+            gc.collect() 
             
         except Exception as e:
             print(f"[CRITICAL] Failed to load TensorRT engine: {e}")
@@ -86,7 +94,7 @@ class VitPoseTrt:
         self.mean = cp.array([0.485, 0.456, 0.406], dtype=cp.float32).reshape(1, 3, 1, 1)
         self.std = cp.array([0.229, 0.224, 0.225], dtype=cp.float32).reshape(1, 3, 1, 1)
         
-        print("[OK] [ViTPose] Engine Ready & Memory Cleaned")
+        print(f"[OK] [ViTPose] Engine Ready ({os.path.basename(engine_path)})")
 
     def inference(self, frame_bgr):
         """
@@ -99,32 +107,20 @@ class VitPoseTrt:
         h_orig, w_orig = frame_bgr.shape[:2]
 
         # [Step 1] Letterbox Resize (Maintain Aspect Ratio)
-        # 1. Calculate scale
         scale = min(self.input_w / w_orig, self.input_h / h_orig)
-        
-        # 2. Resized dims
         nw = int(w_orig * scale)
         nh = int(h_orig * scale)
-        
-        # 3. Resize
         img_resized = cv2.resize(frame_bgr, (nw, nh))
         
-        # 4. Padding (Gray background)
-        # Create canvas (256, 192)
+        # Padding
         img_canvas = np.full((self.input_h, self.input_w, 3), 127.5, dtype=np.uint8)
-        
-        # Calculate offset
         pad_w = (self.input_w - nw) // 2
         pad_h = (self.input_h - nh) // 2
-        
-        # Paste image
         img_canvas[pad_h:pad_h+nh, pad_w:pad_w+nw] = img_resized
 
         # [Step 2] To GPU & Normalize
         img_gpu = cp.asarray(img_canvas)
         img_gpu = img_gpu[..., ::-1] # BGR -> RGB
-        
-        # (H, W, C) -> (B, C, H, W)
         img_gpu = img_gpu.transpose(2, 0, 1).astype(cp.float32) / 255.0
         img_gpu = img_gpu.reshape(1, 3, self.input_h, self.input_w)
         img_gpu = (img_gpu - self.mean) / self.std
@@ -139,32 +135,21 @@ class VitPoseTrt:
         
         # Flatten for argmax
         heatmaps_flat = heatmaps.reshape(1, 17, -1)
-        
-        # Confidence
         max_vals = cp.amax(heatmaps_flat, axis=2).reshape(1, 17, 1)
-        
-        # Coordinates (in Heatmap 64x48 scale)
         max_inds = cp.argmax(heatmaps_flat, axis=2)
         
-        w_heat = 48 # Heatmap width
+        w_heat = 48 
         y_heat = max_inds // w_heat
         x_heat = max_inds % w_heat
         
-        # Stack [x, y]
         kpts = cp.stack([x_heat, y_heat], axis=-1).astype(cp.float32)
         
-        # [Critical] Restore Coordinates (Heatmap -> Input -> Original)
-        # 1. Heatmap(64x48) -> Input(256x192) : 4x scale
+        # Restore Coordinates
         kpts *= 4.0
-        
-        # 2. Remove Padding (Letterbox Inverse)
         kpts[..., 0] -= pad_w
         kpts[..., 1] -= pad_h
-        
-        # 3. Scale Back (Input -> Original)
         kpts /= scale
         
-        # Combine [x, y, conf]
         result_kpts = cp.concatenate([kpts, max_vals], axis=-1)
         
         return cp.asnumpy(result_kpts[0])

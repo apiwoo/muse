@@ -1,6 +1,6 @@
 # Project MUSE - download_models.py
 # (C) 2025 MUSE Corp. All rights reserved.
-# Target: SAM 2, ViTPose, MODNet (New)
+# Target: SAM 2, ViTPose (Huge & Base), MODNet
 
 import os
 import requests
@@ -12,9 +12,14 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_ROOT = os.path.join(BASE_DIR, "assets", "models")
 LIBS_DIR = os.path.join(BASE_DIR, "libs")
 
-# 1. ViTPose-Huge (Teacher for Pose)
-VITPOSE_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/coco/vitpose-h-coco.pth"
-VITPOSE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_huge_coco_256x192.pth")
+# 1. ViTPose Models (Teacher & Baseline)
+# [Teacher] Huge: 정확도 최우선 (라벨링용)
+VITPOSE_HUGE_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/coco/vitpose-h-coco.pth"
+VITPOSE_HUGE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_huge_coco_256x192.pth")
+
+# [Runtime] Base: 속도 최우선 (실시간 테스트용)
+VITPOSE_BASE_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/coco/vitpose-b-coco.pth"
+VITPOSE_BASE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_base_coco_256x192.pth")
 
 # 2. SAM 2 Hiera-Large (Teacher for Segmentation - Video)
 SAM2_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
@@ -26,14 +31,9 @@ SAM2_TINY_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2.1_hiera_tiny
 SAM2_1_LARGE_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
 SAM2_1_LARGE_PATH = os.path.join(MODEL_ROOT, "segment_anything", "sam2.1_hiera_large.pt")
 
-# 4. MODNet (Webcam Optimized ONNX) - [New]
+# 4. MODNet (Webcam Optimized ONNX)
 MODNET_URL = "https://github.com/ZHKKKe/MODNet/releases/download/v1.0.0/modnet_webcam_portrait_matting.ckpt"
-
-# [Fixed] Updated Valid Link (HivisionIDPhotos Repository)
-# The previous link from sherpa-onnx (v1.10.23) is broken/404.
-# This link is from a reliable ID Photo project using the same model.
 MODNET_ONNX_URL = "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/modnet_photographic_portrait_matting.onnx"
-
 MODNET_PATH = os.path.join(MODEL_ROOT, "segmentation", "modnet.onnx")
 
 # 5. InsightFace & FFmpeg
@@ -107,19 +107,20 @@ def setup_ffmpeg():
 
 def main():
     print("============================================================")
-    print("   MUSE Model Downloader (v1.5 MODNet Fix)")
+    print("   MUSE Model Downloader (Dual Track: Huge & Base)")
     print("============================================================")
     
     os.makedirs(os.path.dirname(SAM2_PATH), exist_ok=True)
-    os.makedirs(os.path.dirname(VITPOSE_PATH), exist_ok=True)
-    os.makedirs(os.path.dirname(MODNET_PATH), exist_ok=True) # New dir
+    os.makedirs(os.path.dirname(VITPOSE_HUGE_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(MODNET_PATH), exist_ok=True)
 
-    download_file(VITPOSE_URL, VITPOSE_PATH)
+    # [Modified] Download Both
+    download_file(VITPOSE_HUGE_URL, VITPOSE_HUGE_PATH)
+    download_file(VITPOSE_BASE_URL, VITPOSE_BASE_PATH)
+    
     download_file(SAM2_URL, SAM2_PATH)
     download_file(SAM2_TINY_URL, SAM2_TINY_PATH)
     download_file(SAM2_1_LARGE_URL, SAM2_1_LARGE_PATH)
-    
-    # [New] MODNet
     download_file(MODNET_ONNX_URL, MODNET_PATH)
     
     os.makedirs(INSIGHTFACE_DIR, exist_ok=True)

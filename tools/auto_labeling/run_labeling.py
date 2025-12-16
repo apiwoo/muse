@@ -40,7 +40,17 @@ class AutoLabeler:
 
         print("[Teacher B] ViTPose (Keypoints) Loading...")
         try:
-            self.pose_model = VitPoseTrt(engine_path=os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine"))
+            # [CRITICAL] 라벨링은 Teacher 역할이므로 반드시 정확도가 높은 Huge 모델을 사용해야 합니다.
+            # Base 모델을 사용하면 라벨 품질이 떨어져 학습 결과가 나빠집니다.
+            huge_engine_path = os.path.join(self.root_dir, "assets/models/tracking/vitpose_huge.engine")
+            
+            if os.path.exists(huge_engine_path):
+                self.pose_model = VitPoseTrt(engine_path=huge_engine_path)
+            else:
+                print("[WARNING] Huge engine not found! Falling back to default (Auto-detect).")
+                print("   -> 학습 품질을 위해 'python tools/trt_converter.py'를 실행해 Huge 엔진을 만드세요.")
+                self.pose_model = VitPoseTrt() # Fallback
+                
         except Exception as e:
             print(f"[ERROR] ViTPose Init Failed: {e}")
             sys.exit(1)
@@ -179,11 +189,9 @@ class AutoLabeler:
         temp_video_path = os.path.join(profile_dir, "temp_processing_strided.mp4")
         TARGET_POSE_W, TARGET_POSE_H = 640, 352
         
-        # [Added] Stop Flag Path
         stop_flag = os.path.join(self.root_data_dir, "stop_training.flag")
 
         for v_idx, video_path in enumerate(video_paths):
-            # [Check Stop] Check before starting new video
             if os.path.exists(stop_flag):
                 print(f"\n[STOP] Labeling interrupted by user (Video {v_idx+1}/{len(video_paths)})")
                 break

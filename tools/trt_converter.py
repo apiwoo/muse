@@ -6,21 +6,32 @@ import os
 import sys
 import subprocess
 import time
+import argparse
 
 # ==================================================================================
 # [Mode 1] PyTorch Worker (ONNX Export)
 # ==================================================================================
-def run_export_worker(pth_path, onnx_path):
-    print(f"🚀 [Process 1] PyTorch Worker Started...")
+def run_export_worker(pth_path, onnx_path, variant):
+    print(f"🚀 [Process 1] PyTorch Worker Started (Variant: {variant.upper()})...")
     
     import torch
     import torch.nn as nn
     
     # --------------------------------------------------------
-    # ViTPose Architecture (Fixed for Weight Compatibility)
+    # ViTPose Configs
     # --------------------------------------------------------
+    MODEL_CONFIGS = {
+        'huge': {'embed_dim': 1280, 'depth': 32, 'num_heads': 16},
+        'base': {'embed_dim': 768, 'depth': 12, 'num_heads': 12},
+    }
+    
+    cfg = MODEL_CONFIGS.get(variant.lower())
+    if not cfg:
+        print(f"❌ Unknown variant: {variant}")
+        sys.exit(1)
+
     class PatchEmbed(nn.Module):
-        def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=1280):
+        def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=768):
             super().__init__()
             self.img_size = img_size
             self.grid_size = (img_size[0] // patch_size, img_size[1] // patch_size)
@@ -32,7 +43,7 @@ def run_export_worker(pth_path, onnx_path):
             return x
 
     class Attention(nn.Module):
-        def __init__(self, dim, num_heads=16, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+        def __init__(self, dim, num_heads=12, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
             super().__init__()
             self.num_heads = num_heads
             head_dim = dim // num_heads
@@ -83,15 +94,12 @@ def run_export_worker(pth_path, onnx_path):
             return x
 
     class ViTPose(nn.Module):
-        def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4., num_classes=17):
+        def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., num_classes=17):
             super().__init__()
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
             self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim)) 
             self.blocks = nn.ModuleList([Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True) for _ in range(depth)])
             self.norm = nn.LayerNorm(embed_dim)
-            
-            # [Fix] 구조를 Sequential로 단순화하여 매핑
-            # Source (MMPose) uses bias=False for ConvTranspose2d when followed by BN
             self.keypoint_head = nn.Sequential(
                 nn.ConvTranspose2d(embed_dim, 256, kernel_size=4, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(256),
@@ -115,13 +123,10 @@ def run_export_worker(pth_path, onnx_path):
             x = self.keypoint_head(x)
             return x
 
-    # --------------------------------------------------------
-    # Export Logic with Weight Remapping
-    # --------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"   Using Device: {device}")
+    print(f"   Using Device: {device}, Config: {cfg}")
 
-    model = ViTPose(img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32, num_heads=16, num_classes=17).to(device)
+    model = ViTPose(**cfg).to(device)
     model.eval()
 
     try:
@@ -129,9 +134,6 @@ def run_export_worker(pth_path, onnx_path):
         checkpoint = torch.load(pth_path, map_location=device)
         state_dict = checkpoint.get('state_dict', checkpoint)
         
-        # [Critical Fix] 가중치 이름 리매핑 (MMPose -> Custom Sequential)
-        # 원본 pth 구조: keypoint_head.deconv_layers.0.weight 등
-        # 대상 model 구조: keypoint_head.0.weight 등
         new_state_dict = {}
         mapped_count = 0
         
@@ -139,36 +141,29 @@ def run_export_worker(pth_path, onnx_path):
             new_k = k.replace('backbone.', '')
             if 'cls_token' in new_k: continue
             
-            # Head 가중치 리매핑 규칙
+            # Head Weight Remapping
             if 'keypoint_head.deconv_layers.0.' in new_k:
                 new_k = new_k.replace('keypoint_head.deconv_layers.0.', 'keypoint_head.0.')
             elif 'keypoint_head.deconv_layers.1.' in new_k:
-                new_k = new_k.replace('keypoint_head.deconv_layers.1.', 'keypoint_head.1.') # BN
-            elif 'keypoint_head.deconv_layers.3.' in new_k: # Note: 2 is ReLU (no weight)
-                new_k = new_k.replace('keypoint_head.deconv_layers.3.', 'keypoint_head.3.') # 2nd ConvT
+                new_k = new_k.replace('keypoint_head.deconv_layers.1.', 'keypoint_head.1.')
+            elif 'keypoint_head.deconv_layers.3.' in new_k:
+                new_k = new_k.replace('keypoint_head.deconv_layers.3.', 'keypoint_head.3.')
             elif 'keypoint_head.deconv_layers.4.' in new_k:
-                new_k = new_k.replace('keypoint_head.deconv_layers.4.', 'keypoint_head.4.') # 2nd BN
+                new_k = new_k.replace('keypoint_head.deconv_layers.4.', 'keypoint_head.4.')
             elif 'keypoint_head.final_layer.' in new_k:
-                new_k = new_k.replace('keypoint_head.final_layer.', 'keypoint_head.6.') # Final Conv2d
+                new_k = new_k.replace('keypoint_head.final_layer.', 'keypoint_head.6.')
 
             new_state_dict[new_k] = v
             mapped_count += 1
 
-        # Strict=True로 설정하여 하나라도 빠지면 에러나게 함 (안전장치)
-        # 하지만 일부 불필요한 키 때문에 False로 하되, 로그를 확인
         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
         
         print(f"   ✅ Weights Loaded: {mapped_count} keys mapped.")
         if len(missing_keys) > 0:
-            # keypoint_head 관련 키가 빠졌는지 확인하는 것이 중요
             head_missing = [k for k in missing_keys if 'keypoint_head' in k]
             if head_missing:
                 print(f"   ❌ [CRITICAL] Head weights missing: {head_missing}")
-                # Head 가중치가 없으면 모델은 껍데기일 뿐입니다.
-                # 강제 종료하여 사용자가 인지하게 함
                 sys.exit(1)
-            else:
-                print(f"   ⚠️ Non-critical missing keys: {len(missing_keys)} (PosEmbed related etc.)")
         
     except Exception as e:
         print(f"❌ Failed to load weights: {e}")
@@ -200,8 +195,7 @@ def run_build_worker(onnx_path, engine_path):
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from src.utils.cuda_helper import setup_cuda_environment
         setup_cuda_environment()
-    except:
-        pass
+    except: pass
 
     import tensorrt as trt
     print(f"   TensorRT Version: {trt.__version__}")
@@ -212,14 +206,11 @@ def run_build_worker(onnx_path, engine_path):
     config = builder.create_builder_config()
     parser = trt.OnnxParser(network, TRT_LOGGER)
 
-    print(f"   📂 Parsing ONNX from file: {onnx_path}")
-    
     if not os.path.exists(onnx_path):
         print(f"❌ ONNX file not found: {onnx_path}")
         sys.exit(1)
 
     success = parser.parse_from_file(onnx_path)
-    
     if not success:
         print("❌ ONNX Parse Failed")
         for error in range(parser.num_errors):
@@ -229,16 +220,13 @@ def run_build_worker(onnx_path, engine_path):
     profile = builder.create_optimization_profile()
     profile.set_shape("input", (1, 3, 256, 192), (1, 3, 256, 192), (1, 3, 256, 192))
     config.add_optimization_profile(profile)
-    print("   🔧 Optimization Profile Added (Batch Size: 1)")
-
-    try:
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 32) # 4GB
-    except AttributeError:
-        config.max_workspace_size = 1 << 32
     
     if builder.platform_has_fast_fp16:
         config.set_flag(trt.BuilderFlag.FP16)
-        print("   ✨ FP16 Acceleration Enabled")
+    
+    try:
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 32)
+    except: pass
 
     print("   ⏳ Building Engine (This may take 3-5 mins)...")
     serialized_engine = builder.build_serialized_network(network, config)
@@ -255,49 +243,71 @@ def run_build_worker(onnx_path, engine_path):
 # [Main Manager]
 # ==================================================================================
 def main():
+    # Worker Logic Checks
     if len(sys.argv) > 1:
         if sys.argv[1] == '--export-worker':
-            run_export_worker(sys.argv[2], sys.argv[3])
+            run_export_worker(sys.argv[2], sys.argv[3], sys.argv[4])
             return
         elif sys.argv[1] == '--build-worker':
             run_build_worker(sys.argv[2], sys.argv[3])
             return
 
     print("========================================================")
-    print("   MUSE ViTPose Converter (Weight Repair Edition)")
+    print("   MUSE ViTPose Converter (Dual Edition: Huge & Base)")
     print("========================================================")
 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     MODEL_DIR = os.path.join(BASE_DIR, "assets", "models", "tracking")
     
-    PTH_PATH = os.path.join(MODEL_DIR, "vitpose_huge_coco_256x192.pth")
-    ONNX_PATH = os.path.join(MODEL_DIR, "vitpose_huge.onnx")
-    ENGINE_PATH = os.path.join(MODEL_DIR, "vitpose_huge.engine")
+    # Define Targets
+    targets = [
+        {
+            'name': 'Huge (Teacher)',
+            'variant': 'huge',
+            'pth': os.path.join(MODEL_DIR, "vitpose_huge_coco_256x192.pth"),
+            'onnx': os.path.join(MODEL_DIR, "vitpose_huge.onnx"),
+            'engine': os.path.join(MODEL_DIR, "vitpose_huge.engine")
+        },
+        {
+            'name': 'Base (Runtime)',
+            'variant': 'base',
+            'pth': os.path.join(MODEL_DIR, "vitpose_base_coco_256x192.pth"),
+            'onnx': os.path.join(MODEL_DIR, "vitpose_base.onnx"),
+            'engine': os.path.join(MODEL_DIR, "vitpose_base.engine")
+        }
+    ]
 
-    # [Force Refresh] 잘못된 엔진 삭제
-    if os.path.exists(ONNX_PATH): os.remove(ONNX_PATH)
-    if os.path.exists(ENGINE_PATH): os.remove(ENGINE_PATH)
-    print("♻️  Cleaning up old files for clean build...")
+    for t in targets:
+        print(f"\n[{t['name']}] Checking...")
+        if not os.path.exists(t['pth']):
+            print(f"   [SKIP] Model source not found: {os.path.basename(t['pth'])}")
+            continue
+            
+        if os.path.exists(t['engine']):
+            print(f"   [SKIP] Engine already exists: {os.path.basename(t['engine'])}")
+            # Optional: Add force flag support later
+            continue
 
-    if not os.path.exists(PTH_PATH):
-        print(f"❌ Model not found: {PTH_PATH}")
-        return
+        print(f"   [START] Converting {t['variant'].upper()}...")
         
-    print("\n🔄 [Manager] Spawning PyTorch Worker...")
-    try:
-        subprocess.run([sys.executable, __file__, '--export-worker', PTH_PATH, ONNX_PATH], check=True)
-    except subprocess.CalledProcessError:
-        print("❌ PyTorch Worker Failed.")
-        return
+        # 1. Export ONNX
+        try:
+            subprocess.run([sys.executable, __file__, '--export-worker', t['pth'], t['onnx'], t['variant']], check=True)
+        except subprocess.CalledProcessError:
+            print("   ❌ Export Failed. Skipping.")
+            continue
+            
+        # 2. Build Engine
+        try:
+            subprocess.run([sys.executable, __file__, '--build-worker', t['onnx'], t['engine']], check=True)
+            print("   🎉 Conversion Success!")
+        except subprocess.CalledProcessError:
+            print("   ❌ Build Failed. Skipping.")
+            
+        # Clean ONNX
+        if os.path.exists(t['onnx']): os.remove(t['onnx'])
 
-    print("\n🔄 [Manager] Spawning TensorRT Worker...")
-    try:
-        subprocess.run([sys.executable, __file__, '--build-worker', ONNX_PATH, ENGINE_PATH], check=True)
-        print("\n🎉 All processes finished successfully!")
-        print(f"👉 Result: {ENGINE_PATH}")
-        print("👉 이제 'python tools/run_muse.py'를 실행하면 정확한 뼈대가 보일 것입니다.")
-    except subprocess.CalledProcessError:
-        print("❌ TensorRT Worker Failed.")
+    print("\n[DONE] All tasks finished.")
 
 if __name__ == "__main__":
     main()

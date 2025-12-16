@@ -179,11 +179,40 @@ class BeautyWorker(QThread):
             )
             t_beauty_end = time.perf_counter()
             
+            # [Added] Skeleton Drawing Logic
+            final_output = frame_out_gpu
+            if current_params.get('show_body_debug', False) and keypoints is not None:
+                try:
+                    # [Fix: Sync Required]
+                    # GPU 연산(BeautyEngine)이 끝나기 전에 CPU가 메모리를 읽으려 해서 생기는
+                    # Uninitialized Memory(노이즈) 문제입니다.
+                    # BeautyEngine의 Stream이 작업을 마칠 때까지 기다려야 합니다.
+                    if hasattr(self.beauty_engine, 'stream'):
+                        self.beauty_engine.stream.synchronize()
+
+                    # GPU -> CPU for drawing
+                    if hasattr(frame_out_gpu, 'get'):
+                        debug_frame_cpu = frame_out_gpu.get()
+                    else:
+                        debug_frame_cpu = frame_out_gpu.copy()
+                    
+                    # Draw Skeleton
+                    self._draw_skeleton(debug_frame_cpu, keypoints)
+                    
+                    # CPU -> GPU (Warning: Performance overhead)
+                    if hasattr(frame_out_gpu, 'get'):
+                        final_output = cp.asarray(debug_frame_cpu)
+                    else:
+                        final_output = debug_frame_cpu
+                        
+                except Exception as e:
+                    print(f"[WARN] Skeleton draw failed: {e}")
+
             t_send_start = time.perf_counter()
-            self.virtual_cam.send(frame_out_gpu)
+            self.virtual_cam.send(final_output)
             t_send_end = time.perf_counter()
             
-            self.frame_processed.emit(frame_out_gpu)
+            self.frame_processed.emit(final_output)
 
             # [Metrics Calculation]
             t_read_ms = (t_read_end - t_read_start) * 1000.0
@@ -222,6 +251,48 @@ class BeautyWorker(QThread):
 
         print("[ENGINE] Loop Finished.")
         self.cleanup()
+
+    def _draw_skeleton(self, img, keypoints):
+        """
+        Draw COCO 17 Keypoints skeleton on image.
+        keypoints: (17, 3) [x, y, conf]
+        """
+        # COCO Keypoint Index
+        # 0:Nose, 1:LEye, 2:REye, 3:LEar, 4:REar
+        # 5:LShoulder, 6:RShoulder, 7:LElbow, 8:RElbow
+        # 9:LWrist, 10:RWrist, 11:LHip, 12:RHip
+        # 13:LKnee, 14:RKnee, 15:LAnkle, 16:RAnkle
+        
+        edges = [
+            (0, 1), (0, 2), (1, 3), (2, 4), # Face
+            (5, 6), (5, 7), (7, 9), # Left Arm
+            (6, 8), (8, 10), # Right Arm
+            (5, 11), (6, 12), (11, 12), # Body
+            (11, 13), (13, 15), # Left Leg
+            (12, 14), (14, 16) # Right Leg
+        ]
+        
+        # Color: BGR
+        c_point = (0, 255, 0)
+        c_line = (255, 255, 0)
+        
+        if keypoints is None: return
+
+        # Draw Points
+        for i in range(len(keypoints)):
+            x, y, conf = keypoints[i]
+            if conf > 0.4:
+                cv2.circle(img, (int(x), int(y)), 4, c_point, -1)
+
+        # Draw Lines
+        for i, j in edges:
+            if i >= len(keypoints) or j >= len(keypoints): continue
+            
+            x1, y1, c1 = keypoints[i]
+            x2, y2, c2 = keypoints[j]
+            
+            if c1 > 0.4 and c2 > 0.4:
+                cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), c_line, 2)
 
     def _execute_bg_capture(self, frame_gpu):
         if frame_gpu is None: return

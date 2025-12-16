@@ -120,9 +120,6 @@ class ConsensusEngine:
         self.current_student = None
         self.use_personal = False
         
-        # Thread Pool for Default Mode Parallelism
-        # Worker 1: MODNet (GPU Intensive)
-        # Worker 2: ViTPose (Data Transfer + Inference)
         self.executor = ThreadPoolExecutor(max_workers=2)
         
         # Preprocessing Constants
@@ -134,11 +131,17 @@ class ConsensusEngine:
         if self.pose_model is None:
             print("[AI] [Fallback] Loading ViTPose (Default Strategy)...")
             try:
-                pose_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
+                # [Modified] Default to Base engine
+                pose_path = os.path.join(self.model_dir, "tracking", "vitpose_base.engine")
+                
+                # Check Base -> Fallback Huge
+                if not os.path.exists(pose_path):
+                    pose_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
+                
                 if os.path.exists(pose_path) and VitPoseTrt:
                     self.pose_model = VitPoseTrt(pose_path)
                 else:
-                    print("[WARNING] ViTPose engine not found.")
+                    print("[WARNING] ViTPose engine not found (Checked Base/Huge).")
             except Exception as e:
                 print(f"[WARNING] ViTPose Init Failed: {e}")
         
@@ -226,7 +229,6 @@ class ConsensusEngine:
         if self.use_personal and self.current_student:
             mask_gpu, kpts = self.current_student.infer(frame_gpu)
             
-            # Safety fallback if model returns None
             if mask_gpu is None:
                 h, w = frame_gpu.shape[:2]
                 mask_gpu = cp.zeros((h, w), dtype=cp.float32)
@@ -243,29 +245,25 @@ class ConsensusEngine:
         h, w = frame_gpu.shape[:2]
         
         # [PARALLEL EXECUTION]
-        # Run MODNet (GPU Heavy) and ViTPose (CPU+Transfer Heavy) simultaneously
         future_seg = self.executor.submit(self._run_modnet, frame_gpu)
         future_pose = self.executor.submit(self._run_vitpose, frame_gpu)
         
-        # Wait for both results
         raw_matte = future_seg.result()
         kpts = future_pose.result()
         
-        # Post-process Segmentation Result
         if raw_matte is None:
             return cp.zeros((h, w), dtype=cp.float32), kpts
 
         # MODNet Output: (1, 1, 544, 960)
         matte_small = raw_matte[0, 0]
         
-        # Upscale Matte to 1080p (Fast Linear Interpolation)
+        # Upscale Matte to 1080p
         target_h, target_w = 544, 960
         if HAS_CUPYX:
             zoom_h_inv = h / target_h
             zoom_w_inv = w / target_w
             matte_1080 = cupyx.scipy.ndimage.zoom(matte_small, (zoom_h_inv, zoom_w_inv), order=1)
             
-            # Fix rounding errors in zoom
             mh, mw = matte_1080.shape
             if mh != h or mw != w:
                 matte_1080 = matte_1080[:h, :w]
