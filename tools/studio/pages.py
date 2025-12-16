@@ -1,5 +1,6 @@
 # Project MUSE - pages.py
 # Wizard Pages for Studio (OpenGL Integrated + Shared Memory Optimization)
+# Updated: Phase 3 Track Selection (Student vs LoRA)
 # (C) 2025 MUSE Corp.
 
 import os
@@ -10,7 +11,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QFrame, QDialog, QMessageBox, QComboBox, QSizePolicy, QProgressBar, QTextEdit,
-    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox
+    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox, QRadioButton, QButtonGroup
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QMutex, QMutexLocker, QSize
 from PySide6.QtGui import QPixmap, QImage, QIcon
@@ -561,7 +562,7 @@ class Page3_DataCollection(QWidget):
             self.gl_widget.cleanup()
 
 # ==============================================================================
-# [PAGE 4] AI Training (Redesigned: 2-Step with Time Info)
+# [PAGE 4] AI Training (Redesigned: Track Selection & Time Info)
 # ==============================================================================
 class Page4_AiTraining(QWidget):
     go_home = Signal()
@@ -570,6 +571,7 @@ class Page4_AiTraining(QWidget):
         super().__init__()
         self.root_dir = root_dir
         self.worker = None
+        self.selected_track = "STUDENT" # Default
         self.init_ui()
 
     def init_ui(self):
@@ -584,12 +586,12 @@ class Page4_AiTraining(QWidget):
 
         # Progress
         self.pbar = QProgressBar()
-        # [New] Show Percentage inside Bar
+        # Show Percentage inside Bar
         self.pbar.setFormat("%p%") 
         self.pbar.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.pbar)
         
-        # [New] Status & Time Info
+        # Status & Time Info
         self.lbl_status = QLabel("준비됨")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("color: #AAA; font-size: 14px;")
@@ -630,12 +632,34 @@ class Page4_AiTraining(QWidget):
         self.log_view.setVisible(False)
         layout.addWidget(self.log_view, stretch=1)
 
-        # Buttons
+        # Buttons Area
         btn_layout = QHBoxLayout()
         
         self.btn_step1 = QPushButton("1단계: 영상 분석 시작")
         self.btn_step1.setProperty("class", "primary")
         self.btn_step1.clicked.connect(self.start_analysis)
+        
+        # [New] Track Selection Radio Buttons
+        self.track_group_widget = QWidget()
+        track_layout = QHBoxLayout(self.track_group_widget)
+        track_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.rb_student = QRadioButton("전체 최적화 (Student) - 기본")
+        self.rb_student.setChecked(True)
+        self.rb_student.setStyleSheet("font-weight: bold; color: white;")
+        
+        self.rb_lora = QRadioButton("허리 정밀 보정 (LoRA) - 고사양")
+        self.rb_lora.setStyleSheet("font-weight: bold; color: #FF9800;")
+        
+        self.track_group = QButtonGroup(self)
+        self.track_group.addButton(self.rb_student, 0)
+        self.track_group.addButton(self.rb_lora, 1)
+        self.track_group.buttonClicked.connect(self.on_track_changed)
+        
+        track_layout.addWidget(self.rb_student)
+        track_layout.addWidget(self.rb_lora)
+        
+        self.track_group_widget.setVisible(False)
         
         self.btn_step2 = QPushButton("2단계: 선택한 데이터로 학습 시작")
         self.btn_step2.setProperty("class", "primary")
@@ -643,7 +667,7 @@ class Page4_AiTraining(QWidget):
         self.btn_step2.clicked.connect(self.start_training)
         self.btn_step2.setVisible(False)
         
-        # [New] 학습 중단 버튼 (처음엔 숨김)
+        # 학습 중단 버튼
         self.btn_stop = QPushButton("🛑 중단")
         self.btn_stop.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; border-radius: 8px; padding: 15px; border: none;")
         self.btn_stop.clicked.connect(self.stop_training)
@@ -654,8 +678,12 @@ class Page4_AiTraining(QWidget):
         self.btn_home.clicked.connect(self.go_home.emit)
         
         # Layout Assembly
-        btn_layout.addWidget(self.btn_step1, stretch=3)
-        btn_layout.addWidget(self.btn_step2, stretch=3)
+        control_layout = QVBoxLayout()
+        control_layout.addWidget(self.btn_step1)
+        control_layout.addWidget(self.track_group_widget)
+        control_layout.addWidget(self.btn_step2)
+        
+        btn_layout.addLayout(control_layout, stretch=3)
         
         nav_layout = QHBoxLayout()
         nav_layout.setSpacing(10)
@@ -665,6 +693,12 @@ class Page4_AiTraining(QWidget):
         btn_layout.addLayout(nav_layout, stretch=1)
         
         layout.addLayout(btn_layout)
+
+    def on_track_changed(self, btn):
+        if btn == self.rb_student:
+            self.selected_track = "STUDENT"
+        elif btn == self.rb_lora:
+            self.selected_track = "LORA"
 
     def start_analysis(self):
         self.btn_step1.setEnabled(False)
@@ -682,6 +716,7 @@ class Page4_AiTraining(QWidget):
 
     def on_analysis_finished(self):
         self.btn_step1.setVisible(False)
+        self.track_group_widget.setVisible(True) # Show track selection
         self.btn_step2.setVisible(True)
         self.log_view.setVisible(False)
         self.list_widget.setVisible(True)
@@ -777,6 +812,7 @@ class Page4_AiTraining(QWidget):
         self.btn_step2.setEnabled(False)
         self.btn_step2.setText("학습 진행 중... (창을 닫지 마세요)")
         self.btn_step2.setVisible(False) 
+        self.track_group_widget.setVisible(False) # Hide radios
         self.btn_stop.setVisible(True)   
         self.btn_stop.setEnabled(True)
         self.btn_stop.setText("🛑 학습 중단")
@@ -785,9 +821,14 @@ class Page4_AiTraining(QWidget):
         self.log_view.setVisible(True)
         self.log_view.clear()
         self.log_view.append(f"[INFO] Deleted {remove_count} rejected videos.")
-        self.log_view.append(f"[INFO] Starting training with {valid_count} videos...")
+        self.log_view.append(f"[INFO] Starting training (Track: {self.selected_track}) with {valid_count} videos...")
 
-        self.worker = PipelineWorker(self.root_dir, mode="train")
+        # Mode Selection
+        mode_flag = "train"
+        if self.selected_track == "LORA":
+            mode_flag = "train_lora" # New internal mode for worker
+
+        self.worker = PipelineWorker(self.root_dir, mode=mode_flag)
         self.worker.log_signal.connect(self.log_view.append)
         self.worker.progress_signal.connect(self.on_progress)
         self.worker.finished_signal.connect(self.on_training_finished)
@@ -795,7 +836,6 @@ class Page4_AiTraining(QWidget):
         self.worker.start()
 
     def on_progress(self, percent, status_text, time_info):
-        """[Updated] Handle new progress signal with time info"""
         self.pbar.setValue(percent)
         self.lbl_status.setText(status_text)
         self.lbl_time_info.setText(time_info)
@@ -810,5 +850,6 @@ class Page4_AiTraining(QWidget):
         self.btn_stop.setVisible(False)
         self.btn_step2.setVisible(True)
         self.btn_step2.setText("학습 완료")
+        self.btn_step2.setEnabled(True)
         self.lbl_status.setText("모든 과정이 성공적으로 끝났습니다.")
         self.btn_home.setVisible(True)

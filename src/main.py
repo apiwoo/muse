@@ -90,23 +90,33 @@ def main():
         print("[EXIT] Launcher canceled.")
         sys.exit(0)
 
-    # [Step 2] Get Start Config
-    start_profile = launcher.get_start_config()
-    print(f"[START] Launching Engine with Profile: {start_profile}")
+    # [Step 2] Get Start Config (Updated for Tuple Unpacking)
+    # Launcher returns (profile_name, run_mode)
+    config_data = launcher.get_start_config()
+    
+    if isinstance(config_data, tuple):
+        start_profile, run_mode = config_data
+    else:
+        # Fallback for old launcher version
+        start_profile = config_data
+        run_mode = "STANDARD"
+
+    print(f"[START] Launching Engine with Profile: {start_profile}, Mode: {run_mode}")
 
     # [New] Splash Screen for Loading
     # 간단한 로딩 화면을 띄워 사용자가 멈춘 것으로 오해하지 않게 합니다.
     splash_pix = QPixmap(400, 200)
     splash_pix.fill(QColor("#1E1E1E"))
     splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
-    splash.showMessage(f"\n\n   MUSE AI 엔진 구동 중...\n   프로필: {start_profile}\n   (최대 10초 소요)", 
+    splash.showMessage(f"\n\n   MUSE AI 엔진 구동 중...\n   프로필: {start_profile}\n   모드: {run_mode}\n   (최대 10초 소요)", 
                        Qt.AlignCenter, Qt.white)
     splash.show()
     app.processEvents()
 
     # [Step 3] Start Engine
     # Worker 생성 시 모델 로딩이 발생하므로 시간이 걸립니다.
-    worker = BeautyWorker(start_profile=start_profile)
+    # [Update] Pass run_mode to worker
+    worker = BeautyWorker(start_profile=start_profile, run_mode=run_mode)
     
     window = MuseApp(worker)
     window.connect_worker(worker)

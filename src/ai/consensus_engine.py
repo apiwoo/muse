@@ -1,7 +1,6 @@
 # Project MUSE - consensus_engine.py
 # V8.5 Hybrid: Fully Parallelized Architecture (Threaded Default Mode)
-# Optimized: Runs MODNet & ViTPose in parallel threads for Default Mode
-# Compatibility: TensorRT 10.x (execute_async_v3)
+# Updated: Phase 3 High-Precision LoRA Integration
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import tensorrt as trt
@@ -97,9 +96,10 @@ class TensorRTModel:
 class ConsensusEngine:
     def __init__(self, root_dir):
         """
-        [Hybrid Mode V8.5]
-        - Default: Parallelized MODNet + ViTPose (using ThreadPool)
-        - Personal: DualInferenceTRT (using CUDA Streams)
+        [Hybrid Mode V9.0]
+        - STANDARD: Parallelized MODNet + ViTPose (Base)
+        - LORA: Parallelized MODNet + ViTPose (LoRA)
+        - PERSONAL: DualInferenceTRT (using CUDA Streams)
         """
         self.root_dir = root_dir
         self.model_dir = os.path.join(root_dir, "assets", "models")
@@ -108,7 +108,10 @@ class ConsensusEngine:
         print("[AI] Initializing Hybrid Consensus Engine (Parallel Ready)...")
 
         # 1. Init Default Models Placeholders (Do NOT load yet)
-        self.pose_model = None
+        # Pose models are now managed dynamically based on mode
+        self.pose_models_cache = {} # 'base', 'huge', 'lora_profile'
+        self.active_pose_model = None
+        
         self.modnet = TensorRTModel(
             os.path.join(self.model_dir, "segmentation", "modnet_544p.engine"),
             input_shape=(1, 3, 544, 960),
@@ -118,68 +121,93 @@ class ConsensusEngine:
         # 2. Personal Models State
         self.student_models = {} # Cache loaded students
         self.current_student = None
-        self.use_personal = False
         
+        self.active_mode = "STANDARD"
         self.executor = ThreadPoolExecutor(max_workers=2)
         
         # Preprocessing Constants
         self.mean = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
         self.std = cp.array([0.5, 0.5, 0.5], dtype=cp.float32).reshape(1,3,1,1)
 
-    def _ensure_default_models_loaded(self):
-        """Load default models only if they aren't loaded yet."""
-        if self.pose_model is None:
-            print("[AI] [Fallback] Loading ViTPose (Default Strategy)...")
-            try:
-                # [Modified] Default to Base engine
-                pose_path = os.path.join(self.model_dir, "tracking", "vitpose_base.engine")
-                
-                # Check Base -> Fallback Huge
-                if not os.path.exists(pose_path):
-                    pose_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
-                
-                if os.path.exists(pose_path) and VitPoseTrt:
-                    self.pose_model = VitPoseTrt(pose_path)
-                else:
-                    print("[WARNING] ViTPose engine not found (Checked Base/Huge).")
-            except Exception as e:
-                print(f"[WARNING] ViTPose Init Failed: {e}")
+    def set_strategy(self, profile_name, mode="STANDARD"):
+        """
+        Switch AI Strategy based on Profile and Mode.
+        Modes: 'STANDARD', 'LORA', 'PERSONAL'
+        """
+        print(f"[AI] >>> Strategy Switch Requested: {mode} ({profile_name})")
+        self.active_mode = mode
         
+        # --- STRATEGY: PERSONAL ---
+        if mode == "PERSONAL":
+            seg_path = os.path.join(self.personal_dir, f"student_seg_{profile_name}.engine")
+            pose_path = os.path.join(self.personal_dir, f"student_pose_{profile_name}.engine")
+            
+            if os.path.exists(seg_path) and os.path.exists(pose_path) and DualInferenceTRT:
+                if profile_name not in self.student_models:
+                    print(f"[AI] Loading Student Engine into VRAM...")
+                    try:
+                        self.student_models[profile_name] = DualInferenceTRT(seg_path, pose_path)
+                    except Exception as e:
+                        print(f"[ERROR] Student Load Failed: {e}")
+                
+                student = self.student_models.get(profile_name)
+                if student and student.is_ready:
+                    self.current_student = student
+                    print(f"[AI] Strategy Active: PERSONAL (Dual Student)")
+                    return
+            else:
+                print(f"[AI] Personal models missing. Fallback to STANDARD.")
+                self.active_mode = "STANDARD" # Fallback
+
+        # --- STRATEGY: LORA ---
+        if self.active_mode == "LORA":
+            lora_path = os.path.join(self.personal_dir, f"vitpose_lora_{profile_name}.engine")
+            cache_key = f"lora_{profile_name}"
+            
+            if os.path.exists(lora_path) and VitPoseTrt:
+                if cache_key not in self.pose_models_cache:
+                    print(f"[AI] Loading High-Precision LoRA: {os.path.basename(lora_path)}")
+                    try:
+                        self.pose_models_cache[cache_key] = VitPoseTrt(lora_path)
+                    except Exception as e:
+                        print(f"[ERROR] LoRA Load Failed: {e}")
+                
+                if cache_key in self.pose_models_cache:
+                    self.active_pose_model = self.pose_models_cache[cache_key]
+                    self._ensure_modnet_ready()
+                    print(f"[AI] Strategy Active: LORA (High-Precision)")
+                    return
+            else:
+                print(f"[AI] LoRA model missing ({lora_path}). Fallback to STANDARD.")
+                self.active_mode = "STANDARD"
+
+        # --- STRATEGY: STANDARD (Default) ---
+        # Load Base Model
+        if 'base' not in self.pose_models_cache:
+            base_path = os.path.join(self.model_dir, "tracking", "vitpose_base.engine")
+            if not os.path.exists(base_path): # Fallback Huge
+                base_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
+            
+            try:
+                if os.path.exists(base_path) and VitPoseTrt:
+                    print(f"[AI] Loading Standard Base Model...")
+                    self.pose_models_cache['base'] = VitPoseTrt(base_path)
+            except Exception as e:
+                print(f"[ERROR] Base Pose Init Failed: {e}")
+
+        self.active_pose_model = self.pose_models_cache.get('base')
+        self._ensure_modnet_ready()
+        print(f"[AI] Strategy Active: STANDARD (Base Model)")
+
+    def _ensure_modnet_ready(self):
         if not self.modnet.is_ready:
-            print("[AI] [Fallback] Loading MODNet (Default Strategy)...")
+            print("[AI] Loading MODNet (Standard/LoRA Seg)...")
             self.modnet.load()
 
+    # Legacy method wrapper
     def set_profile(self, profile_name):
-        """
-        Switch AI Strategy based on Profile.
-        Checks for 'student_seg_{profile}.engine' and 'student_pose_{profile}.engine'.
-        """
-        seg_path = os.path.join(self.personal_dir, f"student_seg_{profile_name}.engine")
-        pose_path = os.path.join(self.personal_dir, f"student_pose_{profile_name}.engine")
-        
-        # Check if personal model exists
-        if os.path.exists(seg_path) and os.path.exists(pose_path) and DualInferenceTRT:
-            # Load if not in cache
-            if profile_name not in self.student_models:
-                print(f"[AI] Loading Student Engine into VRAM...")
-                try:
-                    self.student_models[profile_name] = DualInferenceTRT(seg_path, pose_path)
-                except Exception as e:
-                    print(f"[ERROR] Student Load Failed: {e}")
-            
-            # Activate
-            student = self.student_models.get(profile_name)
-            if student and student.is_ready:
-                self.current_student = student
-                self.use_personal = True
-                print(f"[AI] >>> Strategy Switched: PERSONALIZED MODEL ({profile_name})")
-                return
-
-        # Fallback to Default
-        self._ensure_default_models_loaded() # Load heavy models NOW
-        self.use_personal = False
-        self.current_student = None
-        print(f"[AI] >>> Strategy Switched: DEFAULT MODEL (MODNet + ViTPose)")
+        # Default to STANDARD if called without mode
+        self.set_strategy(profile_name, "STANDARD")
 
     def _run_modnet(self, frame_gpu):
         """Worker function for MODNet"""
@@ -204,15 +232,15 @@ class ConsensusEngine:
         return self.modnet.infer(img_norm)
 
     def _run_vitpose(self, frame_gpu):
-        """Worker function for ViTPose (Handles GPU->CPU copy internally)"""
-        if self.pose_model is None: return None
+        """Worker function for ViTPose (Base OR LoRA)"""
+        if self.active_pose_model is None: return None
         try:
             # Transfer GPU -> CPU happens inside this thread.
             if hasattr(frame_gpu, 'get'):
                 frame_cpu = frame_gpu.get()
             else:
                 frame_cpu = frame_gpu
-            return self.pose_model.inference(frame_cpu)
+            return self.active_pose_model.inference(frame_cpu)
         except Exception: 
             return None
 
@@ -224,9 +252,9 @@ class ConsensusEngine:
         if frame_gpu is None: return None, None
         
         # ==========================================================
-        # STRATEGY A: Personal Model (Already Parallelized via Streams)
+        # PATH A: Personal Model (Already Parallelized via Streams)
         # ==========================================================
-        if self.use_personal and self.current_student:
+        if self.active_mode == "PERSONAL" and self.current_student:
             mask_gpu, kpts = self.current_student.infer(frame_gpu)
             
             if mask_gpu is None:
@@ -236,11 +264,11 @@ class ConsensusEngine:
             return mask_gpu, kpts
 
         # ==========================================================
-        # STRATEGY B: Default (Parallelized via Threads)
+        # PATH B: Standard / LoRA (Parallelized via Threads)
         # ==========================================================
-        # Ensure default models are ready
+        # Ensure Seg model is ready
         if not self.modnet.is_ready:
-            self._ensure_default_models_loaded()
+            self._ensure_modnet_ready()
 
         h, w = frame_gpu.shape[:2]
         

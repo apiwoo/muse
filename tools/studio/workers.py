@@ -1,5 +1,5 @@
 # Project MUSE - workers.py
-# Updated for Smart Resume & Stop Logic
+# Updated for Smart Resume & Stop Logic + LoRA Track Support
 
 import sys
 import os
@@ -32,9 +32,9 @@ class CameraLoader(QThread):
 
 class PipelineWorker(QThread):
     """
-    [Updated V6] Smart Stop & Resume Logic
-    - Checks 'stop_training.flag' between steps.
-    - Aborts immediately if stop is requested.
+    [Updated V7] Smart Stop & Resume Logic + LoRA Track
+    - mode="train": Standard Student Training
+    - mode="train_lora": High-Precision LoRA Training
     """
     log_signal = Signal(str)
     progress_signal = Signal(int, str, str) # percent, status, time
@@ -105,6 +105,8 @@ class PipelineWorker(QThread):
                 self._run_analysis()
             elif self.mode == "train":
                 self._run_training_pipeline()
+            elif self.mode == "train_lora":
+                self._run_lora_pipeline()
             else:
                 raise ValueError("Invalid Mode")
             
@@ -181,6 +183,40 @@ class PipelineWorker(QThread):
         
         if not self._check_stop():
             self.progress_signal.emit(100, "선택된 프로파일 학습 완료!", self._get_time_info())
+
+    def _run_lora_pipeline(self):
+        # 1. Full Labeling (Shared)
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(0, "Step 1/3: 정밀 라벨링 (공통 과정)...", self._get_time_info())
+        self.run_script(
+            os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), 
+            ["personal_data", "--mode", "full"],
+            weight_range=(0, 30)
+        )
+        
+        # 2. Data Filtering (Shared)
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(30, f"Step 2/3: 데이터 정제...", self._get_time_info())
+        self.run_script(
+            os.path.join(self.tools_dir, "auto_labeling", "filter_bad_data.py"), 
+            [self.target_profile],
+            weight_range=(30, 35)
+        )
+
+        # 3. LoRA Training + Merge + Convert (All in One)
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(35, f"Step 3/3: LoRA 학습 및 엔진 병합...", self._get_time_info())
+        self.run_script(
+            os.path.join(self.tools_dir, "train_pose_lora.py"), 
+            ["personal_data", "--profile", self.target_profile],
+            weight_range=(35, 100)
+        )
+        
+        if not self._check_stop():
+            self.progress_signal.emit(100, "LoRA 고정밀 모델 학습 완료!", self._get_time_info())
 
     def run_script(self, script_path, args, weight_range=(0, 100)):
         cmd = [sys.executable, script_path] + args

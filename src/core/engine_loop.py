@@ -1,5 +1,6 @@
 # Project MUSE - engine_loop.py
 # V5 Architecture: The Guided High-Res Flow (Debug Enhanced)
+# Updated: Phase 3 High-Precision LoRA Mode Support
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import time
@@ -28,7 +29,7 @@ class BeautyWorker(QThread):
     frame_processed = Signal(object)
     slider_sync_requested = Signal(dict)
 
-    def __init__(self, start_profile="default"): 
+    def __init__(self, start_profile="default", run_mode="STANDARD"): 
         super().__init__()
         self.running = True
         self.param_mutex = QMutex()
@@ -39,6 +40,9 @@ class BeautyWorker(QThread):
         self.current_profile_name = start_profile
         if self.current_profile_name not in self.profiles:
             self.current_profile_name = self.profiles[0] if self.profiles else "default"
+        
+        # [New] Runtime Mode (STANDARD, LORA, PERSONAL)
+        self.run_mode = run_mode
         
         initial_config = self.profile_mgr.get_config(self.current_profile_name)
         self.params = initial_config.get("params", {})
@@ -56,7 +60,7 @@ class BeautyWorker(QThread):
         self.face_tracker = FaceMesh(self.root_dir)
 
     def run(self):
-        print(f"[ENGINE] Launching V5 Pipeline (Profile: {self.current_profile_name})...")
+        print(f"[ENGINE] Launching V5 Pipeline (Profile: {self.current_profile_name}, Mode: {self.run_mode})...")
 
         try:
             # 1. Hardware Initialization
@@ -81,8 +85,8 @@ class BeautyWorker(QThread):
             print(f"[ENGINE] Initializing AI Engine...")
             self.ai_engine = ConsensusEngine(self.root_dir)
             
-            # [Added] Set Initial AI Strategy
-            self.ai_engine.set_profile(self.current_profile_name)
+            # [Added] Set Initial AI Strategy with Mode
+            self.ai_engine.set_strategy(self.current_profile_name, self.run_mode)
 
             print(f"[ENGINE] Initializing Graphics (Adaptive BG)...")
             self.bg_manager = AdaptiveBackground(self.WIDTH, self.HEIGHT)
@@ -184,9 +188,6 @@ class BeautyWorker(QThread):
             if current_params.get('show_body_debug', False) and keypoints is not None:
                 try:
                     # [Fix: Sync Required]
-                    # GPU 연산(BeautyEngine)이 끝나기 전에 CPU가 메모리를 읽으려 해서 생기는
-                    # Uninitialized Memory(노이즈) 문제입니다.
-                    # BeautyEngine의 Stream이 작업을 마칠 때까지 기다려야 합니다.
                     if hasattr(self.beauty_engine, 'stream'):
                         self.beauty_engine.stream.synchronize()
 
@@ -257,12 +258,6 @@ class BeautyWorker(QThread):
         Draw COCO 17 Keypoints skeleton on image.
         keypoints: (17, 3) [x, y, conf]
         """
-        # COCO Keypoint Index
-        # 0:Nose, 1:LEye, 2:REye, 3:LEar, 4:REar
-        # 5:LShoulder, 6:RShoulder, 7:LElbow, 8:RElbow
-        # 9:LWrist, 10:RWrist, 11:LHip, 12:RHip
-        # 13:LKnee, 14:RKnee, 15:LAnkle, 16:RAnkle
-        
         edges = [
             (0, 1), (0, 2), (1, 3), (2, 4), # Face
             (5, 6), (5, 7), (7, 9), # Left Arm
@@ -272,7 +267,6 @@ class BeautyWorker(QThread):
             (12, 14), (14, 16) # Right Leg
         ]
         
-        # Color: BGR
         c_point = (0, 255, 0)
         c_line = (255, 255, 0)
         
@@ -336,8 +330,8 @@ class BeautyWorker(QThread):
         if self.input_mgr.select_camera(target_cam_id):
             print(f"   [CAM] Source: {target_cam_id}")
         
-        # [Added] Update AI Strategy
-        self.ai_engine.set_profile(target_profile_name)
+        # [Added] Update AI Strategy (Preserve Current Mode)
+        self.ai_engine.set_strategy(target_profile_name, self.run_mode)
 
         self._load_profile_assets(target_profile_name)
         self.current_profile_name = target_profile_name
