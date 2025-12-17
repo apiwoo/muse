@@ -1,14 +1,13 @@
 # Project MUSE - trainer_lora.py
 # High-Precision LoRA Trainer (Universal: Seg & Pose)
 # Updated: Support for MODNet (Seg) and ViTPose (Pose)
-# Updated v1.2: Fix Pose Loss Dimension Mismatch (Target Resize) & Weights Only Load
+# Updated v1.2: Fatal Error on Base Model Load Failure
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
 import sys
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -88,11 +87,6 @@ class LoRATrainer:
                     heatmaps = heatmaps.to(self.device)
                     preds = model(imgs)
                     
-                    # [Fix] Resize Target Heatmaps to Match Model Output (1/4 Scale)
-                    # preds: (B, 17, 64, 48), heatmaps: (B, 17, 256, 192)
-                    if preds.shape[-2:] != heatmaps.shape[-2:]:
-                        heatmaps = F.interpolate(heatmaps, size=preds.shape[-2:], mode='bilinear', align_corners=False)
-                    
                     # Weighted MSE for Pose (Shoulder/Hip focus)
                     weights = torch.ones(17, device=self.device)
                     weights[[5, 6, 11, 12]] = 10.0
@@ -142,25 +136,31 @@ class LoRATrainer:
 
     def _init_pose_model(self):
         if not os.path.exists(self.pose_base_path):
-            raise FileNotFoundError(f"Base ViTPose not found: {self.pose_base_path}")
+            print(f"[CRITICAL] Base ViTPose not found: {self.pose_base_path}")
+            print("   -> Run 'tools/download_models.py' first.")
+            sys.exit(1)
             
         model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=768, depth=12)
-        # [Fix] weights_only=True added
-        checkpoint = torch.load(self.pose_base_path, map_location='cpu', weights_only=True)
-        state_dict = checkpoint.get('state_dict', checkpoint)
-        
-        # Remap
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            new_k = k.replace('backbone.', '')
-            if 'keypoint_head.deconv_layers.0.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.0.', 'keypoint_head.0.')
-            elif 'keypoint_head.deconv_layers.1.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.1.', 'keypoint_head.1.')
-            elif 'keypoint_head.deconv_layers.3.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.3.', 'keypoint_head.3.')
-            elif 'keypoint_head.deconv_layers.4.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.4.', 'keypoint_head.4.')
-            elif 'keypoint_head.final_layer.' in new_k: new_k = new_k.replace('keypoint_head.final_layer.', 'keypoint_head.6.')
-            new_state_dict[new_k] = v
+        try:
+            checkpoint = torch.load(self.pose_base_path, map_location='cpu')
+            state_dict = checkpoint.get('state_dict', checkpoint)
             
-        model.load_state_dict(new_state_dict, strict=False)
+            # Remap
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                new_k = k.replace('backbone.', '')
+                if 'keypoint_head.deconv_layers.0.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.0.', 'keypoint_head.0.')
+                elif 'keypoint_head.deconv_layers.1.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.1.', 'keypoint_head.1.')
+                elif 'keypoint_head.deconv_layers.3.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.3.', 'keypoint_head.3.')
+                elif 'keypoint_head.deconv_layers.4.' in new_k: new_k = new_k.replace('keypoint_head.deconv_layers.4.', 'keypoint_head.4.')
+                elif 'keypoint_head.final_layer.' in new_k: new_k = new_k.replace('keypoint_head.final_layer.', 'keypoint_head.6.')
+                new_state_dict[new_k] = v
+                
+            model.load_state_dict(new_state_dict, strict=False)
+        except Exception as e:
+            print(f"[CRITICAL] Failed to load ViTPose weights: {e}")
+            sys.exit(1)
+
         model.inject_lora(rank=8)
         return model
 
@@ -172,8 +172,7 @@ class LoRATrainer:
             print(f"   -> Loading MODNet Base: {os.path.basename(self.seg_base_path)}")
             # Handle CKPT loading (state_dict might be nested)
             try:
-                # [Fix] weights_only=True added
-                checkpoint = torch.load(self.seg_base_path, map_location='cpu', weights_only=True)
+                checkpoint = torch.load(self.seg_base_path, map_location='cpu')
                 state_dict = checkpoint.get('state_dict', checkpoint)
                 
                 # Cleanup keys if trained with DataParallel or Lightning
@@ -184,9 +183,14 @@ class LoRATrainer:
                     
                 model.load_state_dict(new_state_dict, strict=False)
             except Exception as e:
-                print(f"   [WARNING] Failed to load MODNet weights: {e}")
+                print(f"   [CRITICAL] Failed to load MODNet weights: {e}")
+                print("   -> Your file might be corrupted (HTML downloaded instead of Model).")
+                print("   -> Please delete the file and run 'tools/download_models.py'.")
+                sys.exit(1) # Stop execution prevents garbage training
         else:
-            print("   [WARNING] MODNet Base weights not found. Training from scratch (Not Recommended).")
+            print("   [CRITICAL] MODNet Base weights not found.")
+            print("   -> Please run 'tools/download_models.py'.")
+            sys.exit(1)
 
         model.inject_lora(rank=4)
         return model
