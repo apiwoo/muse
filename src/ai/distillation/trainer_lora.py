@@ -1,13 +1,14 @@
 # Project MUSE - trainer_lora.py
 # High-Precision LoRA Trainer (Universal: Seg & Pose)
 # Updated: Support for MODNet (Seg) and ViTPose (Pose)
-# Updated v1.1: Detailed Loss Logging (Raw MSE vs Weighted) for Debugging
+# Updated v1.2: Fix Pose Loss Dimension Mismatch (Target Resize) & Weights Only Load
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -87,6 +88,11 @@ class LoRATrainer:
                     heatmaps = heatmaps.to(self.device)
                     preds = model(imgs)
                     
+                    # [Fix] Resize Target Heatmaps to Match Model Output (1/4 Scale)
+                    # preds: (B, 17, 64, 48), heatmaps: (B, 17, 256, 192)
+                    if preds.shape[-2:] != heatmaps.shape[-2:]:
+                        heatmaps = F.interpolate(heatmaps, size=preds.shape[-2:], mode='bilinear', align_corners=False)
+                    
                     # Weighted MSE for Pose (Shoulder/Hip focus)
                     weights = torch.ones(17, device=self.device)
                     weights[[5, 6, 11, 12]] = 10.0
@@ -139,7 +145,8 @@ class LoRATrainer:
             raise FileNotFoundError(f"Base ViTPose not found: {self.pose_base_path}")
             
         model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=768, depth=12)
-        checkpoint = torch.load(self.pose_base_path, map_location='cpu')
+        # [Fix] weights_only=True added
+        checkpoint = torch.load(self.pose_base_path, map_location='cpu', weights_only=True)
         state_dict = checkpoint.get('state_dict', checkpoint)
         
         # Remap
@@ -165,7 +172,8 @@ class LoRATrainer:
             print(f"   -> Loading MODNet Base: {os.path.basename(self.seg_base_path)}")
             # Handle CKPT loading (state_dict might be nested)
             try:
-                checkpoint = torch.load(self.seg_base_path, map_location='cpu')
+                # [Fix] weights_only=True added
+                checkpoint = torch.load(self.seg_base_path, map_location='cpu', weights_only=True)
                 state_dict = checkpoint.get('state_dict', checkpoint)
                 
                 # Cleanup keys if trained with DataParallel or Lightning

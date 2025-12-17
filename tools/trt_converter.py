@@ -1,5 +1,6 @@
 # Project MUSE - trt_converter.py
 # Target: RTX 3060/4090 Mode A (High Performance)
+# Updated: Support dynamic input shape via arguments
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -188,8 +189,12 @@ def run_export_worker(pth_path, onnx_path, variant):
 # ==================================================================================
 # [Mode 2] TensorRT Worker (Engine Build)
 # ==================================================================================
-def run_build_worker(onnx_path, engine_path):
+def run_build_worker(onnx_path, engine_path, input_shape=(256, 192)):
+    """
+    input_shape: (height, width)
+    """
     print(f"[START] [Process 2] TensorRT Worker Started...")
+    print(f"   Target Input Shape: 1x3x{input_shape[0]}x{input_shape[1]}")
     
     try:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -217,8 +222,10 @@ def run_build_worker(onnx_path, engine_path):
             print(parser.get_error(error))
         sys.exit(1)
 
+    # Dynamic Shape Configuration
+    h, w = input_shape
     profile = builder.create_optimization_profile()
-    profile.set_shape("input", (1, 3, 256, 192), (1, 3, 256, 192), (1, 3, 256, 192))
+    profile.set_shape("input", (1, 3, h, w), (1, 3, h, w), (1, 3, h, w))
     config.add_optimization_profile(profile)
     
     if builder.platform_has_fast_fp16:
@@ -243,15 +250,43 @@ def run_build_worker(onnx_path, engine_path):
 # [Main Manager]
 # ==================================================================================
 def main():
-    # Worker Logic Checks
+    # Worker Logic Checks via sys.argv manually to avoid conflicts with argparse in subprocess calls
     if len(sys.argv) > 1:
         if sys.argv[1] == '--export-worker':
+            # Usage: script.py --export-worker pth onnx variant
+            if len(sys.argv) < 5:
+                print("Usage: --export-worker <pth> <onnx> <variant>")
+                sys.exit(1)
             run_export_worker(sys.argv[2], sys.argv[3], sys.argv[4])
             return
+            
         elif sys.argv[1] == '--build-worker':
-            run_build_worker(sys.argv[2], sys.argv[3])
+            # Usage: script.py --build-worker onnx engine [--input-shape H W]
+            if len(sys.argv) < 4:
+                print("Usage: --build-worker <onnx> <engine> [--input-shape H W]")
+                sys.exit(1)
+                
+            onnx_path = sys.argv[2]
+            engine_path = sys.argv[3]
+            
+            # Default to Pose Shape
+            height = 256
+            width = 192
+            
+            # Parse optional shape
+            if '--input-shape' in sys.argv:
+                try:
+                    idx = sys.argv.index('--input-shape')
+                    if idx + 2 < len(sys.argv):
+                        height = int(sys.argv[idx+1])
+                        width = int(sys.argv[idx+2])
+                except ValueError:
+                    print("[WARN] Invalid input shape format. Using default.")
+
+            run_build_worker(onnx_path, engine_path, (height, width))
             return
 
+    # If run directly (Manager Mode for default conversion)
     print("========================================================")
     print("   MUSE ViTPose Converter (Dual Edition: Huge & Base)")
     print("========================================================")
@@ -285,7 +320,6 @@ def main():
             
         if os.path.exists(t['engine']):
             print(f"   [SKIP] Engine already exists: {os.path.basename(t['engine'])}")
-            # Optional: Add force flag support later
             continue
 
         print(f"   [START] Converting {t['variant'].upper()}...")
@@ -297,9 +331,9 @@ def main():
             print("   [ERROR] Export Failed. Skipping.")
             continue
             
-        # 2. Build Engine
+        # 2. Build Engine (Default shape for ViTPose is 256x192)
         try:
-            subprocess.run([sys.executable, __file__, '--build-worker', t['onnx'], t['engine']], check=True)
+            subprocess.run([sys.executable, __file__, '--build-worker', t['onnx'], t['engine'], '--input-shape', '256', '192'], check=True)
             print("   [SUCCESS] Conversion Success!")
         except subprocess.CalledProcessError:
             print("   [ERROR] Build Failed. Skipping.")

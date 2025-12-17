@@ -1,6 +1,7 @@
 # Project MUSE - merge_lora_to_engine.py
 # Merges LoRA weights into Base Model and converts to TensorRT
-# Updated: Support for both Pose (ViTPose) and Seg (MODNet)
+# Updated: Support for both Pose (ViTPose) and Seg (MODNet) with correct shapes
+# Updated: Smart Skip Logic (Check if engine/onnx exists)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -29,6 +30,18 @@ def merge_and_convert(profile_name, mode='pose'):
 def _merge_pose(profile_name, base_dir, model_dir, personal_dir):
     base_pth = os.path.join(model_dir, "tracking", "vitpose_base_coco_256x192.pth")
     lora_pth = os.path.join(personal_dir, f"vitpose_lora_weights_{profile_name}.pth")
+    engine_path = os.path.join(personal_dir, f"vitpose_lora_{profile_name}.engine")
+    onnx_path = os.path.join(personal_dir, f"vitpose_lora_{profile_name}.onnx")
+    
+    # [Smart Skip 1] Engine exists
+    if os.path.exists(engine_path):
+        print(f"[SKIP] Engine already exists: {os.path.basename(engine_path)}")
+        return True
+
+    # [Smart Skip 2] ONNX exists -> Go to Build
+    if os.path.exists(onnx_path):
+        print(f"[SKIP] ONNX found. Skipping merge, going to build...")
+        return _build_engine(base_dir, onnx_path, engine_path, shape=(256, 192))
     
     if not os.path.exists(lora_pth):
         print(f"[ERROR] LoRA weights not found: {lora_pth}")
@@ -68,17 +81,27 @@ def _merge_pose(profile_name, base_dir, model_dir, personal_dir):
     _fold_lora_weights(model)
 
     # 4. Export ONNX
-    onnx_path = os.path.join(personal_dir, f"vitpose_lora_{profile_name}.onnx")
     dummy_input = torch.randn(1, 3, 256, 192)
     _export_onnx(model, dummy_input, onnx_path)
     
-    # 5. Build Engine
-    engine_path = os.path.join(personal_dir, f"vitpose_lora_{profile_name}.engine")
-    return _build_engine(base_dir, onnx_path, engine_path)
+    # 5. Build Engine (Shape: 256x192)
+    return _build_engine(base_dir, onnx_path, engine_path, shape=(256, 192))
 
 def _merge_seg(profile_name, base_dir, model_dir, personal_dir):
     base_pth = os.path.join(model_dir, "segmentation", "modnet_webcam_portrait_matting.ckpt")
     lora_pth = os.path.join(personal_dir, f"modnet_lora_weights_{profile_name}.pth")
+    engine_path = os.path.join(personal_dir, f"modnet_lora_{profile_name}.engine")
+    onnx_path = os.path.join(personal_dir, f"modnet_lora_{profile_name}.onnx")
+    
+    # [Smart Skip 1] Engine exists
+    if os.path.exists(engine_path):
+        print(f"[SKIP] Engine already exists: {os.path.basename(engine_path)}")
+        return True
+
+    # [Smart Skip 2] ONNX exists -> Go to Build
+    if os.path.exists(onnx_path):
+        print(f"[SKIP] ONNX found. Skipping merge, going to build...")
+        return _build_engine(base_dir, onnx_path, engine_path, shape=(544, 960))
     
     if not os.path.exists(lora_pth):
         print(f"[ERROR] Seg LoRA weights not found: {lora_pth}")
@@ -138,14 +161,12 @@ def _merge_seg(profile_name, base_dir, model_dir, personal_dir):
         lora_layer.scaling = 0.0 
 
     # 4. Export ONNX (Target Resolution 544p)
-    onnx_path = os.path.join(personal_dir, f"modnet_lora_{profile_name}.onnx")
     # MODNet needs fixed multiple of 32
     dummy_input = torch.randn(1, 3, 544, 960) 
     _export_onnx(model, dummy_input, onnx_path)
     
-    # 5. Build Engine
-    engine_path = os.path.join(personal_dir, f"modnet_lora_{profile_name}.engine")
-    return _build_engine(base_dir, onnx_path, engine_path)
+    # 5. Build Engine (Shape: 544x960)
+    return _build_engine(base_dir, onnx_path, engine_path, shape=(544, 960))
 
 def _fold_lora_weights(model):
     print("   -> Folding LoRA weights into Base Linear layers...")
@@ -166,12 +187,14 @@ def _export_onnx(model, input_tensor, path):
     )
     print(f"   -> ONNX Exported: {path}")
 
-def _build_engine(base_dir, onnx_path, engine_path):
-    print(f"   -> Building TensorRT Engine...")
+def _build_engine(base_dir, onnx_path, engine_path, shape):
+    h, w = shape
+    print(f"   -> Building TensorRT Engine (Shape: {h}x{w})...")
     cmd = [
         sys.executable, 
         os.path.join(base_dir, "tools", "trt_converter.py"),
-        "--build-worker", onnx_path, engine_path
+        "--build-worker", onnx_path, engine_path,
+        "--input-shape", str(h), str(w)
     ]
     try:
         subprocess.run(cmd, check=True)
