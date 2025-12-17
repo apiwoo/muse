@@ -2,6 +2,7 @@
 # (C) 2025 MUSE Corp.
 # Purpose: Removes frames where body keypoints fall outside the segmentation mask.
 # Target: Prevent training pollution.
+# Updated: Filter based on TORSO & ARMS only (Ignore Head & Legs clipping).
 
 import os
 import sys
@@ -29,10 +30,18 @@ def filter_data(profile_name, root_session="personal_data"):
     
     print(f"[FILTER] Scanning {total_files} frames in '{profile_name}'...")
 
-    # Keypoint Indices to check (Body only: 5~16)
-    # 0~4: Face (Nose, Eyes, Ears) - Ignored (can be outside due to hair/angles)
-    # 5~16: Shoulders, Elbows, Wrists, Hips, Knees, Ankles
-    CHECK_INDICES = list(range(5, 17)) 
+    # [Update] Keypoint Indices Check
+    # 머리(0~4)와 다리(13~16)는 검사하지 않습니다.
+    # 오직 상체와 팔만 마스크 안에 들어와 있으면 유효한 데이터로 간주합니다.
+    # -----------------------------------------------------------
+    # 0~4: Face (Ignored)
+    # 5,6: Shoulders (Check)
+    # 7,8: Elbows (Check)
+    # 9,10: Wrists (Check)
+    # 11,12: Hips (Check)
+    # 13~16: Legs (Ignored)
+    # -----------------------------------------------------------
+    CHECK_INDICES = list(range(5, 13)) 
 
     for label_path in tqdm(label_files):
         basename = os.path.splitext(os.path.basename(label_path))[0]
@@ -65,11 +74,9 @@ def filter_data(profile_name, root_session="personal_data"):
             if conf > 0.4:
                 # Boundary check
                 if x < 0 or x >= w or y < 0 or y >= h:
-                    continue # Out of bounds implies outside mask, but usually handled by crop logic.
-                             # Here we focus on points INSIDE frame but OUTSIDE mask.
+                    continue 
                 
                 # Mask Value Check (0 = Background)
-                # We use a small tolerance? No, strict check as requested.
                 if mask[y, x] == 0:
                     is_bad = True
                     break
@@ -84,7 +91,7 @@ def filter_data(profile_name, root_session="personal_data"):
                 print(f"[ERR] Failed to delete {basename}: {e}")
 
     ratio = (deleted_count / total_files) * 100 if total_files > 0 else 0
-    print(f"[FILTER] Result: Deleted {deleted_count}/{total_files} ({ratio:.1f}%) bad frames.")
+    print(f"[FILTER] Result: Deleted {deleted_count}/{total_files} ({ratio:.1f}%) bad frames (Torso/Arms Only).")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

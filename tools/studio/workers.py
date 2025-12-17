@@ -1,5 +1,5 @@
 # Project MUSE - workers.py
-# Updated for Smart Resume & Stop Logic + LoRA Track Support
+# Updated for Smart Resume & Stop Logic + LoRA Track Support (Epochs Increased)
 
 import sys
 import os
@@ -32,9 +32,9 @@ class CameraLoader(QThread):
 
 class PipelineWorker(QThread):
     """
-    [Updated V7] Smart Stop & Resume Logic + LoRA Track
+    [Updated V9] LoRA Seg Epochs Boosted (20 -> 50)
     - mode="train": Standard Student Training
-    - mode="train_lora": High-Precision LoRA Training
+    - mode="train_lora": High-Precision LoRA Training (Seg + Pose)
     """
     log_signal = Signal(str)
     progress_signal = Signal(int, str, str) # percent, status, time
@@ -188,35 +188,45 @@ class PipelineWorker(QThread):
         # 1. Full Labeling (Shared)
         if self._check_stop(): return
         self.step_start_time = time.time()
-        self.progress_signal.emit(0, "Step 1/3: 정밀 라벨링 (공통 과정)...", self._get_time_info())
+        self.progress_signal.emit(0, "Step 1/4: 정밀 라벨링 (공통 과정)...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "auto_labeling", "run_labeling.py"), 
             ["personal_data", "--mode", "full"],
-            weight_range=(0, 30)
+            weight_range=(0, 25)
         )
         
         # 2. Data Filtering (Shared)
         if self._check_stop(): return
         self.step_start_time = time.time()
-        self.progress_signal.emit(30, f"Step 2/3: 데이터 정제...", self._get_time_info())
+        self.progress_signal.emit(25, f"Step 2/4: 데이터 정제 (상체 위주)...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "auto_labeling", "filter_bad_data.py"), 
             [self.target_profile],
-            weight_range=(30, 35)
+            weight_range=(25, 30)
         )
 
-        # 3. LoRA Training + Merge + Convert (All in One)
+        # 3. Seg LoRA Training (Epochs Increased to 50)
         if self._check_stop(): return
         self.step_start_time = time.time()
-        self.progress_signal.emit(35, f"Step 3/3: LoRA 학습 및 엔진 병합...", self._get_time_info())
+        self.progress_signal.emit(30, f"Step 3/4: 배경 제거 LoRA 학습 (50 Epochs)...", self._get_time_info())
+        self.run_script(
+            os.path.join(self.tools_dir, "train_seg_lora.py"), 
+            ["personal_data", "--profile", self.target_profile, "--epochs", "50"],
+            weight_range=(30, 65)
+        )
+
+        # 4. Pose LoRA Training
+        if self._check_stop(): return
+        self.step_start_time = time.time()
+        self.progress_signal.emit(65, f"Step 4/4: 관절 추적 LoRA 학습...", self._get_time_info())
         self.run_script(
             os.path.join(self.tools_dir, "train_pose_lora.py"), 
             ["personal_data", "--profile", self.target_profile],
-            weight_range=(35, 100)
+            weight_range=(65, 100)
         )
         
         if not self._check_stop():
-            self.progress_signal.emit(100, "LoRA 고정밀 모델 학습 완료!", self._get_time_info())
+            self.progress_signal.emit(100, "LoRA 고정밀 모델(Seg+Pose) 학습 완료!", self._get_time_info())
 
     def run_script(self, script_path, args, weight_range=(0, 100)):
         cmd = [sys.executable, script_path] + args
