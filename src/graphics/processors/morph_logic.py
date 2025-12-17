@@ -210,3 +210,34 @@ class MorphLogic:
                 # Vector towards nose (Shrink)
                 v = target_pt - pt
                 self._add_param(pt[0], pt[1], radius, s * 0.3, v[0], v[1], 1)
+
+    def collect_nose_params(self, lm, s):
+        """
+        [New] 콧볼 축소 (Nose Slim)
+        """
+        # 코 끝 (중심점)
+        tip_idx = FaceMesh.FACE_INDICES['NOSE_TIP'][0]
+        tip = lm[tip_idx]
+        
+        # 왼쪽/오른쪽 콧볼
+        l_wing_idx = FaceMesh.FACE_INDICES['NOSE_WING_L'][0]
+        r_wing_idx = FaceMesh.FACE_INDICES['NOSE_WING_R'][0]
+        
+        l_wing = lm[l_wing_idx]
+        r_wing = lm[r_wing_idx]
+        
+        # 코 너비
+        nose_width = np.linalg.norm(l_wing - r_wing)
+        if nose_width < 1.0: return
+        
+        # 영향 범위 (Radius): 코 너비의 약 0.8배
+        radius = nose_width * 0.8
+        strength = s * 0.6  # 강도 조절
+        
+        # 왼쪽 콧볼을 코 끝 방향으로 당김
+        v_l = tip - l_wing
+        self._add_param(l_wing[0], l_wing[1], radius, strength, v_l[0], v_l[1], 1)
+        
+        # 오른쪽 콧볼을 코 끝 방향으로 당김
+        v_r = tip - r_wing
+        self._add_param(r_wing[0], r_wing[1], radius, strength, v_r[0], v_r[1], 1)

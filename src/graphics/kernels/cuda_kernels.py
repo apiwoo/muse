@@ -1,6 +1,7 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
 # Updated: Topology Protection V21 (Intrusion Logic Fix)
+# Added: Skin Smoothing Kernel (Bilateral-like)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # [Kernel 1] Grid Generation (TPS Logic) - 유지
@@ -57,7 +58,6 @@ void warp_kernel(
 
 # [Kernel 2] Smart Composite (Intrusion Handling)
 # "워핑에 의해 침범된 영역(Slimming Zone)"과 "단순 오류(Ghosting)"를 구분.
-# 워핑 벡터의 크기(Magnitude)를 핵심 판별 기준으로 사용.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -96,13 +96,7 @@ void composite_kernel(
     float shift_x = dx_small[s_idx] * (float)scale;
     float shift_y = dy_small[s_idx] * (float)scale;
 
-    // [Core Logic] 변위량(Displacement) 계산
-    // 워핑이 강하게 일어난 곳(=살을 깎은 곳)은 shift_sq가 큽니다.
-    // 반면, 몸통 안쪽이나 배경은 shift_sq가 0에 가깝습니다.
     float shift_sq = shift_x * shift_x + shift_y * shift_y;
-    
-    // Threshold: 1.0 픽셀 이상 움직인 곳만 '유효한 보정'으로 인정
-    // 이 값이 너무 크면 보정이 씹히고, 너무 작으면 노이즈가 생깁니다.
     bool is_significant_warp = (shift_sq > 1.0f); 
 
     int u = (int)(x + shift_x);
@@ -129,22 +123,9 @@ void composite_kernel(
     }
 
     // --- 3. Final Decision (Context-Aware Composite) ---
-    
-    // [Loss Check] 원래는 살이었는데, 워핑 후 빈 공간(배경)이 되었는가?
-    // Margin을 두어 미세한 오차는 무시 (0.05)
     bool is_alpha_loss = (original_alpha > warped_alpha + 0.05f);
-
     float base_b, base_g, base_r;
 
-    // [Final Rule]
-    // Slimming(배경 합성)이 적용되려면 두 가지 조건이 모두 충족되어야 합니다.
-    // 1. is_alpha_loss: 살이 깎여나갔음.
-    // 2. is_significant_warp: 실제로 픽셀을 이동시킨 결과임. (단순 떨림 아님)
-    //
-    // 이 2번 조건이 "몸 안쪽 보호" 역할을 수행합니다.
-    // 몸 안쪽은 워핑 벡터가 0에 가까우므로, 설령 알파값이 튀어서 is_alpha_loss가 True가 되더라도
-    // is_significant_warp가 False가 되어 배경 합성을 막습니다.
-    
     if (is_alpha_loss && is_significant_warp) {
         // [Case A] Valid Slimming -> 배경(Clean Plate) 합성
         base_b = (float)bg[idx_rgb+0];
@@ -152,7 +133,6 @@ void composite_kernel(
         base_r = (float)bg[idx_rgb+2];
     } else {
         // [Case B] No Change or Internal Noise -> 원본(Live Feed) 유지
-        // 워핑이 없거나(몸 안쪽), 살이 늘어난 경우(Warped > Original) 등
         base_b = (float)src[idx_rgb+0];
         base_g = (float)src[idx_rgb+1];
         base_r = (float)src[idx_rgb+2];
@@ -162,5 +142,68 @@ void composite_kernel(
     dst[idx_rgb+0] = (unsigned char)(fg_b * warped_alpha + base_b * (1.0f - warped_alpha));
     dst[idx_rgb+1] = (unsigned char)(fg_g * warped_alpha + base_g * (1.0f - warped_alpha));
     dst[idx_rgb+2] = (unsigned char)(fg_r * warped_alpha + base_r * (1.0f - warped_alpha));
+}
+'''
+
+# [Kernel 3] Skin Smooth (Bilateral-like)
+# 피부 톤 보정: 엣지(색상 차이가 큰 곳)는 살리고, 평탄한 부분(잡티)만 블러링
+SKIN_SMOOTH_KERNEL_CODE = r'''
+extern "C" __global__
+void skin_smooth_kernel(
+    const unsigned char* src, 
+    unsigned char* dst, 
+    int width, int height, 
+    float strength
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    int idx = (y * width + x) * 3;
+    
+    float center_r = (float)src[idx+0];
+    float center_g = (float)src[idx+1];
+    float center_b = (float)src[idx+2];
+    
+    // Config
+    int radius = 4; // 9x9 Window (Performance tradeoff)
+    float sigma_color = 25.0f; // 색상 차이 허용치 (작을수록 엣지 보존 강함)
+    
+    float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f;
+    float total_w = 0.0f;
+    
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                int n_idx = (ny * width + nx) * 3;
+                float nr = (float)src[n_idx+0];
+                float ng = (float)src[n_idx+1];
+                float nb = (float)src[n_idx+2];
+                
+                // Color Distance (Manhattan)
+                float diff = fabsf(nr - center_r) + fabsf(ng - center_g) + fabsf(nb - center_b);
+                
+                // Weight Calculation (Similarity)
+                float weight = expf(-diff / sigma_color);
+                
+                sum_r += nr * weight;
+                sum_g += ng * weight;
+                sum_b += nb * weight;
+                total_w += weight;
+            }
+        }
+    }
+    
+    float smooth_r = sum_r / total_w;
+    float smooth_g = sum_g / total_w;
+    float smooth_b = sum_b / total_w;
+    
+    // Mix based on user strength parameter (0.0 ~ 1.0)
+    dst[idx+0] = (unsigned char)(center_r * (1.0f - strength) + smooth_r * strength);
+    dst[idx+1] = (unsigned char)(center_g * (1.0f - strength) + smooth_g * strength);
+    dst[idx+2] = (unsigned char)(center_b * (1.0f - strength) + smooth_b * strength);
 }
 '''

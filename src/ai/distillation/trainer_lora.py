@@ -1,6 +1,7 @@
 # Project MUSE - trainer_lora.py
 # High-Precision LoRA Trainer (Universal: Seg & Pose)
 # Updated: Support for MODNet (Seg) and ViTPose (Pose)
+# Updated v1.1: Detailed Loss Logging (Raw MSE vs Weighted) for Debugging
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -73,6 +74,8 @@ class LoRATrainer:
         model.train()
         for epoch in range(self.epochs):
             total_loss = 0.0
+            total_raw_loss = 0.0 # [New] 순수 MSE 기록용 (Pose)
+            
             pbar = tqdm(dataloader, desc=f"LoRA ({self.task.upper()}) Ep {epoch+1}/{self.epochs}", leave=False)
             
             for imgs, masks, heatmaps in pbar:
@@ -87,8 +90,20 @@ class LoRATrainer:
                     # Weighted MSE for Pose (Shoulder/Hip focus)
                     weights = torch.ones(17, device=self.device)
                     weights[[5, 6, 11, 12]] = 10.0
-                    loss_map = loss_fn(preds, heatmaps)
+                    
+                    # [Detailed Loss]
+                    loss_map = loss_fn(preds, heatmaps) # (B, 17, H, W)
+                    
+                    # 1. Raw MSE (Global average, unweighted) -> 전체적인 수렴도 확인
+                    raw_loss = loss_map.mean()
+                    
+                    # 2. Weighted Loss (Optimization Target) -> 중요 부위 집중
                     loss = (loss_map.mean(dim=(2,3)) * weights).mean()
+                    
+                    total_raw_loss += raw_loss.item()
+                    
+                    # Log both
+                    pbar.set_postfix_str(f"L:{loss.item():.6f} (Raw:{raw_loss.item():.6f})")
                     
                 else: # Seg
                     masks = masks.to(self.device) # (B, 1, H, W)
@@ -96,15 +111,25 @@ class LoRATrainer:
                     
                     # Simple MSE on Alpha Matte
                     loss = loss_fn(preds, masks)
+                    
+                    # Log detailed
+                    pbar.set_postfix_str(f"Loss:{loss.item():.6f}")
 
                 loss.backward()
                 optimizer.step()
                 
                 total_loss += loss.item()
-                pbar.set_postfix_str(f"Loss: {loss.item():.4f}")
             
             scheduler.step()
-            print(f"   Epoch {epoch+1}: Avg Loss {total_loss/len(dataloader):.4f}")
+            
+            # [Epoch Summary]
+            avg_loss = total_loss / len(dataloader)
+            
+            if self.task == 'pose':
+                avg_raw = total_raw_loss / len(dataloader)
+                print(f"   Epoch {epoch+1}: Weighted {avg_loss:.6f} | Raw MSE {avg_raw:.6f}")
+            else:
+                print(f"   Epoch {epoch+1}: Avg Loss {avg_loss:.6f}")
 
         # 5. Save Weights
         self._save_weights(model)

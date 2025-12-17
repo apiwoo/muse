@@ -1,9 +1,9 @@
 # Project MUSE - beauty_panel.py
-# Clean Version: No Capture Button, Auto-Sync Support
+# Integrated UI Layout (Single Tab for all Controls)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGroupBox, QLabel, QTabWidget, QCheckBox, QFrame
+    QWidget, QVBoxLayout, QGroupBox, QLabel, QCheckBox, QFrame, QScrollArea
 )
 from PySide6.QtCore import Signal, Qt
 from ui.controls.sliders import ModernSlider
@@ -11,7 +11,7 @@ from ui.controls.sliders import ModernSlider
 class BeautyPanel(QWidget):
     """
     [UI Panel] 뷰티 파라미터를 조절하는 우측 사이드바
-    Modern Design Applied
+    Updated: 통합 탭 레이아웃 및 새로운 슬라이더 추가
     """
     paramChanged = Signal(dict)
 
@@ -25,35 +25,13 @@ class BeautyPanel(QWidget):
                 color: #EEEEEE;
                 font-family: 'Segoe UI', sans-serif;
             }
-            QTabWidget::pane {
-                border: none;
-                background: #1E1E1E;
-                border-top: 2px solid #00ADB5; /* Teal Line */
-            }
-            QTabWidget::tab-bar {
-                alignment: center;
-            }
-            QTabBar::tab {
-                background: #121212;
-                color: #888;
-                padding: 10px 30px;
-                font-weight: bold;
-                font-size: 13px;
-                border: none;
-            }
-            QTabBar::tab:selected {
-                color: #00ADB5;
-                background: #1E1E1E; /* Blend with Pane */
-            }
-            QTabBar::tab:hover {
-                color: #FFFFFF;
-            }
             QGroupBox {
                 border: none;
                 margin-top: 10px;
                 background: #1E1E1E;
                 border-radius: 8px;
                 padding-top: 25px; /* Title Space */
+                padding-bottom: 15px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -67,6 +45,8 @@ class BeautyPanel(QWidget):
             QCheckBox {
                 color: #AAA;
                 spacing: 8px;
+                font-size: 13px;
+                margin-left: 10px;
             }
             QCheckBox::indicator {
                 width: 18px;
@@ -79,162 +59,188 @@ class BeautyPanel(QWidget):
                 background: #00ADB5;
                 border-color: #00ADB5;
             }
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #121212;
+                width: 8px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #333;
+                min-height: 20px;
+                border-radius: 4px;
+            }
         """)
         
-        self.setFixedWidth(350) # Slightly wider
+        self.setFixedWidth(360) 
 
         self.current_params = {
             'eye_scale': 0.0,
             'face_v': 0.0,
+            'nose_slim': 0.0, # [New]
             'head_scale': 0.0,
             'shoulder_narrow': 0.0,
             'ribcage_slim': 0.0, 
             'waist_slim': 0.0,
             'hip_widen': 0.0,
+            'skin_smooth': 0.0, # [New]
             'show_body_debug': False
         }
 
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout()
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
         # 1. Header Area
         header = QFrame()
         header.setStyleSheet("background-color: #121212; padding: 20px;")
         h_layout = QVBoxLayout(header)
         
-        # [한글화] 헤더 타이틀
         self.title_label = QLabel("MUSE 뷰티 엔진")
         self.title_label.setStyleSheet("font-size: 22px; font-weight: 800; letter-spacing: 1px; color: #FFF;")
         self.title_label.setAlignment(Qt.AlignCenter)
         h_layout.addWidget(self.title_label)
         
-        # [한글화] 프로파일 정보
-        self.info_label = QLabel("현재 프로파일: 기본(DEFAULT)")
+        self.info_label = QLabel("통합 제어 모드")
         self.info_label.setStyleSheet("color: #666; font-size: 11px; font-weight: bold;")
         self.info_label.setAlignment(Qt.AlignCenter)
         h_layout.addWidget(self.info_label)
         
-        layout.addWidget(header)
+        main_layout.addWidget(header)
 
-        # 2. Tabs
-        tabs = QTabWidget()
-
-        # --- Face Tab ---
-        face_tab = QWidget()
-        face_layout = QVBoxLayout()
-        face_layout.setContentsMargins(15, 20, 15, 20)
-        face_layout.setSpacing(25)
+        # 2. Scroll Area for Controls
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
         
-        # [한글화] 그룹 타이틀
-        face_group = QGroupBox("얼굴 성형 (Facial Geometry)")
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(15, 10, 15, 20)
+        content_layout.setSpacing(20)
+
+        # --- Group 1: 얼굴 보정 (Face) ---
+        face_group = QGroupBox("얼굴 윤곽 (Face Shape)")
         f_inner = QVBoxLayout()
         f_inner.setSpacing(15)
         
-        # [한글화] 슬라이더 라벨
-        self.slider_eye = ModernSlider("눈 크기", 0.0)
-        self.slider_eye.valueChanged.connect(lambda v: self._update_param('eye_scale', v))
-        f_inner.addWidget(self.slider_eye)
-
-        self.slider_chin = ModernSlider("턱선(V라인)", 0.0)
+        self.slider_chin = ModernSlider("턱 깎기 (V-Line)", 0.0)
         self.slider_chin.valueChanged.connect(lambda v: self._update_param('face_v', v))
         f_inner.addWidget(self.slider_chin)
 
+        self.slider_eye = ModernSlider("눈 크기 조절", 0.0)
+        self.slider_eye.valueChanged.connect(lambda v: self._update_param('eye_scale', v))
+        f_inner.addWidget(self.slider_eye)
+
+        self.slider_nose = ModernSlider("콧볼 조절", 0.0)
+        self.slider_nose.valueChanged.connect(lambda v: self._update_param('nose_slim', v))
+        f_inner.addWidget(self.slider_nose)
+
+        # [Hidden Params] - 요청에 의해 숨김 처리 (하지만 인스턴스는 유지)
         self.slider_head = ModernSlider("머리 크기", 0.0)
+        self.slider_head.setVisible(False) 
         self.slider_head.valueChanged.connect(lambda v: self._update_param('head_scale', v))
         f_inner.addWidget(self.slider_head)
         
         face_group.setLayout(f_inner)
-        face_layout.addWidget(face_group)
-        face_layout.addStretch()
-        face_tab.setLayout(face_layout)
+        content_layout.addWidget(face_group)
 
-        # --- Body Tab ---
-        body_tab = QWidget()
-        body_layout = QVBoxLayout()
-        body_layout.setContentsMargins(15, 20, 15, 20)
-        body_layout.setSpacing(25)
-
-        # Debug
-        # [한글화] 디버그 옵션
-        debug_group = QGroupBox("시각화 도구")
-        d_inner = QVBoxLayout()
-        self.chk_body_debug = QCheckBox("AI 뼈대(관절) 보기")
-        self.chk_body_debug.toggled.connect(lambda v: self._update_param('show_body_debug', v))
-        d_inner.addWidget(self.chk_body_debug)
-        debug_group.setLayout(d_inner)
-        body_layout.addWidget(debug_group)
-
-        # Body Sliders
-        # [한글화] 그룹 및 슬라이더
-        body_group = QGroupBox("체형 보정 (Body Morphing)")
+        # --- Group 2: 전신 보정 (Body) ---
+        body_group = QGroupBox("체형 보정 (Body Shape)")
         b_inner = QVBoxLayout()
         b_inner.setSpacing(15)
 
-        self.slider_shoulder = ModernSlider("어깨 보정", 0.0)
-        self.slider_shoulder.valueChanged.connect(lambda v: self._update_param('shoulder_narrow', v))
-        b_inner.addWidget(self.slider_shoulder)
-
-        self.slider_ribcage = ModernSlider("흉곽(상체) 줄임", 0.0)
-        self.slider_ribcage.valueChanged.connect(lambda v: self._update_param('ribcage_slim', v))
-        b_inner.addWidget(self.slider_ribcage)
-
-        self.slider_waist = ModernSlider("허리 라인", 0.0)
+        self.slider_waist = ModernSlider("허리 줄이기", 0.0)
         self.slider_waist.valueChanged.connect(lambda v: self._update_param('waist_slim', v))
         b_inner.addWidget(self.slider_waist)
 
-        self.slider_hip = ModernSlider("골반 라인", 0.0)
+        self.slider_hip = ModernSlider("골반 늘리기", 0.0)
         self.slider_hip.valueChanged.connect(lambda v: self._update_param('hip_widen', v))
         b_inner.addWidget(self.slider_hip)
 
+        # [Hidden Params]
+        self.slider_shoulder = ModernSlider("어깨 보정", 0.0)
+        self.slider_shoulder.setVisible(False)
+        self.slider_shoulder.valueChanged.connect(lambda v: self._update_param('shoulder_narrow', v))
+        b_inner.addWidget(self.slider_shoulder)
+
+        self.slider_ribcage = ModernSlider("흉곽 줄임", 0.0)
+        self.slider_ribcage.setVisible(False)
+        self.slider_ribcage.valueChanged.connect(lambda v: self._update_param('ribcage_slim', v))
+        b_inner.addWidget(self.slider_ribcage)
+
         body_group.setLayout(b_inner)
-        body_layout.addWidget(body_group)
-        body_layout.addStretch()
-        body_tab.setLayout(body_layout)
+        content_layout.addWidget(body_group)
 
-        # [한글화] 탭 이름
-        tabs.addTab(face_tab, "얼굴 (Face)")
-        tabs.addTab(body_tab, "전신 (Body)")
-        layout.addWidget(tabs)
+        # --- Group 3: 피부 및 효과 (Skin & Effect) ---
+        skin_group = QGroupBox("피부 및 효과 (Skin & FX)")
+        s_inner = QVBoxLayout()
+        s_inner.setSpacing(15)
 
-        self.setLayout(layout)
+        self.slider_skin = ModernSlider("피부 보정 (Smooth)", 0.0)
+        self.slider_skin.valueChanged.connect(lambda v: self._update_param('skin_smooth', v))
+        s_inner.addWidget(self.slider_skin)
+
+        skin_group.setLayout(s_inner)
+        content_layout.addWidget(skin_group)
+
+        # --- Debug ---
+        debug_group = QGroupBox("설정")
+        d_inner = QVBoxLayout()
+        self.chk_body_debug = QCheckBox("AI 관절 보기 (Debug)")
+        self.chk_body_debug.toggled.connect(lambda v: self._update_param('show_body_debug', v))
+        d_inner.addWidget(self.chk_body_debug)
+        debug_group.setLayout(d_inner)
+        content_layout.addWidget(debug_group)
+
+        content_layout.addStretch()
+        scroll.setWidget(content_widget)
+        main_layout.addWidget(scroll)
+
+        self.setLayout(main_layout)
 
     def _update_param(self, key, value):
         self.current_params[key] = value
         self.paramChanged.emit(self.current_params)
 
     def set_profile_info(self, profile_name):
-        # [한글화]
-        self.info_label.setText(f"현재 프로파일: {profile_name.upper()}")
+        self.info_label.setText(f"프로파일: {profile_name.upper()}")
 
     def update_sliders_from_config(self, params):
         self.blockSignals(True)
         # Block Children Signals
-        for s in [self.slider_eye, self.slider_chin, self.slider_head, 
-                  self.slider_shoulder, self.slider_ribcage, self.slider_waist, self.slider_hip]:
-            s.blockSignals(True)
+        sliders = [
+            self.slider_eye, self.slider_chin, self.slider_nose,
+            self.slider_head, self.slider_shoulder, self.slider_ribcage, 
+            self.slider_waist, self.slider_hip, self.slider_skin
+        ]
+        for s in sliders: s.blockSignals(True)
         self.chk_body_debug.blockSignals(True)
 
+        # Map Params to Sliders
         if 'eye_scale' in params: self.slider_eye.set_value(params['eye_scale'])
         if 'face_v' in params: self.slider_chin.set_value(params['face_v'])
+        if 'nose_slim' in params: self.slider_nose.set_value(params['nose_slim'])
         if 'head_scale' in params: self.slider_head.set_value(params['head_scale'])
         
-        if 'shoulder_narrow' in params: self.slider_shoulder.set_value(params['shoulder_narrow'])
-        if 'ribcage_slim' in params: self.slider_ribcage.set_value(params['ribcage_slim'])
         if 'waist_slim' in params: self.slider_waist.set_value(params['waist_slim'])
         if 'hip_widen' in params: self.slider_hip.set_value(params['hip_widen'])
+        if 'shoulder_narrow' in params: self.slider_shoulder.set_value(params['shoulder_narrow'])
+        if 'ribcage_slim' in params: self.slider_ribcage.set_value(params['ribcage_slim'])
+        
+        if 'skin_smooth' in params: self.slider_skin.set_value(params['skin_smooth'])
         
         if 'show_body_debug' in params: 
             self.chk_body_debug.setChecked(bool(params['show_body_debug']))
 
         self.current_params.update(params)
 
-        for s in [self.slider_eye, self.slider_chin, self.slider_head, 
-                  self.slider_shoulder, self.slider_ribcage, self.slider_waist, self.slider_hip]:
-            s.blockSignals(False)
+        for s in sliders: s.blockSignals(False)
         self.chk_body_debug.blockSignals(False)
         self.blockSignals(False)
         

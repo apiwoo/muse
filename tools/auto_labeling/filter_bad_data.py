@@ -3,6 +3,7 @@
 # Purpose: Removes frames where body keypoints fall outside the segmentation mask.
 # Target: Prevent training pollution.
 # Updated: Filter based on TORSO & ARMS only (Ignore Head & Legs clipping).
+# Updated: Single Blob Constraint (Strict Mode - Reject even small noise).
 
 import os
 import sys
@@ -64,6 +65,7 @@ def filter_data(profile_name, root_session="personal_data"):
 
         is_bad = False
         
+        # [Condition 1] Keypoint Inclusion Check
         for idx in CHECK_INDICES:
             if idx >= len(keypoints): break
             
@@ -81,6 +83,29 @@ def filter_data(profile_name, root_session="personal_data"):
                     is_bad = True
                     break
         
+        # [Condition 2] Connectivity Check (Strict Single Blob Rule)
+        # 사람이 한 덩어리가 아니거나(여러 개로 쪼개짐), 아주 작은 노이즈라도 섞여 있으면 제거
+        if not is_bad:
+            # connectivity=8: 대각선 연결도 포함
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            
+            # stats: [x, y, width, height, area]
+            # label 0 is background
+            
+            valid_blob_count = 0
+            # [Modified] 100 -> 15: 아주 작은 노이즈(부스러기)도 허용하지 않음 (Strict Purity)
+            # JPG 압축 노이즈(1~5px) 정도만 무시하고, 육안으로 보이는 잡티는 모두 잡아냅니다.
+            MIN_AREA = 15 
+            
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                if area > MIN_AREA:
+                    valid_blob_count += 1
+            
+            # 사람은 오직 1명, 1덩어리여야 함. 잡티(blob)가 더 있으면 제거.
+            if valid_blob_count != 1:
+                is_bad = True
+
         if is_bad:
             try:
                 os.remove(label_path)
@@ -91,7 +116,7 @@ def filter_data(profile_name, root_session="personal_data"):
                 print(f"[ERR] Failed to delete {basename}: {e}")
 
     ratio = (deleted_count / total_files) * 100 if total_files > 0 else 0
-    print(f"[FILTER] Result: Deleted {deleted_count}/{total_files} ({ratio:.1f}%) bad frames (Torso/Arms Only).")
+    print(f"[FILTER] Result: Deleted {deleted_count}/{total_files} ({ratio:.1f}%) bad frames (Strict Single Blob).")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

@@ -34,17 +34,20 @@ class ProfileManager:
     def _load_single_profile(self, profile_name, idx):
         config_path = os.path.join(self.data_dir, profile_name, "config.json")
         
+        # [Updated] Default Parameters with Nose and Skin
         default_config = {
             "camera_id": 0,
-            "hotkey": "", # [Modified] 기본값은 공란 (사용자 지정)
+            "hotkey": "", 
             "params": {
                 'eye_scale': 0.0,
                 'face_v': 0.0,
+                'nose_slim': 0.0, # [New]
                 'head_scale': 0.0,
                 'shoulder_narrow': 0.0,
                 'ribcage_slim': 0.0,
                 'waist_slim': 0.0,
                 'hip_widen': 0.0,
+                'skin_smooth': 0.0, # [New]
                 'show_body_debug': False
             }
         }
@@ -125,7 +128,6 @@ class ProfileManager:
     def save_profile(self, profile_name, config_data):
         path = os.path.join(self.data_dir, profile_name, "config.json")
         try:
-            # [Modified] 이제 hotkey 정보를 삭제하지 않고 그대로 저장합니다.
             with open(path, 'w') as f:
                 json.dump(config_data, f, indent=4)
         except Exception as e:
