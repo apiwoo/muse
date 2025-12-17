@@ -37,8 +37,14 @@ def _merge_pose(profile_name, base_dir, model_dir, personal_dir):
     print(f"[MERGE] Merging Pose LoRA for profile: {profile_name}...")
     
     # 1. Load Base
+    if not os.path.exists(base_pth):
+        print(f"[ERROR] Base Pose model not found: {base_pth}")
+        print("   -> Run 'tools/download_models.py' to fetch base weights.")
+        return False
+
     model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=768, depth=12)
-    checkpoint = torch.load(base_pth, map_location='cpu')
+    # [Fix] weights_only=True added to silence warning
+    checkpoint = torch.load(base_pth, map_location='cpu', weights_only=True)
     state_dict = checkpoint.get('state_dict', checkpoint)
     
     new_state_dict = {}
@@ -54,7 +60,8 @@ def _merge_pose(profile_name, base_dir, model_dir, personal_dir):
     
     # 2. Inject & Load LoRA
     model.inject_lora(rank=8)
-    lora_dict = torch.load(lora_pth, map_location='cpu')
+    # [Fix] weights_only=True added
+    lora_dict = torch.load(lora_pth, map_location='cpu', weights_only=True)
     model.load_state_dict(lora_dict, strict=False)
     
     # 3. Fold
@@ -81,15 +88,25 @@ def _merge_seg(profile_name, base_dir, model_dir, personal_dir):
     
     # 1. Load Base
     model = MODNetLoRA(in_channels=3)
-    if os.path.exists(base_pth):
-        ckpt = torch.load(base_pth, map_location='cpu')
-        state_dict = ckpt.get('state_dict', ckpt)
-        new_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        model.load_state_dict(new_dict, strict=False)
+    
+    # [CRITICAL CHECK] Base model existence
+    if not os.path.exists(base_pth):
+        print(f"[ERROR] MODNet Base weights (.ckpt) NOT found at: {base_pth}")
+        print("   -> ONNX or Engine files cannot be used for LoRA merging.")
+        print("   -> PyTorch Checkpoint (.ckpt) is required.")
+        print("   -> Please run 'tools/download_models.py' to fetch it.")
+        return False
+
+    # [Fix] weights_only=True added
+    ckpt = torch.load(base_pth, map_location='cpu', weights_only=True)
+    state_dict = ckpt.get('state_dict', ckpt)
+    new_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    model.load_state_dict(new_dict, strict=False)
     
     # 2. Inject & Load LoRA
     model.inject_lora(rank=4)
-    lora_dict = torch.load(lora_pth, map_location='cpu')
+    # [Fix] weights_only=True added
+    lora_dict = torch.load(lora_pth, map_location='cpu', weights_only=True)
     model.load_state_dict(lora_dict, strict=False)
     
     # 3. Fold LoRA
@@ -99,16 +116,10 @@ def _merge_seg(profile_name, base_dir, model_dir, personal_dir):
     # Access injected layers
     for lora_layer in model.lora_layers:
         # Update = (B @ A) * scaling
-        # lora_A: (rank, in, k, k), lora_B: (out, rank, 1, 1)
-        # Note: In MODNetLoRA, we simplified LoRA_B to 1x1.
-        # Convolution of weights: W_new = W + (W_B * W_A)
-        # Since W_B is 1x1, this is effectively matrix mult on channel dim.
-        
         w_a = lora_layer.lora_A.weight # (r, in, k, k)
         w_b = lora_layer.lora_B.weight # (out, r, 1, 1)
         
         # Calculate B * A efficiently
-        # Reshape A to (r, in*k*k)
         r, inc, k, _ = w_a.shape
         outc = w_b.shape[0]
         
@@ -123,16 +134,8 @@ def _merge_seg(profile_name, base_dir, model_dir, personal_dir):
         with torch.no_grad():
             lora_layer.conv.weight.add_(update)
             
-        # Restore original conv (remove wrapper)
-        # Note: This part requires replacing the module in the parent. 
-        # But since we only need to export state_dict or ONNX from 'model', 
-        # and 'model.forward' uses 'self.conv', we can just disable LoRA part in forward 
-        # or rely on the fact that ONNX tracer will trace the math.
-        # Ideally, we should strip the wrapper. For now, we rely on ONNX tracing.
-        # To ensure clean export, we set LoRA weights to zero after folding? 
-        # No, that would break if we run it.
-        # Best way: LoRAConv2d.forward adds LoRA term. If we folded it into self.conv, we should disable LoRA term.
-        lora_layer.scaling = 0.0 # Disable LoRA term addition
+        # Disable LoRA term addition
+        lora_layer.scaling = 0.0 
 
     # 4. Export ONNX (Target Resolution 544p)
     onnx_path = os.path.join(personal_dir, f"modnet_lora_{profile_name}.onnx")

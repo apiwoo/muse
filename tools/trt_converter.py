@@ -12,7 +12,7 @@ import argparse
 # [Mode 1] PyTorch Worker (ONNX Export)
 # ==================================================================================
 def run_export_worker(pth_path, onnx_path, variant):
-    print(f"🚀 [Process 1] PyTorch Worker Started (Variant: {variant.upper()})...")
+    print(f"[START] [Process 1] PyTorch Worker Started (Variant: {variant.upper()})...")
     
     import torch
     import torch.nn as nn
@@ -27,7 +27,7 @@ def run_export_worker(pth_path, onnx_path, variant):
     
     cfg = MODEL_CONFIGS.get(variant.lower())
     if not cfg:
-        print(f"❌ Unknown variant: {variant}")
+        print(f"[ERROR] Unknown variant: {variant}")
         sys.exit(1)
 
     class PatchEmbed(nn.Module):
@@ -130,7 +130,7 @@ def run_export_worker(pth_path, onnx_path, variant):
     model.eval()
 
     try:
-        print("   📂 Loading checkpoint...")
+        print("   [LOAD] Loading checkpoint...")
         checkpoint = torch.load(pth_path, map_location=device)
         state_dict = checkpoint.get('state_dict', checkpoint)
         
@@ -158,15 +158,15 @@ def run_export_worker(pth_path, onnx_path, variant):
 
         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
         
-        print(f"   ✅ Weights Loaded: {mapped_count} keys mapped.")
+        print(f"   [OK] Weights Loaded: {mapped_count} keys mapped.")
         if len(missing_keys) > 0:
             head_missing = [k for k in missing_keys if 'keypoint_head' in k]
             if head_missing:
-                print(f"   ❌ [CRITICAL] Head weights missing: {head_missing}")
+                print(f"   [ERROR] [CRITICAL] Head weights missing: {head_missing}")
                 sys.exit(1)
         
     except Exception as e:
-        print(f"❌ Failed to load weights: {e}")
+        print(f"[ERROR] Failed to load weights: {e}")
         sys.exit(1)
 
     dummy_input = torch.randn(1, 3, 256, 192).to(device)
@@ -180,16 +180,16 @@ def run_export_worker(pth_path, onnx_path, variant):
             dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
             opset_version=13  
         )
-        print(f"   ✅ ONNX Saved: {onnx_path}")
+        print(f"   [OK] ONNX Saved: {onnx_path}")
     except Exception as e:
-        print(f"❌ ONNX Export Failed: {e}")
+        print(f"[ERROR] ONNX Export Failed: {e}")
         sys.exit(1)
 
 # ==================================================================================
 # [Mode 2] TensorRT Worker (Engine Build)
 # ==================================================================================
 def run_build_worker(onnx_path, engine_path):
-    print(f"🚀 [Process 2] TensorRT Worker Started...")
+    print(f"[START] [Process 2] TensorRT Worker Started...")
     
     try:
         sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -207,12 +207,12 @@ def run_build_worker(onnx_path, engine_path):
     parser = trt.OnnxParser(network, TRT_LOGGER)
 
     if not os.path.exists(onnx_path):
-        print(f"❌ ONNX file not found: {onnx_path}")
+        print(f"[ERROR] ONNX file not found: {onnx_path}")
         sys.exit(1)
 
     success = parser.parse_from_file(onnx_path)
     if not success:
-        print("❌ ONNX Parse Failed")
+        print("[ERROR] ONNX Parse Failed")
         for error in range(parser.num_errors):
             print(parser.get_error(error))
         sys.exit(1)
@@ -228,16 +228,16 @@ def run_build_worker(onnx_path, engine_path):
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 32)
     except: pass
 
-    print("   ⏳ Building Engine (This may take 3-5 mins)...")
+    print("   [WAIT] Building Engine (This may take 3-5 mins)...")
     serialized_engine = builder.build_serialized_network(network, config)
     
     if serialized_engine is None:
-        print("❌ Engine Build Failed")
+        print("[ERROR] Engine Build Failed")
         sys.exit(1)
         
     with open(engine_path, "wb") as f:
         f.write(serialized_engine)
-    print(f"   ✅ Engine Saved: {engine_path}")
+    print(f"   [OK] Engine Saved: {engine_path}")
 
 # ==================================================================================
 # [Main Manager]
@@ -294,15 +294,15 @@ def main():
         try:
             subprocess.run([sys.executable, __file__, '--export-worker', t['pth'], t['onnx'], t['variant']], check=True)
         except subprocess.CalledProcessError:
-            print("   ❌ Export Failed. Skipping.")
+            print("   [ERROR] Export Failed. Skipping.")
             continue
             
         # 2. Build Engine
         try:
             subprocess.run([sys.executable, __file__, '--build-worker', t['onnx'], t['engine']], check=True)
-            print("   🎉 Conversion Success!")
+            print("   [SUCCESS] Conversion Success!")
         except subprocess.CalledProcessError:
-            print("   ❌ Build Failed. Skipping.")
+            print("   [ERROR] Build Failed. Skipping.")
             
         # Clean ONNX
         if os.path.exists(t['onnx']): os.remove(t['onnx'])
