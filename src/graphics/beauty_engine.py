@@ -15,8 +15,7 @@ from ai.tracking.facemesh import FaceMesh
 
 # Import Kernels & Logic
 from graphics.kernels.cuda_kernels import (
-    WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE,
-    FAST_SKIN_SMOOTH_KERNEL_CODE
+    WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -215,7 +214,6 @@ class BeautyEngine:
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.skin_kernel = cp.RawKernel(SKIN_SMOOTH_KERNEL_CODE, 'skin_smooth_kernel')
-            self.fast_skin_kernel = cp.RawKernel(FAST_SKIN_SMOOTH_KERNEL_CODE, 'fast_skin_smooth_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -325,99 +323,131 @@ class BeautyEngine:
         return np.array(zones, dtype=np.float32)
 
     # ==========================================================================
-    # V25.0 Fast Skin Processing (Hybrid CPU-GPU with CUDA Kernel)
+    # YY-Style Skin Smoothing (Edge Preserving Filter)
     # ==========================================================================
     def _process_skin_v25(self, frame_gpu, landmarks, params):
         """
-        Fast skin smoothing using hybrid CPU-GPU approach
-        - CPU: fast downscale+blur (OpenCV optimized, small image)
-        - GPU CUDA kernel: parallel blending with frequency separation
+        YY-style skin smoothing using OpenCV edge-preserving filter
+        - Smooths skin texture while preserving edges
+        - Fast CPU processing on face ROI only
         """
         h, w = frame_gpu.shape[:2]
 
         # Get parameters
         skin_strength = params.get('skin_smooth', 0.0)
         skin_tone_val = params.get('skin_tone', 0.0)
+        color_temp = params.get('color_temperature', 0.0)
+        color_tint = params.get('color_tint', 0.0)
 
         # Skip if no processing needed
-        if skin_strength < 0.01 and abs(skin_tone_val) < 0.01:
+        has_skin = skin_strength > 0.01
+        has_tone = abs(skin_tone_val) > 0.01
+        has_color = abs(color_temp) > 0.01 or abs(color_tint) > 0.01
+
+        if not has_skin and not has_tone and not has_color:
             return frame_gpu, None
 
-        # Step 1: Generate mask (CPU OpenCV - very fast ~1ms)
-        skin_mask_gpu = self.mask_manager.generate_mask(landmarks, w, h, padding_ratio=1.2)
-        if skin_mask_gpu is None:
-            return frame_gpu, None
+        # Get CPU frame
+        if hasattr(self, '_frame_cpu_cache') and self._frame_cpu_cache is not None:
+            frame_cpu = self._frame_cpu_cache.copy()
+        else:
+            frame_cpu = cp.asnumpy(frame_gpu)
 
-        # Step 2: Fast smoothing with CUDA kernel
-        if skin_strength > 0.01:
-            # Get frame on CPU for blur processing
-            # Use cached CPU frame if available (avoids GPU->CPU transfer)
-            if hasattr(self, '_frame_cpu_cache') and self._frame_cpu_cache is not None:
-                frame_cpu = self._frame_cpu_cache
-            else:
-                frame_cpu = cp.asnumpy(frame_gpu)
+        skin_mask_gpu = None
 
-            # ===== CPU Processing (OpenCV - highly optimized) =====
-            # Downscale for faster blur
-            scale = 0.5
-            small_w, small_h = int(w * scale), int(h * scale)
+        # ===== Skin Smoothing (Face ROI only) =====
+        if has_skin:
+            # Get face bounding box
+            face_pts = landmarks[self.mask_manager.FACE_OVAL_INDICES]
+            margin = 10
+            x_min = max(0, int(np.min(face_pts[:, 0])) - margin)
+            y_min = max(0, int(np.min(face_pts[:, 1])) - margin)
+            x_max = min(w, int(np.max(face_pts[:, 0])) + margin)
+            y_max = min(h, int(np.max(face_pts[:, 1])) + margin)
 
-            # Fast downscale
-            frame_small = cv2.resize(frame_cpu, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+            if x_max > x_min + 20 and y_max > y_min + 20:
+                # Extract face ROI
+                face_roi = frame_cpu[y_min:y_max, x_min:x_max]
 
-            # Blur kernel size based on strength
-            blur_size = int(7 + skin_strength * 14)  # 7 ~ 21
-            if blur_size % 2 == 0:
-                blur_size += 1
+                # Edge-preserving smoothing
+                # sigma_s: spatial sigma (size of area), sigma_r: range sigma (color similarity)
+                sigma_s = 20 + skin_strength * 40  # 20 ~ 60
+                sigma_r = 0.2 + skin_strength * 0.3  # 0.2 ~ 0.5
 
-            # Apply blur (stackBlur is fastest)
-            try:
-                smoothed_small = cv2.stackBlur(frame_small, (blur_size, blur_size))
-            except AttributeError:
-                smoothed_small = cv2.blur(frame_small, (blur_size, blur_size))
+                smoothed_roi = cv2.edgePreservingFilter(
+                    face_roi,
+                    flags=cv2.RECURS_FILTER,  # Recursive filter (faster)
+                    sigma_s=sigma_s,
+                    sigma_r=sigma_r
+                )
 
-            # Upscale back
-            smoothed_cpu = cv2.resize(smoothed_small, (w, h), interpolation=cv2.INTER_LINEAR)
+                # Blend with original based on strength
+                alpha = skin_strength * 0.8  # Max 80% blend
+                blended = cv2.addWeighted(face_roi, 1 - alpha, smoothed_roi, alpha, 0)
 
-            # ===== GPU Processing with CUDA Kernel =====
-            smoothed_gpu = cp.asarray(smoothed_cpu)
-            result_gpu = cp.empty_like(frame_gpu)
+                # Feather the edges to avoid hard boundary
+                # Create soft mask for ROI
+                roi_h, roi_w = blended.shape[:2]
+                feather = min(15, roi_w // 10, roi_h // 10)
+                if feather > 2:
+                    mask_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+                    # Fade edges
+                    for i in range(feather):
+                        fade = i / feather
+                        mask_roi[i, :] *= fade
+                        mask_roi[roi_h - 1 - i, :] *= fade
+                        mask_roi[:, i] *= fade
+                        mask_roi[:, roi_w - 1 - i] *= fade
 
-            # detail_preserve: lower = more smoothing visible
-            detail_preserve = 0.5 - skin_strength * 0.4  # 0.5 ~ 0.1
-            blend_strength = 1.0  # Full strength in masked area
+                    mask_3ch = mask_roi[:, :, np.newaxis]
+                    blended = (face_roi * (1 - mask_3ch) + blended * mask_3ch).astype(np.uint8)
 
-            # Launch CUDA kernel
-            block_dim = (32, 32)
-            grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
-                        (h + block_dim[1] - 1) // block_dim[1])
+                frame_cpu[y_min:y_max, x_min:x_max] = blended
 
-            self.fast_skin_kernel(
-                grid_dim, block_dim,
-                (frame_gpu, smoothed_gpu, skin_mask_gpu, result_gpu,
-                 w, h, cp.float32(detail_preserve), cp.float32(blend_strength))
-            )
+        # ===== Color Grading (Full image, GPU) =====
+        if has_color:
+            frame_float = frame_cpu.astype(np.float32)
 
-            frame_gpu = result_gpu
+            if abs(color_temp) > 0.01:
+                if color_temp > 0:
+                    frame_float[:, :, 2] = np.clip(frame_float[:, :, 2] + color_temp * 30, 0, 255)
+                    frame_float[:, :, 0] = np.clip(frame_float[:, :, 0] - color_temp * 20, 0, 255)
+                else:
+                    frame_float[:, :, 0] = np.clip(frame_float[:, :, 0] - color_temp * 30, 0, 255)
+                    frame_float[:, :, 2] = np.clip(frame_float[:, :, 2] + color_temp * 20, 0, 255)
 
-            # Tone correction (simple GPU operation)
-            if abs(skin_tone_val) > 0.01:
-                frame_float = frame_gpu.astype(cp.float32)
-                mask_float = skin_mask_gpu.astype(cp.float32) / 255.0
+            if abs(color_tint) > 0.01:
+                if color_tint > 0:
+                    frame_float[:, :, 2] = np.clip(frame_float[:, :, 2] + color_tint * 15, 0, 255)
+                    frame_float[:, :, 0] = np.clip(frame_float[:, :, 0] + color_tint * 15, 0, 255)
+                    frame_float[:, :, 1] = np.clip(frame_float[:, :, 1] - color_tint * 20, 0, 255)
+                else:
+                    frame_float[:, :, 1] = np.clip(frame_float[:, :, 1] - color_tint * 20, 0, 255)
+                    frame_float[:, :, 2] = np.clip(frame_float[:, :, 2] + color_tint * 10, 0, 255)
+                    frame_float[:, :, 0] = np.clip(frame_float[:, :, 0] + color_tint * 10, 0, 255)
+
+            frame_cpu = np.clip(frame_float, 0, 255).astype(np.uint8)
+
+        # ===== Skin Tone (Face mask) =====
+        if has_tone:
+            skin_mask_gpu = self.mask_manager.generate_mask(landmarks, w, h, padding_ratio=1.2)
+            if skin_mask_gpu is not None:
+                mask_cpu = cp.asnumpy(skin_mask_gpu).astype(np.float32) / 255.0
+                frame_float = frame_cpu.astype(np.float32)
 
                 if skin_tone_val > 0:
-                    # Rosy tone
-                    mix = skin_tone_val * 0.2
-                    frame_float[:, :, 2] = cp.clip(frame_float[:, :, 2] + mix * 30 * mask_float, 0, 255)
-                    frame_float[:, :, 0] = cp.clip(frame_float[:, :, 0] - mix * 10 * mask_float, 0, 255)
+                    mix = skin_tone_val * 0.25
+                    frame_float[:, :, 2] = np.clip(frame_float[:, :, 2] + mix * 35 * mask_cpu, 0, 255)
+                    frame_float[:, :, 0] = np.clip(frame_float[:, :, 0] - mix * 15 * mask_cpu, 0, 255)
                 else:
-                    # Pale/bright tone
-                    mix = -skin_tone_val * 0.15
-                    mask_3ch = mask_float[:, :, cp.newaxis]
-                    frame_float = frame_float + (255 - frame_float) * mix * mask_3ch
+                    mix = -skin_tone_val * 0.2
+                    for c in range(3):
+                        frame_float[:, :, c] = frame_float[:, :, c] + (255 - frame_float[:, :, c]) * mix * mask_cpu
 
-                frame_gpu = cp.clip(frame_float, 0, 255).astype(cp.uint8)
+                frame_cpu = np.clip(frame_float, 0, 255).astype(np.uint8)
 
+        # Transfer to GPU
+        frame_gpu = cp.asarray(frame_cpu)
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================

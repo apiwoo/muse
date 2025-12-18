@@ -81,9 +81,9 @@ class BeautyPanel(QWidget):
 
         self.setFixedWidth(360)
 
-        # V25.0 Extended Parameters
+        # Parameters
         self.current_params = {
-            # 기존 파라미터 (유지)
+            # 기존 파라미터
             'eye_scale': 0.0,
             'face_v': 0.0,
             'nose_slim': 0.0,
@@ -96,11 +96,7 @@ class BeautyPanel(QWidget):
             'skin_tone': 0.0,
             'show_body_debug': False,
 
-            # V25.0 신규 파라미터
-            'flatten_strength': 0.3,    # 피부 평탄화 강도
-            'detail_preserve': 0.7,     # 디테일 보존
-            'gf_radius': 8,             # 가이드 필터 반경
-            'gf_epsilon': 0.04,         # 가이드 필터 엣지 보존
+            # 색상 조정
             'color_temperature': 0.0,   # 색온도 (-1 Cool ~ 1 Warm)
             'color_tint': 0.0           # 틴트 (-1 Green ~ 1 Magenta)
         }
@@ -213,39 +209,9 @@ class BeautyPanel(QWidget):
         content_layout.addWidget(skin_group)
 
         # =====================================================================
-        # Group 4: V25.0 Advanced Skin (신규)
+        # Group 4: Color Grading
         # =====================================================================
-        adv_skin_group = QGroupBox("고급 피부 설정 (Advanced Skin) ✨")
-        a_inner = QVBoxLayout()
-        a_inner.setSpacing(15)
-
-        # 평탄화 강도 (Flat-fielding)
-        self.slider_flatten = ModernSlider("평탄화 강도", 0.3)
-        self.slider_flatten.valueChanged.connect(lambda v: self._update_param('flatten_strength', v))
-        a_inner.addWidget(self.slider_flatten)
-
-        # 디테일 보존
-        self.slider_detail = ModernSlider("디테일 보존", 0.7)
-        self.slider_detail.valueChanged.connect(lambda v: self._update_param('detail_preserve', v))
-        a_inner.addWidget(self.slider_detail)
-
-        # 필터 반경 (0-1 → 4-16)
-        self.slider_radius = ModernSlider("필터 반경", 0.5)
-        self.slider_radius.valueChanged.connect(self._update_radius)
-        a_inner.addWidget(self.slider_radius)
-
-        # 엣지 보존 (0-1 → 0.01-0.1)
-        self.slider_epsilon = ModernSlider("엣지 보존", 0.4)
-        self.slider_epsilon.valueChanged.connect(self._update_epsilon)
-        a_inner.addWidget(self.slider_epsilon)
-
-        adv_skin_group.setLayout(a_inner)
-        content_layout.addWidget(adv_skin_group)
-
-        # =====================================================================
-        # Group 5: Color Grading (신규)
-        # =====================================================================
-        color_group = QGroupBox("색상 조정 (Color Grading) ✨")
+        color_group = QGroupBox("색상 조정 (Color Grading)")
         c_inner = QVBoxLayout()
         c_inner.setSpacing(15)
 
@@ -263,7 +229,7 @@ class BeautyPanel(QWidget):
         content_layout.addWidget(color_group)
 
         # =====================================================================
-        # Group 6: Settings
+        # Group 5: Settings
         # =====================================================================
         debug_group = QGroupBox("설정 (Settings)")
         d_inner = QVBoxLayout()
@@ -304,16 +270,6 @@ class BeautyPanel(QWidget):
         tint_val = (value - 0.5) * 2.0
         self._update_param('color_tint', tint_val)
 
-    def _update_radius(self, value):
-        """UI 0.0~1.0 -> Logic 4~16"""
-        radius = int(4 + value * 12)
-        self._update_param('gf_radius', radius)
-
-    def _update_epsilon(self, value):
-        """UI 0.0~1.0 -> Logic 0.01~0.1"""
-        epsilon = 0.01 + value * 0.09
-        self._update_param('gf_epsilon', epsilon)
-
     # =========================================================================
     # External Control
     # =========================================================================
@@ -329,7 +285,6 @@ class BeautyPanel(QWidget):
             self.slider_eye, self.slider_chin, self.slider_nose,
             self.slider_head, self.slider_shoulder, self.slider_ribcage,
             self.slider_waist, self.slider_hip, self.slider_skin, self.slider_tone,
-            self.slider_flatten, self.slider_detail, self.slider_radius, self.slider_epsilon,
             self.slider_temp, self.slider_tint
         ]
         for s in sliders:
@@ -337,7 +292,7 @@ class BeautyPanel(QWidget):
 
         self.chk_body_debug.blockSignals(True)
 
-        # ---- Basic Params (기존) ----
+        # ---- Basic Params ----
         if 'eye_scale' in params:
             self.slider_eye.set_value(params['eye_scale'])
         if 'face_v' in params:
@@ -364,23 +319,7 @@ class BeautyPanel(QWidget):
             ui_val = (params['skin_tone'] / 2.0) + 0.5
             self.slider_tone.set_value(ui_val)
 
-        # ---- V25.0 Advanced Params (신규) ----
-        if 'flatten_strength' in params:
-            self.slider_flatten.set_value(params['flatten_strength'])
-
-        if 'detail_preserve' in params:
-            self.slider_detail.set_value(params['detail_preserve'])
-
-        if 'gf_radius' in params:
-            # Logic 4~16 -> UI 0.0~1.0
-            ui_val = (params['gf_radius'] - 4) / 12.0
-            self.slider_radius.set_value(ui_val)
-
-        if 'gf_epsilon' in params:
-            # Logic 0.01~0.1 -> UI 0.0~1.0
-            ui_val = (params['gf_epsilon'] - 0.01) / 0.09
-            self.slider_epsilon.set_value(ui_val)
-
+        # ---- Color Grading ----
         if 'color_temperature' in params:
             # Logic -1.0~1.0 -> UI 0.0~1.0
             ui_val = (params['color_temperature'] / 2.0) + 0.5

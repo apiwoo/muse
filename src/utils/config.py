@@ -35,12 +35,12 @@ class ProfileManager:
     def _load_single_profile(self, profile_name, idx):
         config_path = os.path.join(self.data_dir, profile_name, "config.json")
 
-        # [V25.0] Default Parameters - Extended for High-Precision Pipeline
+        # Default Parameters
         default_config = {
             "camera_id": 0,
             "hotkey": "",
             "params": {
-                # ===== 기존 파라미터 (유지) =====
+                # 기본 파라미터
                 'eye_scale': 0.0,
                 'face_v': 0.0,
                 'nose_slim': 0.0,
@@ -53,17 +53,9 @@ class ProfileManager:
                 'skin_tone': 0.0,  # -1.0(Pale) ~ 1.0(Rosy)
                 'show_body_debug': False,
 
-                # ===== V25.0 신규 파라미터 =====
-                # [Advanced Skin - Frequency Separation]
-                'flatten_strength': 0.3,    # 피부 평탄화 강도 (0.0 ~ 1.0)
-                'detail_preserve': 0.7,     # 고주파 디테일 보존량 (0.0 ~ 1.0)
-                'gf_radius': 8,             # Guided Filter 반경 (4 ~ 16)
-                'gf_epsilon': 0.04,         # Guided Filter 엣지 보존 (0.01 ~ 0.1)
-
-                # [Color Grading]
+                # 색상 조정
                 'color_temperature': 0.0,   # 색온도: -1.0(Cool/Blue) ~ 1.0(Warm/Yellow)
                 'color_tint': 0.0,          # 틴트: -1.0(Green) ~ 1.0(Magenta)
-
             }
         }
 
@@ -143,28 +135,24 @@ class ProfileManager:
             print(f"[ERROR] Config save failed ({profile_name}): {e}")
 
     # =========================================================================
-    # V25.0 Helper Methods
+    # Helper Methods
     # =========================================================================
-    def get_v25_defaults(self):
-        """Return V25.0 default parameter values"""
+    def get_color_defaults(self):
+        """Return color grading default values"""
         return {
-            'flatten_strength': 0.3,
-            'detail_preserve': 0.7,
-            'gf_radius': 8,
-            'gf_epsilon': 0.04,
             'color_temperature': 0.0,
             'color_tint': 0.0
         }
 
-    def upgrade_profile_to_v25(self, profile_name):
+    def upgrade_profile_params(self, profile_name):
         """
-        Upgrade existing profile to include V25.0 parameters
+        Upgrade existing profile to include new parameters
         (Non-destructive - only adds missing keys)
         """
         if profile_name not in self.profiles:
             return False
 
-        defaults = self.get_v25_defaults()
+        defaults = self.get_color_defaults()
         current_params = self.profiles[profile_name].get('params', {})
 
         updated = False
@@ -176,16 +164,6 @@ class ProfileManager:
         if updated:
             self.profiles[profile_name]['params'] = current_params
             self.save_profile(profile_name, self.profiles[profile_name])
-            print(f"[CONFIG] Profile '{profile_name}' upgraded to V25.0")
+            print(f"[CONFIG] Profile '{profile_name}' params upgraded")
 
         return updated
-
-    def upgrade_all_profiles_to_v25(self):
-        """Upgrade all profiles to V25.0 format"""
-        upgraded_count = 0
-        for profile_name in self.profiles.keys():
-            if self.upgrade_profile_to_v25(profile_name):
-                upgraded_count += 1
-        if upgraded_count > 0:
-            print(f"[CONFIG] Upgraded {upgraded_count} profiles to V25.0")
-        return upgraded_count
