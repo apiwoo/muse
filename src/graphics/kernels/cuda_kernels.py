@@ -128,17 +128,66 @@ void composite_kernel(
         }
     }
 
-    // --- 3. Final Decision (Context-Aware Composite) ---
-    bool is_alpha_loss = (original_alpha > warped_alpha + 0.05f);
+    // --- 3. Final Decision (Context-Aware Composite) - V2 Interior Protection ---
+
+    // [V2] 1. 마스크 내부 깊숙한 곳 보호
+    // original_alpha가 높으면 확실한 사람 영역 → 배경 합성 금지
+    // 임계값 0.7 이상이면 "내부"로 간주
+    bool is_interior = (original_alpha > 0.7f);
+
+    // [V2] 2. 마스크 경계 검출 (3x3 이웃 검사)
+    // 주변에 알파가 낮은 픽셀이 있으면 "경계"로 간주
+    float min_neighbor_alpha = original_alpha;
+    float max_neighbor_alpha = original_alpha;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+
+            int nx = x + dx;
+            int ny = y + dy;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                float neighbor_alpha = (float)mask[ny * width + nx] / 255.0f;
+                min_neighbor_alpha = fminf(min_neighbor_alpha, neighbor_alpha);
+                max_neighbor_alpha = fmaxf(max_neighbor_alpha, neighbor_alpha);
+            }
+        }
+    }
+
+    // 경계 판정: 주변에 알파 차이가 0.3 이상인 픽셀이 있으면 경계
+    bool is_near_edge = (max_neighbor_alpha - min_neighbor_alpha > 0.3f);
+
+    // [V2] 3. 워핑 좌표 유효성 검사 강화
+    // 워핑 좌표가 이미지 범위 내인지 확인
+    bool warped_in_bounds = (u >= 0 && u < width && v >= 0 && v < height);
+
+    // [V2] 4. 배경 합성 조건 - 훨씬 엄격하게
+    // 기존: is_alpha_loss && is_significant_warp
+    // 변경: 경계 근처이고 + 워핑 좌표가 유효하고 + 내부가 아닐 때만 배경 합성
+    bool is_alpha_loss = (original_alpha > warped_alpha + 0.1f);  // 임계값 상향 (0.05 → 0.1)
+
+    // 배경 합성 조건 (모두 만족해야 함):
+    // 1) is_near_edge: 마스크 경계 근처일 것
+    // 2) !is_interior: 마스크 내부 깊숙한 곳이 아닐 것
+    // 3) is_alpha_loss: 알파 손실이 감지될 것
+    // 4) is_significant_warp: 워핑 변위가 충분할 것
+    // 5) warped_in_bounds: 워핑 좌표가 이미지 범위 내일 것
+    bool should_use_bg = is_near_edge &&
+                         !is_interior &&
+                         is_alpha_loss &&
+                         is_significant_warp &&
+                         warped_in_bounds;
+
     float base_b, base_g, base_r;
 
-    if (is_alpha_loss && is_significant_warp) {
-        // [Case A] Valid Slimming -> 배경(Clean Plate) 합성
+    if (should_use_bg) {
+        // [Case A] 경계 영역에서 슬리밍 효과 → 배경 합성
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
     } else {
-        // [Case B] No Change or Internal Noise -> 원본(Live Feed) 유지
+        // [Case B] 내부 영역 또는 경계 아님 → 원본 유지 (보정 효과 보존)
         base_b = (float)src[idx_rgb+0];
         base_g = (float)src[idx_rgb+1];
         base_r = (float)src[idx_rgb+2];
@@ -1366,5 +1415,203 @@ void final_blend_kernel(
     dst[idx3 + 0] = (unsigned char)fminf(fmaxf(blend_b, 0.0f), 255.0f);
     dst[idx3 + 1] = (unsigned char)fminf(fmaxf(blend_g, 0.0f), 255.0f);
     dst[idx3 + 2] = (unsigned char)fminf(fmaxf(blend_r, 0.0f), 255.0f);
+}
+'''
+
+
+# ==============================================================================
+# [KERNEL 17] Forward Warp Mask (순방향 마스크 워핑) - V4 근본 해결
+# - 입력 마스크의 각 픽셀을 출력 위치로 "이동"
+# - 슬리밍 시 마스크가 정확히 수축됨
+# - Custom Atomic Max (unsigned char용 CAS 기반)
+# ==============================================================================
+FORWARD_WARP_MASK_KERNEL_CODE = r'''
+// Custom atomicMax for unsigned char using CAS
+__device__ __forceinline__ unsigned char atomicMaxUChar(unsigned char* address, unsigned char val) {
+    // Get the 4-byte aligned address containing our byte
+    unsigned int* base_address = (unsigned int*)((size_t)address & ~3);
+    unsigned int byte_offset = ((size_t)address & 3) * 8;  // bit offset within the int
+    unsigned int mask = 0xFF << byte_offset;
+
+    unsigned int old_val, new_val, assumed;
+    old_val = *base_address;
+
+    do {
+        assumed = old_val;
+        unsigned char current_byte = (unsigned char)((assumed >> byte_offset) & 0xFF);
+        unsigned char max_byte = (val > current_byte) ? val : current_byte;
+        new_val = (assumed & ~mask) | ((unsigned int)max_byte << byte_offset);
+        old_val = atomicCAS(base_address, assumed, new_val);
+    } while (assumed != old_val);
+
+    return (unsigned char)((old_val >> byte_offset) & 0xFF);
+}
+
+extern "C" __global__
+void forward_warp_mask_kernel(
+    const unsigned char* mask_in,    // 원본 마스크 (1채널, 0-255)
+    unsigned char* mask_out,         // 순방향 워핑된 마스크 (1채널)
+    const float* dx,                 // X 변위 맵 (small scale)
+    const float* dy,                 // Y 변위 맵 (small scale)
+    int width, int height,
+    int small_width, int small_height,
+    int scale
+) {
+    // 입력 좌표 (u, v) - 순방향이므로 입력 기준 순회
+    int u = blockIdx.x * blockDim.x + threadIdx.x;
+    int v = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (u >= width || v >= height) return;
+
+    int in_idx = v * width + u;
+    unsigned char mask_val = mask_in[in_idx];
+
+    // 마스크가 0이면 스킵 (배경은 이동할 필요 없음)
+    if (mask_val == 0) return;
+
+    // 워핑 변위 가져오기
+    int su = u / scale;
+    int sv = v / scale;
+    if (su >= small_width) su = small_width - 1;
+    if (sv >= small_height) sv = small_height - 1;
+    int s_idx = sv * small_width + su;
+
+    // 순방향: 출력 위치 = 입력 위치 + 변위
+    // (역방향 dx/dy를 순방향으로 변환: 부호 반전)
+    float shift_x = -dx[s_idx] * (float)scale;
+    float shift_y = -dy[s_idx] * (float)scale;
+
+    int out_x = (int)roundf((float)u + shift_x);
+    int out_y = (int)roundf((float)v + shift_y);
+
+    // 범위 체크
+    if (out_x < 0 || out_x >= width || out_y < 0 || out_y >= height) return;
+
+    int out_idx = out_y * width + out_x;
+
+    // Custom Atomic Max: 여러 입력 픽셀이 같은 출력에 쓸 수 있음
+    // 가장 큰 값(가장 불투명)을 유지
+    atomicMaxUChar(&mask_out[out_idx], mask_val);
+}
+'''
+
+
+# ==============================================================================
+# [KERNEL 18] Mask Dilate (마스크 확장으로 홀 채우기)
+# - 순방향 매핑에서 생기는 홀(구멍) 문제 해결
+# - radius 내 최대값으로 확장
+# ==============================================================================
+MASK_DILATE_KERNEL_CODE = r'''
+extern "C" __global__
+void mask_dilate_kernel(
+    const unsigned char* mask_in,
+    unsigned char* mask_out,
+    int width, int height,
+    int radius
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    unsigned char max_val = 0;
+
+    // radius 내 최대값 탐색
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                unsigned char val = mask_in[ny * width + nx];
+                if (val > max_val) max_val = val;
+            }
+        }
+    }
+
+    mask_out[idx] = max_val;
+}
+'''
+
+
+# ==============================================================================
+# [KERNEL 19] Simple Composite (순방향 마스크 기반 합성) - V4 근본 해결
+# - is_alpha_loss 휴리스틱 완전 제거!
+# - 순방향 마스크가 정확한 사람/배경 영역을 결정
+# - 단순하고 예측 가능한 동작
+# ==============================================================================
+SIMPLE_COMPOSITE_KERNEL_CODE = r'''
+extern "C" __global__
+void simple_composite_kernel(
+    const unsigned char* src,              // 원본 이미지 (보정된 이미지)
+    const unsigned char* bg,               // 배경 이미지
+    const unsigned char* forward_mask,     // 순방향 워핑된 마스크
+    unsigned char* dst,                    // 출력
+    const float* dx_small,                 // 역방향 워핑 그리드
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    // 순방향 마스크에서 알파 값 (정확한 사람 영역)
+    float alpha = (float)forward_mask[idx] / 255.0f;
+
+    // --- 역방향 워핑으로 전경 이미지 가져오기 ---
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    float fg_b, fg_g, fg_r;
+
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        fg_b = (float)src[warped_idx_rgb + 0];
+        fg_g = (float)src[warped_idx_rgb + 1];
+        fg_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        // 범위 밖: 원본 사용
+        fg_b = (float)src[idx_rgb + 0];
+        fg_g = (float)src[idx_rgb + 1];
+        fg_r = (float)src[idx_rgb + 2];
+    }
+
+    // --- 배경 ---
+    float bg_b = (float)bg[idx_rgb + 0];
+    float bg_g = (float)bg[idx_rgb + 1];
+    float bg_r = (float)bg[idx_rgb + 2];
+
+    // --- 최종 합성: 순방향 마스크 기준 ---
+    // alpha = 1: 전경 (워핑된 사람)
+    // alpha = 0: 배경 (슬리밍으로 비워진 영역)
+
+    if (!use_bg) {
+        // 배경 미사용: 워핑된 이미지 그대로
+        dst[idx_rgb + 0] = (unsigned char)fg_b;
+        dst[idx_rgb + 1] = (unsigned char)fg_g;
+        dst[idx_rgb + 2] = (unsigned char)fg_r;
+    } else {
+        // 알파 블렌딩
+        dst[idx_rgb + 0] = (unsigned char)(fg_b * alpha + bg_b * (1.0f - alpha));
+        dst[idx_rgb + 1] = (unsigned char)(fg_g * alpha + bg_g * (1.0f - alpha));
+        dst[idx_rgb + 2] = (unsigned char)(fg_r * alpha + bg_r * (1.0f - alpha));
+    }
 }
 '''

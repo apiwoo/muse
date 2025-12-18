@@ -1,11 +1,12 @@
 # Project MUSE - beauty_engine.py
-# V26.0: YY-Style Bilateral Filter Pipeline
-# - Changed: Skin smoothing from edgePreservingFilter to GPU Bilateral Filter
-# - Changed: No exclusion zones (bilateral filter auto-preserves edges)
-# - Changed: Full GPU processing (no CPU-GPU round trips)
-# - Changed: Downscaled processing (0.5x) for performance
-# - Changed: Mask blur sigma increased (5 -> 17) for smooth blending
-# - Result: "Smooth" skin texture, not "Blurry" image
+# V27.0: Forward Mask based Composite (잔상/번개 현상 근본 해결)
+# - Changed: Composite kernel from inverse-mask heuristic to forward-mask based
+# - Added: Forward Warp Mask kernel (순방향 마스크 워핑)
+# - Added: Mask Dilate kernel (홀 채우기)
+# - Added: Simple Composite kernel (is_alpha_loss 휴리스틱 제거)
+# - Fixed: "사람 두 명 보임" 현상 해결
+# - Fixed: 번개/잔상 현상 해결
+# - Preserved: V26.0 YY-Style Bilateral Filter Pipeline
 # - Preserved: All legacy features (TPS, Intrusion Handling, One-Euro Filter)
 # (C) 2025 MUSE Corp. All rights reserved.
 
@@ -19,7 +20,9 @@ from ai.tracking.facemesh import FaceMesh
 from graphics.kernels.cuda_kernels import (
     WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE,
     BILATERAL_SMOOTH_KERNEL_CODE, GPU_RESIZE_KERNEL_CODE,
-    GPU_MASK_RESIZE_KERNEL_CODE, FINAL_BLEND_KERNEL_CODE
+    GPU_MASK_RESIZE_KERNEL_CODE, FINAL_BLEND_KERNEL_CODE,
+    # V4: Forward Mask based Composite (근본 해결)
+    FORWARD_WARP_MASK_KERNEL_CODE, MASK_DILATE_KERNEL_CODE, SIMPLE_COMPOSITE_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -176,13 +179,19 @@ class MaskManager:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V26.0 YY-Style Bilateral Pipeline
+# [메인 클래스] BeautyEngine - V27.0 Forward Mask based Composite
 # ==============================================================================
 class BeautyEngine:
     """
-    V26.0 Beauty Processing Engine - YY-Style Bilateral Filter
+    V27.0 Beauty Processing Engine - Forward Mask based Composite
 
-    Key Features:
+    Key Changes (V27.0):
+    - Forward Warp Mask: 순방향 마스크 워핑으로 정확한 슬리밍 영역 계산
+    - Simple Composite: is_alpha_loss 휴리스틱 완전 제거
+    - Fixed: "사람 두 명 보임" 현상 해결
+    - Fixed: 번개/잔상 현상 해결
+
+    Preserved from V26.0:
     - GPU Bilateral Filter: Smooths texture while preserving edges
     - No Exclusion Zones: Filter auto-preserves eyebrows, lips, etc.
     - Full GPU Processing: No CPU-GPU round trips for low latency
@@ -193,7 +202,7 @@ class BeautyEngine:
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V26.0 YY-Style Bilateral Pipeline Ready")
+        print("[BEAUTY] [BeautyEngine] V27.0 Forward Mask Composite Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -229,6 +238,10 @@ class BeautyEngine:
         self.yy_smoothed_small = None
         self.yy_smoothed_full = None
 
+        # V4: Forward Mask buffers (순방향 마스크 기반 합성)
+        self.forward_mask_gpu = None
+        self.forward_mask_dilated_gpu = None
+
         if HAS_CUDA:
             self.stream = cp.cuda.Stream(non_blocking=True)
             # Core kernels (warping, compositing)
@@ -241,6 +254,11 @@ class BeautyEngine:
             self.resize_kernel = cp.RawKernel(GPU_RESIZE_KERNEL_CODE, 'gpu_resize_kernel')
             self.mask_resize_kernel = cp.RawKernel(GPU_MASK_RESIZE_KERNEL_CODE, 'gpu_mask_resize_kernel')
             self.blend_kernel = cp.RawKernel(FINAL_BLEND_KERNEL_CODE, 'final_blend_kernel')
+
+            # V4: Forward Mask based Composite (순방향 마스크 기반 합성)
+            self.forward_warp_mask_kernel = cp.RawKernel(FORWARD_WARP_MASK_KERNEL_CODE, 'forward_warp_mask_kernel')
+            self.mask_dilate_kernel = cp.RawKernel(MASK_DILATE_KERNEL_CODE, 'mask_dilate_kernel')
+            self.simple_composite_kernel = cp.RawKernel(SIMPLE_COMPOSITE_KERNEL_CODE, 'simple_composite_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -810,18 +828,45 @@ class BeautyEngine:
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=1, output=self.gpu_dy)
 
             # ==================================================================
-            # [Step 4] Composite (기존 100% 유지)
+            # [Step 4] V4: 순방향 마스크 기반 합성 (근본 해결)
+            # - is_alpha_loss 휴리스틱 완전 제거
+            # - 순방향 마스크가 정확한 사람/배경 영역 결정
             # ==================================================================
-            result_gpu = cp.empty_like(frame_gpu)
-
-            block_dim = (32, 32)
+            block_dim = (16, 16)
             grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
                         (h + block_dim[1] - 1) // block_dim[1])
             scale = int(1.0 / self.map_scale)
 
-            self.composite_kernel(
+            # 4-1. 순방향 마스크 버퍼 초기화
+            if self.forward_mask_gpu is None or self.forward_mask_gpu.shape != (h, w):
+                self.forward_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
+                self.forward_mask_dilated_gpu = cp.zeros((h, w), dtype=cp.uint8)
+
+            # 4-2. 순방향 마스크 초기화 (0으로 리셋)
+            self.forward_mask_gpu.fill(0)
+
+            # 4-3. 순방향 마스크 워핑
+            # 입력 마스크의 각 픽셀을 출력 위치로 이동
+            self.forward_warp_mask_kernel(
                 grid_dim, block_dim,
-                (source_for_warp, mask_gpu, self.bg_gpu, result_gpu,
+                (mask_gpu, self.forward_mask_gpu,
+                 self.gpu_dx, self.gpu_dy,
+                 w, h, sw, sh, scale)
+            )
+
+            # 4-4. 마스크 홀 채우기 (Dilate, radius=2)
+            self.mask_dilate_kernel(
+                grid_dim, block_dim,
+                (self.forward_mask_gpu, self.forward_mask_dilated_gpu,
+                 w, h, 2)  # radius=2 for small holes
+            )
+
+            # 4-5. 단순 합성 (is_alpha_loss 없음!)
+            result_gpu = cp.empty_like(frame_gpu)
+
+            self.simple_composite_kernel(
+                grid_dim, block_dim,
+                (source_for_warp, self.bg_gpu, self.forward_mask_dilated_gpu, result_gpu,
                  self.gpu_dx, self.gpu_dy,
                  w, h, sw, sh, scale, use_bg)
             )
