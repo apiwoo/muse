@@ -5,6 +5,7 @@ Python & System
 ========================
 
 pycache/
+__pycache__/
 *.py[cod]
 *$py.class
 *.log
@@ -43,7 +44,6 @@ Secrets & Config
 [Project MUSE] Large Assets
 
 100MB 넘는 파일들은 Git에 올리면 안 됩니다.
-
 ========================
 
 AI Models (Downloader로 받아야 함)

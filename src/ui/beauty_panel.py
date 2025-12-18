@@ -102,8 +102,7 @@ class BeautyPanel(QWidget):
             'gf_radius': 8,             # 가이드 필터 반경
             'gf_epsilon': 0.04,         # 가이드 필터 엣지 보존
             'color_temperature': 0.0,   # 색온도 (-1 Cool ~ 1 Warm)
-            'color_tint': 0.0,          # 틴트 (-1 Green ~ 1 Magenta)
-            'use_v25_pipeline': True    # V25.0 파이프라인 사용
+            'color_tint': 0.0           # 틴트 (-1 Green ~ 1 Magenta)
         }
 
         self._init_ui()
@@ -269,12 +268,6 @@ class BeautyPanel(QWidget):
         debug_group = QGroupBox("설정 (Settings)")
         d_inner = QVBoxLayout()
 
-        # V25.0 파이프라인 토글
-        self.chk_v25_pipeline = QCheckBox("V25.0 고정밀 파이프라인 사용")
-        self.chk_v25_pipeline.setChecked(True)
-        self.chk_v25_pipeline.toggled.connect(lambda v: self._update_param('use_v25_pipeline', v))
-        d_inner.addWidget(self.chk_v25_pipeline)
-
         # 디버그 표시
         self.chk_body_debug = QCheckBox("AI 관절 / 마스크 보기")
         self.chk_body_debug.toggled.connect(lambda v: self._update_param('show_body_debug', v))
@@ -325,8 +318,7 @@ class BeautyPanel(QWidget):
     # External Control
     # =========================================================================
     def set_profile_info(self, profile_name):
-        pipeline_mode = "V25.0" if self.current_params.get('use_v25_pipeline', True) else "Legacy"
-        self.info_label.setText(f"프로파일: {profile_name.upper()} | {pipeline_mode}")
+        self.info_label.setText(f"프로파일: {profile_name.upper()} | V25.0")
 
     def update_sliders_from_config(self, params):
         """Load config values into sliders"""
@@ -344,7 +336,6 @@ class BeautyPanel(QWidget):
             s.blockSignals(True)
 
         self.chk_body_debug.blockSignals(True)
-        self.chk_v25_pipeline.blockSignals(True)
 
         # ---- Basic Params (기존) ----
         if 'eye_scale' in params:
@@ -404,9 +395,6 @@ class BeautyPanel(QWidget):
         if 'show_body_debug' in params:
             self.chk_body_debug.setChecked(bool(params['show_body_debug']))
 
-        if 'use_v25_pipeline' in params:
-            self.chk_v25_pipeline.setChecked(bool(params['use_v25_pipeline']))
-
         # Update internal state
         self.current_params.update(params)
 
@@ -414,7 +402,6 @@ class BeautyPanel(QWidget):
         for s in sliders:
             s.blockSignals(False)
         self.chk_body_debug.blockSignals(False)
-        self.chk_v25_pipeline.blockSignals(False)
         self.blockSignals(False)
 
         # Emit updated params

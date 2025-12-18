@@ -186,11 +186,12 @@ class BeautyWorker(QThread):
                 print(f"[DEBUG-B] Param(Skin): {skin_val:.2f}, Face: {face_detected}, Body: {kp_detected}")
 
             frame_out_gpu = self.beauty_engine.process(
-                frame_gpu, 
-                faces=faces, 
-                body_landmarks=keypoints, 
-                params=current_params, 
-                mask=alpha_matte
+                frame_gpu,
+                faces=faces,
+                body_landmarks=keypoints,
+                params=current_params,
+                mask=alpha_matte,
+                frame_cpu=frame_bgr_cpu  # Pass CPU frame to avoid GPU->CPU transfer
             )
             t_beauty_end = time.perf_counter()
             

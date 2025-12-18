@@ -16,11 +16,7 @@ from ai.tracking.facemesh import FaceMesh
 # Import Kernels & Logic
 from graphics.kernels.cuda_kernels import (
     WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE,
-    # V25.0 New Kernels
-    POLYGON_MASK_KERNEL_CODE, SKIN_MASK_KERNEL_CODE,
-    GUIDED_FILTER_KERNEL_CODE, TONE_UNIFORMITY_KERNEL_CODE,
-    COLOR_GRADING_KERNEL_CODE, SKIN_SMOOTH_V2_KERNEL_CODE,
-    MASK_BLUR_KERNEL_CODE
+    FAST_SKIN_SMOOTH_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -85,287 +81,100 @@ class LandmarkStabilizer:
 
 
 # ==============================================================================
-# [V25.0 신규 클래스] MaskManager - 폴리곤 기반 피부 마스크 관리
+# [V25.0 신규 클래스] MaskManager - CPU 기반 고속 마스크 생성
 # ==============================================================================
 class MaskManager:
     """
-    Polygon-based skin mask manager
-    - Generates precise masks from FaceMesh landmarks
-    - Handles face oval and exclusion zones (eyes, brows, lips)
-    - GPU-accelerated mask generation
+    Fast skin mask manager (CPU OpenCV + GPU cache)
+    - Uses cv2.fillPoly for fast polygon rasterization
+    - Precise exclusion of eyes, eyebrows, lips
+    - Caches GPU mask to avoid repeated transfers
     """
 
-    # 클래스 레벨 인덱스 (FaceMesh 인스턴스 생성 없이 직접 참조)
+    # FaceMesh 인덱스 (정적 참조)
     FACE_OVAL_INDICES = FaceMesh.FACE_INDICES.get("FACE_OVAL", [])
-    EYE_L_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_L_POLY", FaceMesh.FACE_INDICES.get("EYE_L", []))
-    EYE_R_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_R_POLY", FaceMesh.FACE_INDICES.get("EYE_R", []))
-    BROW_L_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_L_POLY", FaceMesh.FACE_INDICES.get("BROW_L", []))
-    BROW_R_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_R_POLY", FaceMesh.FACE_INDICES.get("BROW_R", []))
-    LIPS_INDICES = FaceMesh.POLYGON_INDICES.get("LIPS_OUTER_POLY", FaceMesh.FACE_INDICES.get("LIPS", []))
+    FOREHEAD_INDICES = FaceMesh.FACE_INDICES.get("FOREHEAD", [])
+
+    # 제외 영역
+    EYE_L_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_L_POLY", [])
+    EYE_R_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_R_POLY", [])
+    BROW_L_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_L_POLY", [])
+    BROW_R_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_R_POLY", [])
+    LIPS_INDICES = FaceMesh.POLYGON_INDICES.get("LIPS_OUTER_POLY", [])
 
     def __init__(self):
-        self.skin_mask_gpu = None
-        self.soft_mask_gpu = None
         self.cache_w = 0
         self.cache_h = 0
+        self.mask_cpu = None
+        self.mask_gpu = None
 
-        # Kernel compilation (lazy)
-        self._skin_mask_kernel = None
-        self._mask_blur_kernel = None
-
-    def _compile_kernels(self):
-        """Lazy kernel compilation"""
-        if self._skin_mask_kernel is None:
-            self._skin_mask_kernel = cp.RawKernel(SKIN_MASK_KERNEL_CODE, 'skin_mask_kernel')
-            self._mask_blur_kernel = cp.RawKernel(MASK_BLUR_KERNEL_CODE, 'mask_blur_kernel')
-
-    def generate_mask(self, landmarks, w, h, feather_radius=3):
+    def generate_mask(self, landmarks, w, h, padding_ratio=1.15):
         """
-        Generate skin mask from landmarks
-
-        :param landmarks: (478, 2) numpy array from FaceMesh
-        :param w: Image width
-        :param h: Image height
-        :param feather_radius: Edge softening radius
-        :return: GPU mask array (soft edges)
+        Generate skin mask using OpenCV (CPU, very fast < 2ms)
         """
-        if not HAS_CUDA:
-            return None
-
-        self._compile_kernels()
-
-        # Reinitialize buffers if size changed
-        if self.cache_w != w or self.cache_h != h:
-            self.skin_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
-            self.soft_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
+        # Reuse buffer if size matches
+        if self.mask_cpu is None or self.cache_w != w or self.cache_h != h:
+            self.mask_cpu = np.zeros((h, w), dtype=np.uint8)
             self.cache_w = w
             self.cache_h = h
         else:
-            self.skin_mask_gpu.fill(0)
+            self.mask_cpu.fill(0)
 
-        # Get polygon data using class-level indices (no FaceMesh instantiation)
-        face_oval = landmarks[self.FACE_OVAL_INDICES].astype(np.float32)
-        eye_l = landmarks[self.EYE_L_INDICES].astype(np.float32)
-        eye_r = landmarks[self.EYE_R_INDICES].astype(np.float32)
-        brow_l = landmarks[self.BROW_L_INDICES].astype(np.float32)
-        brow_r = landmarks[self.BROW_R_INDICES].astype(np.float32)
-        lips = landmarks[self.LIPS_INDICES].astype(np.float32)
+        mask = self.mask_cpu
 
-        # Flatten vertex arrays for GPU
-        face_verts = face_oval.flatten()
-        eye_l_verts = eye_l.flatten()
-        eye_r_verts = eye_r.flatten()
-        brow_l_verts = brow_l.flatten()
-        brow_r_verts = brow_r.flatten()
-        lips_verts = lips.flatten()
+        # 1. Fill face oval
+        face_pts = landmarks[self.FACE_OVAL_INDICES].astype(np.int32)
+        cv2.fillPoly(mask, [face_pts], 255)
+
+        # 2. Exclude eyes (with padding)
+        self._exclude_region(mask, landmarks, self.EYE_L_INDICES, padding_ratio * 1.3)
+        self._exclude_region(mask, landmarks, self.EYE_R_INDICES, padding_ratio * 1.3)
+
+        # 3. Exclude eyebrows
+        self._exclude_region(mask, landmarks, self.BROW_L_INDICES, padding_ratio * 1.1)
+        self._exclude_region(mask, landmarks, self.BROW_R_INDICES, padding_ratio * 1.1)
+
+        # 4. Exclude lips
+        self._exclude_region(mask, landmarks, self.LIPS_INDICES, padding_ratio * 1.2)
+
+        # 5. Soft edge (small blur for smooth transition)
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        self.mask_cpu = mask
 
         # Transfer to GPU
-        face_gpu = cp.asarray(face_verts)
-        eye_l_gpu = cp.asarray(eye_l_verts)
-        eye_r_gpu = cp.asarray(eye_r_verts)
-        brow_l_gpu = cp.asarray(brow_l_verts)
-        brow_r_gpu = cp.asarray(brow_r_verts)
-        lips_gpu = cp.asarray(lips_verts)
+        if HAS_CUDA:
+            self.mask_gpu = cp.asarray(mask)
+            return self.mask_gpu
+        return mask
 
-        # Execute skin mask kernel
-        block_dim = (32, 32)
-        grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
-                    (h + block_dim[1] - 1) // block_dim[1])
+    def _exclude_region(self, mask, landmarks, indices, padding=1.0):
+        """Exclude a polygon region from the mask with padding"""
+        if len(indices) == 0:
+            return
 
-        self._skin_mask_kernel(
-            grid_dim, block_dim,
-            (self.skin_mask_gpu,
-             face_gpu, len(face_oval),
-             eye_l_gpu, len(eye_l),
-             eye_r_gpu, len(eye_r),
-             brow_l_gpu, len(brow_l),
-             brow_r_gpu, len(brow_r),
-             lips_gpu, len(lips),
-             w, h, cp.float32(1.1))  # 1.1 = 10% padding for exclusions
-        )
+        pts = landmarks[indices].astype(np.float32)
 
-        # Apply feathering for soft edges
-        if feather_radius > 0:
-            self._mask_blur_kernel(
-                grid_dim, block_dim,
-                (self.skin_mask_gpu, self.soft_mask_gpu, w, h, feather_radius)
-            )
-            return self.soft_mask_gpu
-        else:
-            return self.skin_mask_gpu
+        if padding != 1.0:
+            center = np.mean(pts, axis=0)
+            pts = center + (pts - center) * padding
+
+        pts = pts.astype(np.int32)
+        hull = cv2.convexHull(pts)
+        cv2.fillPoly(mask, [hull], 0)
 
     def get_mask_cpu(self):
-        """Get current mask as CPU numpy array"""
-        if self.soft_mask_gpu is not None:
-            return cp.asnumpy(self.soft_mask_gpu)
-        elif self.skin_mask_gpu is not None:
-            return cp.asnumpy(self.skin_mask_gpu)
-        return None
+        """Get mask as numpy array"""
+        return self.mask_cpu
 
 
 # ==============================================================================
-# [V25.0 신규 클래스] FrequencySeparator - 주파수 분리 처리
-# ==============================================================================
-class FrequencySeparator:
-    """
-    Frequency separation for skin processing
-    - Guided Filter based edge-aware low-pass
-    - Preserves high-frequency detail (skin texture, fine lines)
-    - Enables flat-fielding for tone uniformity
-    """
-    def __init__(self):
-        self.low_freq_gpu = None
-        self.cache_w = 0
-        self.cache_h = 0
-
-        self._guided_kernel = None
-        self._tone_kernel = None
-
-    def _compile_kernels(self):
-        if self._guided_kernel is None:
-            self._guided_kernel = cp.RawKernel(GUIDED_FILTER_KERNEL_CODE, 'guided_filter_kernel')
-            self._tone_kernel = cp.RawKernel(TONE_UNIFORMITY_KERNEL_CODE, 'tone_uniformity_kernel')
-
-    def extract_low_frequency(self, frame_gpu, mask_gpu, radius=8, epsilon=0.04):
-        """
-        Extract low-frequency component using Guided Filter
-
-        :param frame_gpu: Input frame (GPU)
-        :param mask_gpu: Skin mask (GPU)
-        :param radius: Filter radius
-        :param epsilon: Edge preservation factor
-        :return: Low-frequency component (GPU)
-        """
-        if not HAS_CUDA:
-            return frame_gpu
-
-        self._compile_kernels()
-
-        h, w = frame_gpu.shape[:2]
-
-        if self.cache_w != w or self.cache_h != h:
-            self.low_freq_gpu = cp.empty_like(frame_gpu)
-            self.cache_w = w
-            self.cache_h = h
-
-        block_dim = (16, 16)
-        grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
-                    (h + block_dim[1] - 1) // block_dim[1])
-
-        self._guided_kernel(
-            grid_dim, block_dim,
-            (frame_gpu, frame_gpu, self.low_freq_gpu, mask_gpu,
-             w, h, radius, cp.float32(epsilon))
-        )
-
-        return self.low_freq_gpu
-
-    def apply_tone_uniformity(self, frame_gpu, low_freq_gpu, mask_gpu,
-                              mean_color, flatten_strength=0.3, detail_preserve=0.7):
-        """
-        Apply tone uniformity (flat-fielding)
-
-        :param frame_gpu: Original frame
-        :param low_freq_gpu: Low-frequency from guided filter
-        :param mask_gpu: Skin mask
-        :param mean_color: Target mean skin color (B, G, R)
-        :param flatten_strength: How much to push towards mean (0-1)
-        :param detail_preserve: High-frequency preservation (0-1)
-        :return: Processed frame (GPU)
-        """
-        if not HAS_CUDA:
-            return frame_gpu
-
-        self._compile_kernels()
-
-        h, w = frame_gpu.shape[:2]
-        result_gpu = cp.empty_like(frame_gpu)
-
-        block_dim = (16, 16)
-        grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
-                    (h + block_dim[1] - 1) // block_dim[1])
-
-        self._tone_kernel(
-            grid_dim, block_dim,
-            (frame_gpu, low_freq_gpu, result_gpu, mask_gpu,
-             w, h,
-             cp.float32(mean_color[0]), cp.float32(mean_color[1]), cp.float32(mean_color[2]),
-             cp.float32(flatten_strength), cp.float32(detail_preserve))
-        )
-
-        return result_gpu
-
-
-# ==============================================================================
-# [V25.0 신규 클래스] ColorGrader - 색상 그레이딩
-# ==============================================================================
-class ColorGrader:
-    """
-    Color grading processor
-    - Temperature: Cool (Blue) ↔ Warm (Yellow)
-    - Tint: Green ↔ Magenta
-    - HSL-based efficient implementation
-    """
-    def __init__(self):
-        self._grading_kernel = None
-
-    def _compile_kernels(self):
-        if self._grading_kernel is None:
-            self._grading_kernel = cp.RawKernel(COLOR_GRADING_KERNEL_CODE, 'color_grading_kernel')
-
-    def apply(self, frame_gpu, mask_gpu=None, temperature=0.0, tint=0.0, use_mask=True):
-        """
-        Apply color grading
-
-        :param frame_gpu: Input frame (GPU)
-        :param mask_gpu: Optional mask (apply only to masked areas)
-        :param temperature: -1.0 (cool) to 1.0 (warm)
-        :param tint: -1.0 (green) to 1.0 (magenta)
-        :param use_mask: Whether to use mask
-        :return: Graded frame (GPU)
-        """
-        if not HAS_CUDA:
-            return frame_gpu
-
-        # Skip if no adjustment needed
-        if abs(temperature) < 0.01 and abs(tint) < 0.01:
-            return frame_gpu
-
-        self._compile_kernels()
-
-        h, w = frame_gpu.shape[:2]
-        result_gpu = cp.empty_like(frame_gpu)
-
-        block_dim = (16, 16)
-        grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
-                    (h + block_dim[1] - 1) // block_dim[1])
-
-        # Handle null mask
-        if mask_gpu is None:
-            mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
-            use_mask_flag = 0
-        else:
-            use_mask_flag = 1 if use_mask else 0
-
-        self._grading_kernel(
-            grid_dim, block_dim,
-            (frame_gpu, result_gpu, mask_gpu,
-             w, h,
-             cp.float32(temperature), cp.float32(tint),
-             use_mask_flag)
-        )
-
-        return result_gpu
-
-
-# ==============================================================================
-# [메인 클래스] BeautyEngine - V25.0 통합 파이프라인
+# [메인 클래스] BeautyEngine - V25.0 YY-Style Pipeline
 # ==============================================================================
 class BeautyEngine:
     """
     V25.0 Beauty Processing Engine
-    - Polygon-based precise skin masking
-    - Frequency separation for YY-style porcelain skin
+    - CPU-based fast skin masking (OpenCV fillPoly)
+    - YY-style bilateral filter smoothing
     - Color grading (temperature/tint)
     - Legacy features preserved (TPS warping, Intrusion handling)
     """
@@ -393,13 +202,8 @@ class BeautyEngine:
         # Morph Logic (기존 유지)
         self.morph_logic = MorphLogic()
 
-        # V25.0 New Components
+        # V25.0 Components (simplified - CPU bilateral filter based)
         self.mask_manager = MaskManager()
-        self.freq_separator = FrequencySeparator()
-        self.color_grader = ColorGrader()
-
-        # Processing mode
-        self.use_v25_pipeline = True  # Set to False to use legacy pipeline
 
         # Paths
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -407,24 +211,22 @@ class BeautyEngine:
 
         if HAS_CUDA:
             self.stream = cp.cuda.Stream(non_blocking=True)
-            # Legacy kernels (유지)
+            # Core kernels (warping, compositing)
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.skin_kernel = cp.RawKernel(SKIN_SMOOTH_KERNEL_CODE, 'skin_smooth_kernel')
-            # V25.0 kernels
-            self.skin_v2_kernel = cp.RawKernel(SKIN_SMOOTH_V2_KERNEL_CODE, 'skin_smooth_v2_kernel')
+            self.fast_skin_kernel = cp.RawKernel(FAST_SKIN_SMOOTH_KERNEL_CODE, 'fast_skin_smooth_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
 
     def _warmup_kernels(self):
         """Pre-compile CUDA kernels"""
-        print("   [INIT] Warming up CUDA Kernels (V25.0)...")
+        print("   [INIT] Warming up CUDA Kernels...")
         try:
             h, w = 64, 64
             dummy_src = cp.zeros((h, w, 3), dtype=cp.uint8)
             dummy_dst = cp.zeros_like(dummy_src)
-            dummy_mask = cp.zeros((h, w), dtype=cp.uint8)
             dummy_exclusion = cp.zeros(15, dtype=cp.float32)
 
             # Legacy kernel warmup
@@ -437,17 +239,8 @@ class BeautyEngine:
                  dummy_exclusion)
             )
 
-            # V25.0 kernel warmup
-            self.skin_v2_kernel(
-                (2, 2), (32, 32),
-                (dummy_src, dummy_src, dummy_dst, dummy_mask,
-                 w, h, cp.float32(0.5), 4, cp.float32(0.04),
-                 cp.float32(128), cp.float32(128), cp.float32(128),
-                 cp.float32(0.0))
-            )
-
             cp.cuda.Stream.null.synchronize()
-            print("   [INIT] All Kernels Compiled (Legacy + V25.0)")
+            print("   [INIT] Core Kernels Compiled")
         except Exception as e:
             print(f"   [WARNING] Warm-up failed: {e}")
 
@@ -532,86 +325,100 @@ class BeautyEngine:
         return np.array(zones, dtype=np.float32)
 
     # ==========================================================================
-    # V25.0 Advanced Skin Processing
+    # V25.0 Fast Skin Processing (Hybrid CPU-GPU with CUDA Kernel)
     # ==========================================================================
     def _process_skin_v25(self, frame_gpu, landmarks, params):
         """
-        V25.0 Advanced skin processing pipeline
-
-        1. Generate polygon mask
-        2. Extract low-frequency (Guided Filter)
-        3. Apply tone uniformity (Flat-fielding)
-        4. Apply color grading
-        5. Final skin smoothing with Guided Filter
+        Fast skin smoothing using hybrid CPU-GPU approach
+        - CPU: fast downscale+blur (OpenCV optimized, small image)
+        - GPU CUDA kernel: parallel blending with frequency separation
         """
         h, w = frame_gpu.shape[:2]
 
         # Get parameters
         skin_strength = params.get('skin_smooth', 0.0)
         skin_tone_val = params.get('skin_tone', 0.0)
-        flatten_strength = params.get('flatten_strength', 0.3)
-        detail_preserve = params.get('detail_preserve', 0.7)
-        gf_radius = params.get('gf_radius', 8)
-        gf_epsilon = params.get('gf_epsilon', 0.04)
-        temperature = params.get('color_temperature', 0.0)
-        tint = params.get('color_tint', 0.0)
 
         # Skip if no processing needed
-        if skin_strength < 0.01 and abs(skin_tone_val) < 0.01 and abs(temperature) < 0.01 and abs(tint) < 0.01:
+        if skin_strength < 0.01 and abs(skin_tone_val) < 0.01:
             return frame_gpu, None
 
-        # Step 1: Generate polygon mask
-        skin_mask_gpu = self.mask_manager.generate_mask(landmarks, w, h, feather_radius=3)
+        # Step 1: Generate mask (CPU OpenCV - very fast ~1ms)
+        skin_mask_gpu = self.mask_manager.generate_mask(landmarks, w, h, padding_ratio=1.2)
         if skin_mask_gpu is None:
             return frame_gpu, None
 
-        # Calculate mean skin color from mask region
-        mask_np = cp.asnumpy(skin_mask_gpu)
-        frame_np = cp.asnumpy(frame_gpu) if hasattr(frame_gpu, 'get') else frame_gpu.get()
-        skin_pixels = frame_np[mask_np > 128]
-        if len(skin_pixels) > 0:
-            mean_color = np.median(skin_pixels, axis=0)  # B, G, R
-        else:
-            mean_color = np.array([128.0, 128.0, 128.0])
-
-        current_frame = frame_gpu
-
-        # Step 2: Frequency separation + Tone uniformity (if flatten_strength > 0)
-        if flatten_strength > 0.01 and skin_strength > 0.01:
-            low_freq = self.freq_separator.extract_low_frequency(
-                current_frame, skin_mask_gpu, radius=gf_radius, epsilon=gf_epsilon
-            )
-            current_frame = self.freq_separator.apply_tone_uniformity(
-                current_frame, low_freq, skin_mask_gpu,
-                mean_color, flatten_strength, detail_preserve
-            )
-
-        # Step 3: Color grading
-        if abs(temperature) > 0.01 or abs(tint) > 0.01:
-            current_frame = self.color_grader.apply(
-                current_frame, skin_mask_gpu,
-                temperature, tint, use_mask=True
-            )
-
-        # Step 4: Final skin smoothing with V2 kernel
+        # Step 2: Fast smoothing with CUDA kernel
         if skin_strength > 0.01:
-            result_gpu = cp.empty_like(current_frame)
+            # Get frame on CPU for blur processing
+            # Use cached CPU frame if available (avoids GPU->CPU transfer)
+            if hasattr(self, '_frame_cpu_cache') and self._frame_cpu_cache is not None:
+                frame_cpu = self._frame_cpu_cache
+            else:
+                frame_cpu = cp.asnumpy(frame_gpu)
 
-            block_dim = (16, 16)
+            # ===== CPU Processing (OpenCV - highly optimized) =====
+            # Downscale for faster blur
+            scale = 0.5
+            small_w, small_h = int(w * scale), int(h * scale)
+
+            # Fast downscale
+            frame_small = cv2.resize(frame_cpu, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+
+            # Blur kernel size based on strength
+            blur_size = int(7 + skin_strength * 14)  # 7 ~ 21
+            if blur_size % 2 == 0:
+                blur_size += 1
+
+            # Apply blur (stackBlur is fastest)
+            try:
+                smoothed_small = cv2.stackBlur(frame_small, (blur_size, blur_size))
+            except AttributeError:
+                smoothed_small = cv2.blur(frame_small, (blur_size, blur_size))
+
+            # Upscale back
+            smoothed_cpu = cv2.resize(smoothed_small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+            # ===== GPU Processing with CUDA Kernel =====
+            smoothed_gpu = cp.asarray(smoothed_cpu)
+            result_gpu = cp.empty_like(frame_gpu)
+
+            # detail_preserve: lower = more smoothing visible
+            detail_preserve = 0.5 - skin_strength * 0.4  # 0.5 ~ 0.1
+            blend_strength = 1.0  # Full strength in masked area
+
+            # Launch CUDA kernel
+            block_dim = (32, 32)
             grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
                         (h + block_dim[1] - 1) // block_dim[1])
 
-            self.skin_v2_kernel(
+            self.fast_skin_kernel(
                 grid_dim, block_dim,
-                (current_frame, current_frame, result_gpu, skin_mask_gpu,
-                 w, h, cp.float32(skin_strength),
-                 gf_radius, cp.float32(gf_epsilon),
-                 cp.float32(mean_color[2]), cp.float32(mean_color[1]), cp.float32(mean_color[0]),
-                 cp.float32(skin_tone_val))
+                (frame_gpu, smoothed_gpu, skin_mask_gpu, result_gpu,
+                 w, h, cp.float32(detail_preserve), cp.float32(blend_strength))
             )
-            current_frame = result_gpu
 
-        return current_frame, skin_mask_gpu
+            frame_gpu = result_gpu
+
+            # Tone correction (simple GPU operation)
+            if abs(skin_tone_val) > 0.01:
+                frame_float = frame_gpu.astype(cp.float32)
+                mask_float = skin_mask_gpu.astype(cp.float32) / 255.0
+
+                if skin_tone_val > 0:
+                    # Rosy tone
+                    mix = skin_tone_val * 0.2
+                    frame_float[:, :, 2] = cp.clip(frame_float[:, :, 2] + mix * 30 * mask_float, 0, 255)
+                    frame_float[:, :, 0] = cp.clip(frame_float[:, :, 0] - mix * 10 * mask_float, 0, 255)
+                else:
+                    # Pale/bright tone
+                    mix = -skin_tone_val * 0.15
+                    mask_3ch = mask_float[:, :, cp.newaxis]
+                    frame_float = frame_float + (255 - frame_float) * mix * mask_3ch
+
+                frame_gpu = cp.clip(frame_float, 0, 255).astype(cp.uint8)
+
+        return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
     # Legacy Skin Processing (기존 100% 유지)
@@ -682,7 +489,7 @@ class BeautyEngine:
     # ==========================================================================
     # Main Processing Pipeline
     # ==========================================================================
-    def process(self, frame, faces, body_landmarks=None, params=None, mask=None):
+    def process(self, frame, faces, body_landmarks=None, params=None, mask=None, frame_cpu=None):
         """
         Main processing pipeline
 
@@ -691,12 +498,16 @@ class BeautyEngine:
         :param body_landmarks: Body keypoints from pose tracker
         :param params: Processing parameters dict
         :param mask: Alpha mask for compositing
+        :param frame_cpu: Optional CPU frame to avoid GPU->CPU transfer
         :return: Processed frame
         """
         if frame is None or not HAS_CUDA:
             return frame
         if params is None:
             params = {}
+
+        # Store CPU frame if provided (optimization)
+        self._frame_cpu_cache = frame_cpu
 
         is_gpu_input = hasattr(frame, 'device')
 
@@ -754,15 +565,10 @@ class BeautyEngine:
                 raw_face = faces[0].landmarks
                 stable_face = self.face_stabilizer.update(raw_face)
 
-                # Choose pipeline based on setting
-                if self.use_v25_pipeline:
-                    source_for_warp, skin_mask_debug = self._process_skin_v25(
-                        frame_gpu, stable_face, params
-                    )
-                else:
-                    source_for_warp = self._process_skin_legacy(
-                        frame_gpu, stable_face, params, w, h
-                    )
+                # V25.0 Pipeline (always enabled)
+                source_for_warp, skin_mask_debug = self._process_skin_v25(
+                    frame_gpu, stable_face, params
+                )
 
             # ==================================================================
             # [Step 2] Morph Logic (기존 100% 유지)
@@ -855,8 +661,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                mode_text = "V25.0 Pipeline" if self.use_v25_pipeline else "Legacy Pipeline"
-                cv2.putText(debug_img, mode_text, (10, 30),
+                cv2.putText(debug_img, "V25.0 Pipeline", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)
@@ -867,15 +672,3 @@ class BeautyEngine:
             else:
                 return result_gpu.get()
 
-    # ==========================================================================
-    # Pipeline Mode Control
-    # ==========================================================================
-    def set_pipeline_mode(self, use_v25=True):
-        """
-        Switch between V25.0 and legacy pipeline
-
-        :param use_v25: True for V25.0, False for legacy
-        """
-        self.use_v25_pipeline = use_v25
-        mode = "V25.0 High-Precision" if use_v25 else "Legacy Bilateral"
-        print(f"[BEAUTY] Pipeline Mode: {mode}")

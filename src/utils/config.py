@@ -64,8 +64,6 @@ class ProfileManager:
                 'color_temperature': 0.0,   # 색온도: -1.0(Cool/Blue) ~ 1.0(Warm/Yellow)
                 'color_tint': 0.0,          # 틴트: -1.0(Green) ~ 1.0(Magenta)
 
-                # [Pipeline Control]
-                'use_v25_pipeline': True    # V25.0 파이프라인 사용 (False = Legacy)
             }
         }
 
@@ -155,8 +153,7 @@ class ProfileManager:
             'gf_radius': 8,
             'gf_epsilon': 0.04,
             'color_temperature': 0.0,
-            'color_tint': 0.0,
-            'use_v25_pipeline': True
+            'color_tint': 0.0
         }
 
     def upgrade_profile_to_v25(self, profile_name):

@@ -935,3 +935,134 @@ void mask_blur_kernel(
     mask_out[idx] = (unsigned char)(sum / (float)count);
 }
 '''
+
+# ==============================================================================
+# [KERNEL 11] Skin Color Expansion (Region Growing)
+# - FaceMesh 경계 밖 인접 피부색 영역으로 마스크 확장
+# - YCrCb 색공간 기반 피부색 검출
+# - 기존 마스크에서 바깥으로 확장
+# ==============================================================================
+SKIN_COLOR_EXPAND_KERNEL_CODE = r'''
+extern "C" __global__
+void skin_color_expand_kernel(
+    const unsigned char* src_bgr,      // Input image (BGR)
+    const unsigned char* mask_in,      // Input: polygon-based mask
+    unsigned char* mask_out,           // Output: expanded mask
+    int width, int height,
+    float ref_y, float ref_cr, float ref_cb,  // Reference skin color in YCrCb
+    float y_thresh,                    // Y (luminance) tolerance
+    float cr_thresh,                   // Cr tolerance
+    float cb_thresh,                   // Cb tolerance
+    int expand_radius                  // How many pixels to check for expansion
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx3 = idx * 3;
+
+    // If already in mask, keep it
+    if (mask_in[idx] > 0) {
+        mask_out[idx] = mask_in[idx];
+        return;
+    }
+
+    // Check if near existing mask boundary
+    bool near_mask = false;
+    for (int dy = -expand_radius; dy <= expand_radius && !near_mask; dy++) {
+        for (int dx = -expand_radius; dx <= expand_radius && !near_mask; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                if (mask_in[ny * width + nx] > 0) {
+                    near_mask = true;
+                }
+            }
+        }
+    }
+
+    if (!near_mask) {
+        mask_out[idx] = 0;
+        return;
+    }
+
+    // Convert BGR to YCrCb for skin detection
+    float b = (float)src_bgr[idx3 + 0];
+    float g = (float)src_bgr[idx3 + 1];
+    float r = (float)src_bgr[idx3 + 2];
+
+    // RGB to YCrCb conversion
+    float Y  = 0.299f * r + 0.587f * g + 0.114f * b;
+    float Cr = (r - Y) * 0.713f + 128.0f;
+    float Cb = (b - Y) * 0.564f + 128.0f;
+
+    // Check if pixel is skin-colored (similar to reference)
+    float y_diff = fabsf(Y - ref_y);
+    float cr_diff = fabsf(Cr - ref_cr);
+    float cb_diff = fabsf(Cb - ref_cb);
+
+    bool is_skin_color = (y_diff < y_thresh) && (cr_diff < cr_thresh) && (cb_diff < cb_thresh);
+
+    // Also check general skin color range in YCrCb
+    // Typical skin: Cr: 133-173, Cb: 77-127
+    bool in_skin_range = (Cr >= 133.0f && Cr <= 173.0f) && (Cb >= 77.0f && Cb <= 127.0f);
+
+    if (is_skin_color || in_skin_range) {
+        mask_out[idx] = 255;
+    } else {
+        mask_out[idx] = 0;
+    }
+}
+'''
+
+
+# ==============================================================================
+# [KERNEL 12] Fast Skin Smooth Blend
+# - Combines smoothing and blending in one pass
+# - Uses simple box average for smoothing (fast)
+# - Applies frequency separation for natural look
+# ==============================================================================
+FAST_SKIN_SMOOTH_KERNEL_CODE = r'''
+extern "C" __global__
+void fast_skin_smooth_kernel(
+    const unsigned char* src,          // Input image (BGR)
+    const unsigned char* smoothed,     // Pre-blurred image (BGR)
+    const unsigned char* mask,         // Skin mask (0-255)
+    unsigned char* dst,                // Output image (BGR)
+    int width, int height,
+    float detail_preserve,             // 0.0 = full blur, 1.0 = no blur
+    float blend_strength               // Overall blend strength (0-1)
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx3 = idx * 3;
+
+    float mask_val = (float)mask[idx] / 255.0f * blend_strength;
+
+    if (mask_val < 0.01f) {
+        // Outside mask - copy original
+        dst[idx3 + 0] = src[idx3 + 0];
+        dst[idx3 + 1] = src[idx3 + 1];
+        dst[idx3 + 2] = src[idx3 + 2];
+        return;
+    }
+
+    // Frequency separation: result = smoothed + (original - smoothed) * detail_preserve
+    for (int c = 0; c < 3; c++) {
+        float orig = (float)src[idx3 + c];
+        float smooth = (float)smoothed[idx3 + c];
+        float detail = orig - smooth;
+        float result = smooth + detail * detail_preserve;
+
+        // Blend with original based on mask
+        float final_val = orig * (1.0f - mask_val) + result * mask_val;
+        dst[idx3 + c] = (unsigned char)fminf(fmaxf(final_val, 0.0f), 255.0f);
+    }
+}
+'''
