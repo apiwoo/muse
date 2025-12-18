@@ -1615,3 +1615,112 @@ void simple_composite_kernel(
     }
 }
 '''
+
+
+# ==============================================================================
+# [KERNEL 20] Void Fill Composite (V5 - 동기화된 트리플 레이어)
+# - 원본 배경 유지 + Void(슬리밍 빈 공간)만 배경 패치 + 워핑된 사람
+# - mask_orig: 동기화된 원본 마스크 (사람이 "있었던" 영역)
+# - mask_fwd: 순방향 워핑 마스크 (사람이 "현재 있는" 영역)
+# - Void = mask_orig > 0 && mask_fwd == 0 (슬리밍으로 비워진 곳)
+# ==============================================================================
+VOID_FILL_COMPOSITE_KERNEL_CODE = r'''
+extern "C" __global__
+void void_fill_composite_kernel(
+    const unsigned char* src,        // 원본 이미지 (Bottom - 배경 베이스)
+    const unsigned char* bg,         // 준비된 정적 배경 (Middle - Void 패치용)
+    const unsigned char* mask_orig,  // 동기화된 원본 마스크 (안정화됨)
+    const unsigned char* mask_fwd,   // 순방향 워핑된 마스크 (수축된 사람 영역)
+    unsigned char* dst,              // 출력
+    const float* dx_small,           // 역방향 워핑 그리드
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    float m_fwd = (float)mask_fwd[idx] / 255.0f;
+    float m_orig = (float)mask_orig[idx] / 255.0f;
+
+    // --- 역방향 워핑으로 전경 이미지 가져오기 ---
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    // 워핑된 전경 픽셀
+    float fg_b, fg_g, fg_r;
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        fg_b = (float)src[warped_idx_rgb + 0];
+        fg_g = (float)src[warped_idx_rgb + 1];
+        fg_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        fg_b = (float)src[idx_rgb + 0];
+        fg_g = (float)src[idx_rgb + 1];
+        fg_r = (float)src[idx_rgb + 2];
+    }
+
+    // 원본 픽셀 (Bottom layer)
+    float src_b = (float)src[idx_rgb + 0];
+    float src_g = (float)src[idx_rgb + 1];
+    float src_r = (float)src[idx_rgb + 2];
+
+    // 정적 배경 픽셀 (Middle layer - Void 패치용)
+    float bg_b = (float)bg[idx_rgb + 0];
+    float bg_g = (float)bg[idx_rgb + 1];
+    float bg_r = (float)bg[idx_rgb + 2];
+
+    // === 트리플 레이어 합성 ===
+    float out_b, out_g, out_r;
+
+    if (!use_bg) {
+        // 배경 미사용: 워핑된 이미지 그대로
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (m_fwd > 0.05f) {
+        // [Top Layer] 성형된 사람 영역 (순방향 마스크가 있는 곳)
+        // 워핑된 전경을 그대로 사용
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (m_orig > 0.1f && m_fwd < 0.05f) {
+        // [Middle Layer] VOID 영역 (슬리밍 빈 공간)
+        // 원래 사람이 있었으나 (m_orig > 0) 슬리밍으로 비워진 곳 (m_fwd == 0)
+        // 정적 배경으로 패치
+        float void_alpha = fminf(m_orig * 2.0f, 1.0f);  // 부드러운 전환
+        out_b = bg_b * void_alpha + src_b * (1.0f - void_alpha);
+        out_g = bg_g * void_alpha + src_g * (1.0f - void_alpha);
+        out_r = bg_r * void_alpha + src_r * (1.0f - void_alpha);
+    }
+    else {
+        // [Bottom Layer] 순수 배경 영역 (원래부터 배경)
+        // 원본 유지 (화질 손실 없음)
+        out_b = src_b;
+        out_g = src_g;
+        out_r = src_r;
+    }
+
+    dst[idx_rgb + 0] = (unsigned char)out_b;
+    dst[idx_rgb + 1] = (unsigned char)out_g;
+    dst[idx_rgb + 2] = (unsigned char)out_r;
+}
+'''
