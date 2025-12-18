@@ -1,9 +1,11 @@
 # Project MUSE - beauty_engine.py
-# V25.0: High-Precision Pipeline & Frequency Separation
-# - Added: MaskManager (Polygon-based skin masking)
-# - Added: Frequency Separation (Guided Filter)
-# - Added: Tone Uniformity (Flat-fielding)
-# - Added: Color Grading (Temperature/Tint)
+# V26.0: YY-Style Bilateral Filter Pipeline
+# - Changed: Skin smoothing from edgePreservingFilter to GPU Bilateral Filter
+# - Changed: No exclusion zones (bilateral filter auto-preserves edges)
+# - Changed: Full GPU processing (no CPU-GPU round trips)
+# - Changed: Downscaled processing (0.5x) for performance
+# - Changed: Mask blur sigma increased (5 -> 17) for smooth blending
+# - Result: "Smooth" skin texture, not "Blurry" image
 # - Preserved: All legacy features (TPS, Intrusion Handling, One-Euro Filter)
 # (C) 2025 MUSE Corp. All rights reserved.
 
@@ -15,7 +17,9 @@ from ai.tracking.facemesh import FaceMesh
 
 # Import Kernels & Logic
 from graphics.kernels.cuda_kernels import (
-    WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE
+    WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE,
+    BILATERAL_SMOOTH_KERNEL_CODE, GPU_RESIZE_KERNEL_CODE,
+    GPU_MASK_RESIZE_KERNEL_CODE, FINAL_BLEND_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -107,9 +111,16 @@ class MaskManager:
         self.mask_cpu = None
         self.mask_gpu = None
 
-    def generate_mask(self, landmarks, w, h, padding_ratio=1.15):
+    def generate_mask(self, landmarks, w, h, padding_ratio=1.15, exclude_features=False):
         """
         Generate skin mask using OpenCV (CPU, very fast < 2ms)
+
+        Args:
+            landmarks: Face landmarks array
+            w, h: Image dimensions
+            padding_ratio: Padding for exclusion zones
+            exclude_features: If False, no exclusion zones (YY-style)
+                            If True, exclude eyes/brows/lips (legacy)
         """
         # Reuse buffer if size matches
         if self.mask_cpu is None or self.cache_w != w or self.cache_h != h:
@@ -125,19 +136,17 @@ class MaskManager:
         face_pts = landmarks[self.FACE_OVAL_INDICES].astype(np.int32)
         cv2.fillPoly(mask, [face_pts], 255)
 
-        # 2. Exclude eyes (with padding)
-        self._exclude_region(mask, landmarks, self.EYE_L_INDICES, padding_ratio * 1.3)
-        self._exclude_region(mask, landmarks, self.EYE_R_INDICES, padding_ratio * 1.3)
+        # 2-4. Exclude features only if requested (legacy mode)
+        # YY-Style: Bilateral filter handles edge preservation automatically
+        if exclude_features:
+            self._exclude_region(mask, landmarks, self.EYE_L_INDICES, padding_ratio * 1.3)
+            self._exclude_region(mask, landmarks, self.EYE_R_INDICES, padding_ratio * 1.3)
+            self._exclude_region(mask, landmarks, self.BROW_L_INDICES, padding_ratio * 1.1)
+            self._exclude_region(mask, landmarks, self.BROW_R_INDICES, padding_ratio * 1.1)
+            self._exclude_region(mask, landmarks, self.LIPS_INDICES, padding_ratio * 1.2)
 
-        # 3. Exclude eyebrows
-        self._exclude_region(mask, landmarks, self.BROW_L_INDICES, padding_ratio * 1.1)
-        self._exclude_region(mask, landmarks, self.BROW_R_INDICES, padding_ratio * 1.1)
-
-        # 4. Exclude lips
-        self._exclude_region(mask, landmarks, self.LIPS_INDICES, padding_ratio * 1.2)
-
-        # 5. Soft edge (small blur for smooth transition)
-        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        # 5. Soft edge - increased sigma for smoother blending (5 -> 17)
+        mask = cv2.GaussianBlur(mask, (35, 35), 17)
         self.mask_cpu = mask
 
         # Transfer to GPU
@@ -167,19 +176,24 @@ class MaskManager:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V25.0 YY-Style Pipeline
+# [메인 클래스] BeautyEngine - V26.0 YY-Style Bilateral Pipeline
 # ==============================================================================
 class BeautyEngine:
     """
-    V25.0 Beauty Processing Engine
-    - CPU-based fast skin masking (OpenCV fillPoly)
-    - YY-style bilateral filter smoothing
-    - Color grading (temperature/tint)
-    - Legacy features preserved (TPS warping, Intrusion handling)
+    V26.0 Beauty Processing Engine - YY-Style Bilateral Filter
+
+    Key Features:
+    - GPU Bilateral Filter: Smooths texture while preserving edges
+    - No Exclusion Zones: Filter auto-preserves eyebrows, lips, etc.
+    - Full GPU Processing: No CPU-GPU round trips for low latency
+    - Downscaled Processing: 0.5x scale for performance optimization
+    - Smooth Mask Blending: sigma=17 for natural transitions
+
+    Result: "Smooth" skin (texture reduced) vs "Blurry" (everything fuzzy)
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V25.0 High-Precision Pipeline Ready")
+        print("[BEAUTY] [BeautyEngine] V26.0 YY-Style Bilateral Pipeline Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -208,12 +222,25 @@ class BeautyEngine:
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
 
+        # YY-Style processing buffers
+        self.yy_scale = 0.5  # Downscale factor for bilateral filter
+        self.yy_small_frame = None
+        self.yy_small_mask = None
+        self.yy_smoothed_small = None
+        self.yy_smoothed_full = None
+
         if HAS_CUDA:
             self.stream = cp.cuda.Stream(non_blocking=True)
             # Core kernels (warping, compositing)
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.skin_kernel = cp.RawKernel(SKIN_SMOOTH_KERNEL_CODE, 'skin_smooth_kernel')
+
+            # YY-Style kernels (bilateral smoothing)
+            self.bilateral_kernel = cp.RawKernel(BILATERAL_SMOOTH_KERNEL_CODE, 'bilateral_smooth_kernel')
+            self.resize_kernel = cp.RawKernel(GPU_RESIZE_KERNEL_CODE, 'gpu_resize_kernel')
+            self.mask_resize_kernel = cp.RawKernel(GPU_MASK_RESIZE_KERNEL_CODE, 'gpu_mask_resize_kernel')
+            self.blend_kernel = cp.RawKernel(FINAL_BLEND_KERNEL_CODE, 'final_blend_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -451,6 +478,130 @@ class BeautyEngine:
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
+    # YY-Style Skin Smoothing (Bilateral Filter - GPU Only)
+    # ==========================================================================
+    def _process_skin_yy_style(self, frame_gpu, landmarks, params):
+        """
+        YY-style skin smoothing using GPU Bilateral Filter
+
+        Key differences from _process_skin_v25:
+        - No exclusion zones (bilateral filter preserves edges automatically)
+        - Full GPU processing (no CPU-GPU round trips)
+        - Downscaled processing for performance
+        - Smooth mask blending (no hard boundaries)
+
+        Result: "Smooth" skin (texture reduced) vs "Blurry" (everything fuzzy)
+        """
+        h, w = frame_gpu.shape[:2]
+
+        # Get parameters
+        skin_strength = params.get('skin_smooth', 0.0)
+        skin_tone_val = params.get('skin_tone', 0.0)
+        color_temp = params.get('color_temperature', 0.0)
+        color_tint = params.get('color_tint', 0.0)
+
+        # Skip if no processing needed
+        has_skin = skin_strength > 0.01
+        has_tone = abs(skin_tone_val) > 0.01
+        has_color = abs(color_temp) > 0.01 or abs(color_tint) > 0.01
+
+        if not has_skin and not has_tone and not has_color:
+            return frame_gpu, None
+
+        # Generate skin mask (no exclusion zones for YY-style)
+        skin_mask_gpu = self.mask_manager.generate_mask(
+            landmarks, w, h, padding_ratio=1.15, exclude_features=False
+        )
+
+        if skin_mask_gpu is None:
+            return frame_gpu, None
+
+        # ===== Skin Smoothing (GPU Bilateral Filter) =====
+        if has_skin:
+            # Calculate downscaled dimensions
+            small_w = int(w * self.yy_scale)
+            small_h = int(h * self.yy_scale)
+
+            # Initialize or resize buffers
+            if (self.yy_small_frame is None or
+                self.yy_small_frame.shape[0] != small_h or
+                self.yy_small_frame.shape[1] != small_w):
+                self.yy_small_frame = cp.zeros((small_h, small_w, 3), dtype=cp.uint8)
+                self.yy_small_mask = cp.zeros((small_h, small_w), dtype=cp.uint8)
+                self.yy_smoothed_small = cp.zeros((small_h, small_w, 3), dtype=cp.uint8)
+                self.yy_smoothed_full = cp.zeros((h, w, 3), dtype=cp.uint8)
+
+            # Step 1: Downscale frame to small size (GPU)
+            block_dim = (16, 16)
+            grid_dim_small = ((small_w + block_dim[0] - 1) // block_dim[0],
+                              (small_h + block_dim[1] - 1) // block_dim[1])
+
+            self.resize_kernel(
+                grid_dim_small, block_dim,
+                (frame_gpu, self.yy_small_frame, w, h, small_w, small_h)
+            )
+
+            # Step 2: Downscale mask (GPU)
+            self.mask_resize_kernel(
+                grid_dim_small, block_dim,
+                (skin_mask_gpu, self.yy_small_mask, w, h, small_w, small_h)
+            )
+
+            # Step 3: Apply Bilateral Filter on small image (GPU)
+            # sigma_spatial: smoothing range (10-20), sigma_color: edge preservation (25-40)
+            sigma_spatial = 10.0 + skin_strength * 10.0  # 10 ~ 20
+            sigma_color = 25.0 + skin_strength * 15.0    # 25 ~ 40
+
+            self.bilateral_kernel(
+                grid_dim_small, block_dim,
+                (self.yy_small_frame, self.yy_smoothed_small, self.yy_small_mask,
+                 small_w, small_h,
+                 cp.float32(sigma_spatial), cp.float32(sigma_color))
+            )
+
+            # Step 4: Upscale smoothed result to full size (GPU)
+            grid_dim_full = ((w + block_dim[0] - 1) // block_dim[0],
+                             (h + block_dim[1] - 1) // block_dim[1])
+
+            self.resize_kernel(
+                grid_dim_full, block_dim,
+                (self.yy_smoothed_small, self.yy_smoothed_full, small_w, small_h, w, h)
+            )
+
+            # Step 5: Final blend with color grading (GPU)
+            result_gpu = cp.empty_like(frame_gpu)
+            blend_strength = skin_strength * 0.9  # Max 90% blend
+
+            self.blend_kernel(
+                grid_dim_full, block_dim,
+                (frame_gpu, self.yy_smoothed_full, skin_mask_gpu, result_gpu,
+                 w, h,
+                 cp.float32(blend_strength),
+                 cp.float32(color_temp),
+                 cp.float32(color_tint))
+            )
+
+            frame_gpu = result_gpu
+
+        # ===== Skin Tone (GPU) =====
+        elif has_tone or has_color:
+            # Apply color grading without smoothing
+            result_gpu = cp.empty_like(frame_gpu)
+            grid_dim = ((w + 15) // 16, (h + 15) // 16)
+
+            self.blend_kernel(
+                grid_dim, (16, 16),
+                (frame_gpu, frame_gpu, skin_mask_gpu, result_gpu,
+                 w, h,
+                 cp.float32(0.0),  # No smoothing blend
+                 cp.float32(color_temp),
+                 cp.float32(color_tint))
+            )
+            frame_gpu = result_gpu
+
+        return frame_gpu, skin_mask_gpu
+
+    # ==========================================================================
     # Legacy Skin Processing (기존 100% 유지)
     # ==========================================================================
     def _process_skin_legacy(self, frame_gpu, landmarks, params, w, h):
@@ -595,8 +746,8 @@ class BeautyEngine:
                 raw_face = faces[0].landmarks
                 stable_face = self.face_stabilizer.update(raw_face)
 
-                # V25.0 Pipeline (always enabled)
-                source_for_warp, skin_mask_debug = self._process_skin_v25(
+                # YY-Style Pipeline (Bilateral Filter based)
+                source_for_warp, skin_mask_debug = self._process_skin_yy_style(
                     frame_gpu, stable_face, params
                 )
 
@@ -691,7 +842,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                cv2.putText(debug_img, "V25.0 Pipeline", (10, 30),
+                cv2.putText(debug_img, "YY-Style Bilateral", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)
