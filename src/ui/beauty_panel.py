@@ -1,9 +1,10 @@
 # Project MUSE - beauty_panel.py
 # Integrated UI Layout (Single Tab for all Controls)
+# Updated: Added Skin Tone Slider (Pale <-> Rosy)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGroupBox, QLabel, QCheckBox, QFrame, QScrollArea
+    QWidget, QVBoxLayout, QGroupBox, QLabel, QCheckBox, QFrame, QScrollArea, QHBoxLayout
 )
 from PySide6.QtCore import Signal, Qt
 from ui.controls.sliders import ModernSlider
@@ -11,14 +12,13 @@ from ui.controls.sliders import ModernSlider
 class BeautyPanel(QWidget):
     """
     [UI Panel] 뷰티 파라미터를 조절하는 우측 사이드바
-    Updated: 통합 탭 레이아웃 및 새로운 슬라이더 추가
+    Updated: 피부 톤 조절(Skin Tone) 추가
     """
     paramChanged = Signal(dict)
 
     def __init__(self):
         super().__init__()
         
-        # Modern Stylesheet for Panel
         self.setStyleSheet("""
             QWidget {
                 background-color: #121212;
@@ -81,13 +81,14 @@ class BeautyPanel(QWidget):
         self.current_params = {
             'eye_scale': 0.0,
             'face_v': 0.0,
-            'nose_slim': 0.0, # [New]
+            'nose_slim': 0.0,
             'head_scale': 0.0,
             'shoulder_narrow': 0.0,
             'ribcage_slim': 0.0, 
             'waist_slim': 0.0,
             'hip_widen': 0.0,
-            'skin_smooth': 0.0, # [New]
+            'skin_smooth': 0.0,
+            'skin_tone': 0.0, # [New]
             'show_body_debug': False
         }
 
@@ -115,7 +116,7 @@ class BeautyPanel(QWidget):
         
         main_layout.addWidget(header)
 
-        # 2. Scroll Area for Controls
+        # 2. Scroll Area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         
@@ -124,7 +125,7 @@ class BeautyPanel(QWidget):
         content_layout.setContentsMargins(15, 10, 15, 20)
         content_layout.setSpacing(20)
 
-        # --- Group 1: 얼굴 보정 (Face) ---
+        # --- Group 1: Face ---
         face_group = QGroupBox("얼굴 윤곽 (Face Shape)")
         f_inner = QVBoxLayout()
         f_inner.setSpacing(15)
@@ -141,7 +142,6 @@ class BeautyPanel(QWidget):
         self.slider_nose.valueChanged.connect(lambda v: self._update_param('nose_slim', v))
         f_inner.addWidget(self.slider_nose)
 
-        # [Hidden Params] - 요청에 의해 숨김 처리 (하지만 인스턴스는 유지)
         self.slider_head = ModernSlider("머리 크기", 0.0)
         self.slider_head.setVisible(False) 
         self.slider_head.valueChanged.connect(lambda v: self._update_param('head_scale', v))
@@ -150,7 +150,7 @@ class BeautyPanel(QWidget):
         face_group.setLayout(f_inner)
         content_layout.addWidget(face_group)
 
-        # --- Group 2: 전신 보정 (Body) ---
+        # --- Group 2: Body ---
         body_group = QGroupBox("체형 보정 (Body Shape)")
         b_inner = QVBoxLayout()
         b_inner.setSpacing(15)
@@ -163,7 +163,6 @@ class BeautyPanel(QWidget):
         self.slider_hip.valueChanged.connect(lambda v: self._update_param('hip_widen', v))
         b_inner.addWidget(self.slider_hip)
 
-        # [Hidden Params]
         self.slider_shoulder = ModernSlider("어깨 보정", 0.0)
         self.slider_shoulder.setVisible(False)
         self.slider_shoulder.valueChanged.connect(lambda v: self._update_param('shoulder_narrow', v))
@@ -177,14 +176,21 @@ class BeautyPanel(QWidget):
         body_group.setLayout(b_inner)
         content_layout.addWidget(body_group)
 
-        # --- Group 3: 피부 및 효과 (Skin & Effect) ---
-        skin_group = QGroupBox("피부 및 효과 (Skin & FX)")
+        # --- Group 3: Skin & Tone (Updated) ---
+        skin_group = QGroupBox("피부 및 톤 (Skin & Tone)")
         s_inner = QVBoxLayout()
         s_inner.setSpacing(15)
 
-        self.slider_skin = ModernSlider("피부 보정 (Smooth)", 0.0)
+        self.slider_skin = ModernSlider("피부 결 보정", 0.0)
         self.slider_skin.valueChanged.connect(lambda v: self._update_param('skin_smooth', v))
         s_inner.addWidget(self.slider_skin)
+
+        # [New] Skin Tone Slider (Bipolar: -1.0 ~ 1.0)
+        # Custom logic needed for ModernSlider since it assumes 0~1
+        # We will map 0.0~1.0 UI to -1.0~1.0 Logic in _update_tone
+        self.slider_tone = ModernSlider("톤 (백옥 <> 생기)", 0.5) # Default 0.5 (Neutral)
+        self.slider_tone.valueChanged.connect(self._update_tone)
+        s_inner.addWidget(self.slider_tone)
 
         skin_group.setLayout(s_inner)
         content_layout.addWidget(skin_group)
@@ -208,21 +214,26 @@ class BeautyPanel(QWidget):
         self.current_params[key] = value
         self.paramChanged.emit(self.current_params)
 
+    def _update_tone(self, value):
+        # UI 0.0 ~ 1.0 -> Logic -1.0 ~ 1.0
+        # 0.5 is Neutral (0.0)
+        tone_val = (value - 0.5) * 2.0 
+        self._update_param('skin_tone', tone_val)
+
     def set_profile_info(self, profile_name):
         self.info_label.setText(f"프로파일: {profile_name.upper()}")
 
     def update_sliders_from_config(self, params):
         self.blockSignals(True)
-        # Block Children Signals
         sliders = [
             self.slider_eye, self.slider_chin, self.slider_nose,
             self.slider_head, self.slider_shoulder, self.slider_ribcage, 
-            self.slider_waist, self.slider_hip, self.slider_skin
+            self.slider_waist, self.slider_hip, self.slider_skin, self.slider_tone
         ]
         for s in sliders: s.blockSignals(True)
         self.chk_body_debug.blockSignals(True)
 
-        # Map Params to Sliders
+        # Map Params
         if 'eye_scale' in params: self.slider_eye.set_value(params['eye_scale'])
         if 'face_v' in params: self.slider_chin.set_value(params['face_v'])
         if 'nose_slim' in params: self.slider_nose.set_value(params['nose_slim'])
@@ -234,6 +245,11 @@ class BeautyPanel(QWidget):
         if 'ribcage_slim' in params: self.slider_ribcage.set_value(params['ribcage_slim'])
         
         if 'skin_smooth' in params: self.slider_skin.set_value(params['skin_smooth'])
+        
+        if 'skin_tone' in params:
+            # Logic -1.0~1.0 -> UI 0.0~1.0
+            ui_val = (params['skin_tone'] / 2.0) + 0.5
+            self.slider_tone.set_value(ui_val)
         
         if 'show_body_debug' in params: 
             self.chk_body_debug.setChecked(bool(params['show_body_debug']))

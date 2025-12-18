@@ -1,6 +1,8 @@
 # Project MUSE - engine_loop.py
 # V5 Architecture: The Guided High-Res Flow (Debug Enhanced)
 # Updated: Phase 3 High-Precision LoRA Mode Support
+# Updated: Simplified Debug Skeleton (Torso Only)
+# Updated: Verbose Debug Logging for Pipeline Analysis
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import time
@@ -121,6 +123,8 @@ class BeautyWorker(QThread):
         print("[ENGINE] >>> Entering Main Loop <<<")
 
         while self.running:
+            loop_start_ts = time.perf_counter()
+
             # [Check Profile Switch]
             if self.pending_profile_index >= 0:
                 self._execute_profile_switch(self.pending_profile_index)
@@ -174,6 +178,13 @@ class BeautyWorker(QThread):
             self.beauty_engine.bg_gpu = clean_bg 
             
             t_beauty_start = time.perf_counter()
+            # [DEBUG] Beauty Engine Inputs Logging (Throttled)
+            if frame_count % 30 == 0:
+                skin_val = current_params.get('skin_smooth', 0.0)
+                face_detected = "YES" if faces else "NO"
+                kp_detected = "YES" if keypoints is not None else "NO"
+                print(f"[DEBUG-B] Param(Skin): {skin_val:.2f}, Face: {face_detected}, Body: {kp_detected}")
+
             frame_out_gpu = self.beauty_engine.process(
                 frame_gpu, 
                 faces=faces, 
@@ -197,7 +208,7 @@ class BeautyWorker(QThread):
                     else:
                         debug_frame_cpu = frame_out_gpu.copy()
                     
-                    # Draw Skeleton
+                    # Draw Skeleton (Torso Only)
                     self._draw_skeleton(debug_frame_cpu, keypoints)
                     
                     # CPU -> GPU (Warning: Performance overhead)
@@ -225,6 +236,12 @@ class BeautyWorker(QThread):
             acc_ai += t_ai_ms
             acc_beauty += t_beauty_ms
             acc_write += t_write_ms
+
+            # [DEBUG] Latency Warning
+            loop_end_ts = time.perf_counter()
+            total_loop_ms = (loop_end_ts - loop_start_ts) * 1000.0
+            if total_loop_ms > 100.0 and frame_count % 30 == 0:
+                 print(f"[WARN-LAG] High Latency Detected: {total_loop_ms:.1f}ms (Beauty: {t_beauty_ms:.1f}ms)")
 
             frame_count += 1
             curr_time = time.time()
@@ -255,17 +272,19 @@ class BeautyWorker(QThread):
 
     def _draw_skeleton(self, img, keypoints):
         """
-        Draw COCO 17 Keypoints skeleton on image.
+        Draw COCO 17 Keypoints (Simplified: Torso Only)
         keypoints: (17, 3) [x, y, conf]
         """
+        # [Modified] Only draw Shoulder (5,6) and Hip (11,12) connections
         edges = [
-            (0, 1), (0, 2), (1, 3), (2, 4), # Face
-            (5, 6), (5, 7), (7, 9), # Left Arm
-            (6, 8), (8, 10), # Right Arm
-            (5, 11), (6, 12), (11, 12), # Body
-            (11, 13), (13, 15), # Left Leg
-            (12, 14), (14, 16) # Right Leg
+            (5, 6),   # Shoulders
+            (11, 12), # Hips
+            (5, 11),  # Left Torso
+            (6, 12)   # Right Torso
         ]
+        
+        # Only these points will be drawn
+        target_indices = [5, 6, 11, 12]
         
         c_point = (0, 255, 0)
         c_line = (255, 255, 0)
@@ -273,10 +292,11 @@ class BeautyWorker(QThread):
         if keypoints is None: return
 
         # Draw Points
-        for i in range(len(keypoints)):
+        for i in target_indices:
+            if i >= len(keypoints): continue
             x, y, conf = keypoints[i]
             if conf > 0.4:
-                cv2.circle(img, (int(x), int(y)), 4, c_point, -1)
+                cv2.circle(img, (int(x), int(y)), 6, c_point, -1)
 
         # Draw Lines
         for i, j in edges:
@@ -286,7 +306,7 @@ class BeautyWorker(QThread):
             x2, y2, c2 = keypoints[j]
             
             if c1 > 0.4 and c2 > 0.4:
-                cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), c_line, 2)
+                cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), c_line, 3)
 
     def _execute_bg_capture(self, frame_gpu):
         if frame_gpu is None: return

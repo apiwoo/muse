@@ -1,5 +1,6 @@
 # Project MUSE - facemesh.py
 # Target: MediaPipe Migration (Lightweight & High Detail)
+# Updated: Added Eyebrows & Lips indices for Exclusion Zones
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -14,9 +15,14 @@ class FaceMesh:
         "EYE_L": [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 144, 145, 153],
         "EYE_R": [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390],
         
-        # [턱 라인] (V라인 성형용) - 인덱스 보강
-        # 귀(234) -> 턱끝(152) -> 귀(454) 이어지는 전체 외곽선
-        # 이전보다 포인트를 더 촘촘하게 배치하여 울퉁불퉁함 방지
+        # [New] 눈썹 (Eyebrows) - 보호 구역 설정을 위해 추가
+        "BROW_L": [70, 63, 105, 66, 107, 55, 65, 52, 53, 46],
+        "BROW_R": [336, 296, 334, 293, 300, 276, 283, 282, 295, 285],
+
+        # [New] 입술 (Lips) - 보호 구역 설정을 위해 추가 (외곽선 위주)
+        "LIPS": [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 267, 185, 40, 39, 37, 0],
+
+        # [턱 라인] (V라인 성형용)
         "JAW_L": [
             234, 93, 132, 58, 172, 136, 150, 149, 176, 148, 152
         ],
@@ -26,9 +32,8 @@ class FaceMesh:
         
         # [코] (중심점 및 콧볼)
         "NOSE_TIP": [1],
-        # [New] 콧볼 축소를 위한 좌우 콧볼 인덱스
-        "NOSE_WING_L": [279], # 왼쪽 콧볼 바깥쪽
-        "NOSE_WING_R": [49],  # 오른쪽 콧볼 바깥쪽
+        "NOSE_WING_L": [279], 
+        "NOSE_WING_R": [49],  
     }
 
     def __init__(self, root_dir=None):

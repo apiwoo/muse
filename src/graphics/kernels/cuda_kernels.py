@@ -1,10 +1,10 @@
 # Project MUSE - cuda_kernels.py
 # High-Fidelity Kernels (Alpha Blending & TPS Warping)
 # Updated: Topology Protection V21 (Intrusion Logic Fix)
-# Added: Skin Smoothing Kernel (Bilateral-like)
+# Added: Smart Skin Smoothing (Tone Blending & Exact Feature Protection)
 # (C) 2025 MUSE Corp. All rights reserved.
 
-# [Kernel 1] Grid Generation (TPS Logic) - 유지
+# [Kernel 1] Grid Generation (TPS Logic)
 WARP_KERNEL_CODE = r'''
 extern "C" __global__
 void warp_kernel(
@@ -57,7 +57,6 @@ void warp_kernel(
 '''
 
 # [Kernel 2] Smart Composite (Intrusion Handling)
-# "워핑에 의해 침범된 영역(Slimming Zone)"과 "단순 오류(Ghosting)"를 구분.
 COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void composite_kernel(
@@ -145,15 +144,20 @@ void composite_kernel(
 }
 '''
 
-# [Kernel 3] Skin Smooth (Bilateral-like)
-# 피부 톤 보정: 엣지(색상 차이가 큰 곳)는 살리고, 평탄한 부분(잡티)만 블러링
+# [Kernel 3] Skin Smooth (Tone Blending)
+# - Re-enabled Exclusion Zones (Radius check)
+# - Tone Value: Negative=White(Whitening), Positive=Pink(Rosy)
 SKIN_SMOOTH_KERNEL_CODE = r'''
 extern "C" __global__
 void skin_smooth_kernel(
     const unsigned char* src, 
     unsigned char* dst, 
     int width, int height, 
-    float strength
+    float strength,
+    float face_cx, float face_cy, float face_rad,
+    float target_r, float target_g, float target_b,
+    float tone_val, // -1.0(White) ~ 1.0(Pink)
+    const float* exclusion_params // Array: [x,y,r] * 5 zones
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -161,14 +165,50 @@ void skin_smooth_kernel(
 
     int idx = (y * width + x) * 3;
     
-    float center_r = (float)src[idx+0];
+    float center_b = (float)src[idx+0]; // BGR
     float center_g = (float)src[idx+1];
-    float center_b = (float)src[idx+2];
+    float center_r = (float)src[idx+2];
     
-    // Config
-    int radius = 4; // 9x9 Window (Performance tradeoff)
-    float sigma_color = 25.0f; // 색상 차이 허용치 (작을수록 엣지 보존 강함)
+    // 1. Face Region Check
+    float dist_face_sq = (x - face_cx)*(x - face_cx) + (y - face_cy)*(y - face_cy);
+    bool is_inside_face = (dist_face_sq < (face_rad * face_rad));
     
+    // 2. Exclusion Zone Check (Tight Protection)
+    bool is_protected = false;
+    if (is_inside_face) {
+        for(int i=0; i<5; i++) {
+            int base = i * 3;
+            float ex = exclusion_params[base + 0];
+            float ey = exclusion_params[base + 1];
+            float er = exclusion_params[base + 2];
+            
+            float d_sq = (x - ex)*(x - ex) + (y - ey)*(y - ey);
+            if (d_sq < (er * er)) {
+                is_protected = true;
+                break;
+            }
+        }
+    }
+    
+    // 3. Color Similarity
+    float color_dist = sqrtf(
+        powf(center_r - target_r, 2) + 
+        powf(center_g - target_g, 2) + 
+        powf(center_b - target_b, 2)
+    );
+    
+    // 4. Determine Sigma (Strength)
+    float sigma_color;
+    if (is_protected) {
+        sigma_color = 0.01f; // Preserve Details
+    } else if (is_inside_face && color_dist < 80.0f) { 
+        sigma_color = 60.0f; // Skin: Strong Smooth
+    } else {
+        sigma_color = 10.0f; // Background
+    }
+    
+    // Bilateral-like Filter Logic
+    int radius = 6; 
     float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f;
     float total_w = 0.0f;
     
@@ -179,31 +219,50 @@ void skin_smooth_kernel(
             
             if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                 int n_idx = (ny * width + nx) * 3;
-                float nr = (float)src[n_idx+0];
+                float nb = (float)src[n_idx+0];
                 float ng = (float)src[n_idx+1];
-                float nb = (float)src[n_idx+2];
+                float nr = (float)src[n_idx+2];
                 
-                // Color Distance (Manhattan)
                 float diff = fabsf(nr - center_r) + fabsf(ng - center_g) + fabsf(nb - center_b);
-                
-                // Weight Calculation (Similarity)
                 float weight = expf(-diff / sigma_color);
                 
-                sum_r += nr * weight;
-                sum_g += ng * weight;
                 sum_b += nb * weight;
+                sum_g += ng * weight;
+                sum_r += nr * weight;
                 total_w += weight;
             }
         }
     }
     
-    float smooth_r = sum_r / total_w;
-    float smooth_g = sum_g / total_w;
     float smooth_b = sum_b / total_w;
+    float smooth_g = sum_g / total_w;
+    float smooth_r = sum_r / total_w;
     
-    // Mix based on user strength parameter (0.0 ~ 1.0)
-    dst[idx+0] = (unsigned char)(center_r * (1.0f - strength) + smooth_r * strength);
-    dst[idx+1] = (unsigned char)(center_g * (1.0f - strength) + smooth_g * strength);
-    dst[idx+2] = (unsigned char)(center_b * (1.0f - strength) + smooth_b * strength);
+    // 5. Tone Correction (Bipolar Mixing)
+    if (is_inside_face && !is_protected && color_dist < 80.0f && fabsf(tone_val) > 0.05f) {
+        float mix_factor;
+        float tr, tg, tb;
+        
+        if (tone_val > 0.0f) {
+            // Rosy (Pinkish) Target: (255, 215, 225)
+            tr = 255.0f; tg = 215.0f; tb = 225.0f;
+            mix_factor = tone_val * 0.4f; // Max 40% mix
+        } else {
+            // Whitening (Pale) Target: (255, 255, 255) -> Increase Brightness
+            tr = 255.0f; tg = 255.0f; tb = 255.0f;
+            mix_factor = -tone_val * 0.3f; // Max 30% mix
+        }
+        
+        smooth_r = smooth_r * (1.0f - mix_factor) + tr * mix_factor;
+        smooth_g = smooth_g * (1.0f - mix_factor) + tg * mix_factor;
+        smooth_b = smooth_b * (1.0f - mix_factor) + tb * mix_factor;
+    }
+    
+    // Only apply if strong enough
+    float effective_strength = is_protected ? 0.0f : strength;
+    
+    dst[idx+0] = (unsigned char)(center_b * (1.0f - effective_strength) + smooth_b * effective_strength);
+    dst[idx+1] = (unsigned char)(center_g * (1.0f - effective_strength) + smooth_g * effective_strength);
+    dst[idx+2] = (unsigned char)(center_r * (1.0f - effective_strength) + smooth_r * effective_strength);
 }
 '''

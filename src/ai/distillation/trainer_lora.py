@@ -1,7 +1,7 @@
 # Project MUSE - trainer_lora.py
 # High-Precision LoRA Trainer (Universal: Seg & Pose)
 # Updated: Support for MODNet (Seg) and ViTPose (Pose)
-# Updated v1.2: Fatal Error on Base Model Load Failure
+# Updated v1.3: Fix Resolution Mismatch (Upsample Preds)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -9,6 +9,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F # [Fix] Added for interpolate
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import glob
@@ -86,6 +87,11 @@ class LoRATrainer:
                 if self.task == 'pose':
                     heatmaps = heatmaps.to(self.device)
                     preds = model(imgs)
+                    
+                    # [Fix] Handle Resolution Mismatch
+                    # ViTPose Output (1/4 Scale) vs Dataset Heatmap (Full Scale)
+                    if preds.shape[-2:] != heatmaps.shape[-2:]:
+                        preds = F.interpolate(preds, size=heatmaps.shape[-2:], mode='bilinear', align_corners=False)
                     
                     # Weighted MSE for Pose (Shoulder/Hip focus)
                     weights = torch.ones(17, device=self.device)
