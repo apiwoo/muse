@@ -94,6 +94,15 @@ class MaskManager:
     - Handles face oval and exclusion zones (eyes, brows, lips)
     - GPU-accelerated mask generation
     """
+
+    # 클래스 레벨 인덱스 (FaceMesh 인스턴스 생성 없이 직접 참조)
+    FACE_OVAL_INDICES = FaceMesh.FACE_INDICES.get("FACE_OVAL", [])
+    EYE_L_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_L_POLY", FaceMesh.FACE_INDICES.get("EYE_L", []))
+    EYE_R_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_R_POLY", FaceMesh.FACE_INDICES.get("EYE_R", []))
+    BROW_L_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_L_POLY", FaceMesh.FACE_INDICES.get("BROW_L", []))
+    BROW_R_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_R_POLY", FaceMesh.FACE_INDICES.get("BROW_R", []))
+    LIPS_INDICES = FaceMesh.POLYGON_INDICES.get("LIPS_OUTER_POLY", FaceMesh.FACE_INDICES.get("LIPS", []))
+
     def __init__(self):
         self.skin_mask_gpu = None
         self.soft_mask_gpu = None
@@ -134,17 +143,21 @@ class MaskManager:
         else:
             self.skin_mask_gpu.fill(0)
 
-        # Get polygon data from FaceMesh
-        face_oval = FaceMesh().get_face_polygon(landmarks, "FACE_OVAL")
-        exclusions = FaceMesh().get_exclusion_polygons(landmarks)
+        # Get polygon data using class-level indices (no FaceMesh instantiation)
+        face_oval = landmarks[self.FACE_OVAL_INDICES].astype(np.float32)
+        eye_l = landmarks[self.EYE_L_INDICES].astype(np.float32)
+        eye_r = landmarks[self.EYE_R_INDICES].astype(np.float32)
+        brow_l = landmarks[self.BROW_L_INDICES].astype(np.float32)
+        brow_r = landmarks[self.BROW_R_INDICES].astype(np.float32)
+        lips = landmarks[self.LIPS_INDICES].astype(np.float32)
 
         # Flatten vertex arrays for GPU
-        face_verts = face_oval.flatten().astype(np.float32)
-        eye_l_verts = exclusions['eye_l'].flatten().astype(np.float32)
-        eye_r_verts = exclusions['eye_r'].flatten().astype(np.float32)
-        brow_l_verts = exclusions['brow_l'].flatten().astype(np.float32)
-        brow_r_verts = exclusions['brow_r'].flatten().astype(np.float32)
-        lips_verts = exclusions['lips'].flatten().astype(np.float32)
+        face_verts = face_oval.flatten()
+        eye_l_verts = eye_l.flatten()
+        eye_r_verts = eye_r.flatten()
+        brow_l_verts = brow_l.flatten()
+        brow_r_verts = brow_r.flatten()
+        lips_verts = lips.flatten()
 
         # Transfer to GPU
         face_gpu = cp.asarray(face_verts)
@@ -163,11 +176,11 @@ class MaskManager:
             grid_dim, block_dim,
             (self.skin_mask_gpu,
              face_gpu, len(face_oval),
-             eye_l_gpu, len(exclusions['eye_l']),
-             eye_r_gpu, len(exclusions['eye_r']),
-             brow_l_gpu, len(exclusions['brow_l']),
-             brow_r_gpu, len(exclusions['brow_r']),
-             lips_gpu, len(exclusions['lips']),
+             eye_l_gpu, len(eye_l),
+             eye_r_gpu, len(eye_r),
+             brow_l_gpu, len(brow_l),
+             brow_r_gpu, len(brow_r),
+             lips_gpu, len(lips),
              w, h, cp.float32(1.1))  # 1.1 = 10% padding for exclusions
         )
 
