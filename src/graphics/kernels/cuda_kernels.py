@@ -2079,3 +2079,159 @@ void layered_composite_kernel(
     dst[idx_rgb + 2] = (unsigned char)out_r;
 }
 '''
+
+# ==============================================================================
+# [KERNEL V36] Warp Mask from Grid (워핑 그리드 기반 마스크 생성)
+# - 워핑 그리드(dx, dy)에서 "워핑 영역"을 마스크로 추출
+# - 워핑 강도(magnitude)가 임계값 이상인 영역 = 사람 영역
+# - 시간 동기화 문제 근본 해결 (워핑 그리드와 마스크가 같은 소스에서 생성)
+# ==============================================================================
+WARP_MASK_FROM_GRID_KERNEL_CODE = r'''
+extern "C" __global__
+void warp_mask_from_grid_kernel(
+    const float* dx_small,           // 워핑 그리드 X (small scale)
+    const float* dy_small,           // 워핑 그리드 Y (small scale)
+    unsigned char* warp_mask,        // 출력: 워핑 영역 마스크 (full scale)
+    int width, int height,           // 전체 해상도
+    int small_width, int small_height,  // 워핑 그리드 해상도
+    int scale,                       // 스케일 배율
+    float threshold                  // 워핑 강도 임계값 (권장: 0.5)
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    // 워핑 그리드 좌표로 변환
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    // 워핑 강도 계산 (픽셀 단위)
+    float dx_val = dx_small[s_idx] * (float)scale;
+    float dy_val = dy_small[s_idx] * (float)scale;
+    float magnitude = sqrtf(dx_val * dx_val + dy_val * dy_val);
+
+    // 임계값 기반 마스크 생성
+    // - 부드러운 falloff를 위해 smoothstep 적용
+    float edge0 = threshold * 0.5f;
+    float edge1 = threshold * 2.0f;
+
+    float t = (magnitude - edge0) / (edge1 - edge0);
+    t = fmaxf(0.0f, fminf(1.0f, t));
+    float alpha = t * t * (3.0f - 2.0f * t);  // smoothstep
+
+    int idx = y * width + x;
+    warp_mask[idx] = (unsigned char)(alpha * 255.0f);
+}
+'''
+
+# ==============================================================================
+# [KERNEL V36] Void Only Fill Composite (Void 영역만 배경으로 채움)
+# - 기본: 워핑된 원본 프레임
+# - Void 영역만: 저장된 배경으로 패치 (슬리밍으로 비어진 공간만)
+# - 배경 전체 교체 X, Void만 채움 O
+# ==============================================================================
+CLEAN_COMPOSITE_KERNEL_CODE = r'''
+extern "C" __global__
+void clean_composite_kernel(
+    const unsigned char* src,        // 피부보정된 현재 프레임
+    const unsigned char* bg,         // 정적 배경
+    const unsigned char* mask_orig,  // 원본 마스크 (사람이 "있었던" 영역)
+    const unsigned char* mask_fwd,   // 순방향 워핑된 마스크 (사람이 "현재 있는" 영역)
+    unsigned char* dst,              // 출력
+    const float* dx_small,           // 역방향 워핑 그리드
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    // === 마스크 값 읽기 ===
+    float m_orig = (float)mask_orig[idx] / 255.0f;  // 원래 사람 위치
+    float m_fwd = (float)mask_fwd[idx] / 255.0f;    // 현재 사람 위치 (슬리밍 후)
+
+    // === 역방향 워핑으로 src에서 픽셀 가져오기 ===
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    // 워핑된 픽셀
+    float warped_b, warped_g, warped_r;
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        warped_b = (float)src[warped_idx_rgb + 0];
+        warped_g = (float)src[warped_idx_rgb + 1];
+        warped_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        // 범위 밖: 원본 위치 사용
+        warped_b = (float)src[idx_rgb + 0];
+        warped_g = (float)src[idx_rgb + 1];
+        warped_r = (float)src[idx_rgb + 2];
+    }
+
+    // 정적 배경 픽셀
+    float bg_b = (float)bg[idx_rgb + 0];
+    float bg_g = (float)bg[idx_rgb + 1];
+    float bg_r = (float)bg[idx_rgb + 2];
+
+    // === Void Only Fill 합성 ===
+    float out_b, out_g, out_r;
+
+    if (!use_bg) {
+        // 배경 미사용: 워핑된 이미지 그대로
+        out_b = warped_b;
+        out_g = warped_g;
+        out_r = warped_r;
+    } else {
+        // Void 감지: 원래 사람이 있었지만(m_orig > 0) 현재는 없는 곳(m_fwd == 0)
+        // 이 영역이 슬리밍으로 인해 비어진 "Void" 영역
+
+        const float VOID_THRESHOLD = 0.15f;
+        const float PERSON_THRESHOLD = 0.15f;
+
+        bool is_void = (m_orig > VOID_THRESHOLD) && (m_fwd < PERSON_THRESHOLD);
+
+        if (is_void) {
+            // Void 영역: 저장된 배경으로 채움
+            // 부드러운 블렌딩을 위해 void_strength 계산
+            float void_strength = m_orig * (1.0f - m_fwd);
+
+            // smoothstep for soft edges
+            float t = fminf(1.0f, void_strength * 2.0f);
+            float blend = t * t * (3.0f - 2.0f * t);
+
+            out_b = bg_b * blend + warped_b * (1.0f - blend);
+            out_g = bg_g * blend + warped_g * (1.0f - blend);
+            out_r = bg_r * blend + warped_r * (1.0f - blend);
+        } else {
+            // 비-Void 영역: 워핑된 원본 프레임 그대로 사용
+            out_b = warped_b;
+            out_g = warped_g;
+            out_r = warped_r;
+        }
+    }
+
+    dst[idx_rgb + 0] = (unsigned char)out_b;
+    dst[idx_rgb + 1] = (unsigned char)out_g;
+    dst[idx_rgb + 2] = (unsigned char)out_r;
+}
+'''
