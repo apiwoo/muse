@@ -94,6 +94,12 @@ class BeautyWorker(QThread):
             self.bg_manager = AdaptiveBackground(self.WIDTH, self.HEIGHT)
             print(f"[ENGINE] Initializing Beauty Engine...")
             self.beauty_engine = BeautyEngine(profiles=self.profiles)
+
+            # [V35] AI 마스크 지연 프레임 수 설정 (잔상 제거의 핵심)
+            # - 일반적으로 1~2프레임 (GPU 성능에 따라 조절)
+            # - 지연이 클수록 더 과거 프레임과 매칭하여 잔상 제거
+            # - 너무 크면 반응이 느려지므로 1~2 권장
+            self.beauty_engine.ai_latency_frames = 1
             
             # [Load] Initial Assets
             print(f"[ENGINE] Loading Initial Assets...")

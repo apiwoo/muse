@@ -62,6 +62,38 @@ void warp_kernel(
 '''
 
 # ==============================================================================
+# [KERNEL 1.5] Displacement Grid Modulation (V34 - Background Warp Prevention)
+# - 인물 마스크(Alpha)를 dx, dy 그리드에 곱하여 배경 영역 변위를 0으로 고정
+# - 배경 왜곡(Bending) 원천 차단
+# - 마스크 경계면 블러링 필요 (호출 전 적용)
+# ==============================================================================
+MODULATE_DISPLACEMENT_KERNEL_CODE = r'''
+extern "C" __global__
+void modulate_displacement_kernel(
+    float* dx,                       // In/Out: X 변위 맵 (small scale)
+    float* dy,                       // In/Out: Y 변위 맵 (small scale)
+    const unsigned char* mask,       // 인물 마스크 (small scale로 리사이즈됨, 0-255)
+    int small_width, int small_height
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= small_width || y >= small_height) return;
+
+    int idx = y * small_width + x;
+
+    // 마스크 값을 0.0 ~ 1.0 범위로 변환
+    float alpha = (float)mask[idx] / 255.0f;
+
+    // 변위 그리드에 마스크를 곱함
+    // alpha = 1.0 (사람 영역): 변위 유지
+    // alpha = 0.0 (배경 영역): 변위 = 0 (워핑 차단)
+    dx[idx] *= alpha;
+    dy[idx] *= alpha;
+}
+'''
+
+# ==============================================================================
 # [KERNEL 2] Smart Composite (Intrusion Handling) - 기존 100% 유지
 # ==============================================================================
 COMPOSITE_KERNEL_CODE = r'''
@@ -1830,19 +1862,19 @@ void simple_composite_kernel(
 
 
 # ==============================================================================
-# [KERNEL 20] Void Fill Composite (V33 - Chromatic Ghost Guard + 3x3 Max Dilate)
-# - 원본 배경 유지 + Void(슬리밍 빈 공간)만 배경 패치 + 워핑된 사람
-# - [V33] Chromatic Ghost Guard: 피부색 감지로 몸 안쪽 배경 침투 차단
-# - [V33] 3x3 Max Dilate: 마스크 마진 2px 물리적 확장
-# - [V31] 3x3 Erosion Guard + smoothstep + pow4 유지
+# [KERNEL 20] Void Fill Composite (V35 - Clean Triple-Layer)
+# - Layer 1 (Bottom): 동기화된 원본 프레임 (자연스러운 노이즈/조명 유지)
+# - Layer 2 (Middle): 정적 배경 - 오직 "슬리밍으로 비워진 공간(Void)"에만 노출
+# - Layer 3 (Top): 워핑된 인물 영역
+# - 핵심: 배경 전체를 교체하지 않고 Void만 정적 배경으로 채움 → Floating 해결
 # ==============================================================================
 VOID_FILL_COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
 void void_fill_composite_kernel(
-    const unsigned char* src,        // 원본 이미지 (Bottom - 배경 베이스)
-    const unsigned char* bg,         // 준비된 정적 배경 (Middle - Void 패치용)
-    const unsigned char* mask_orig,  // 동기화된 원본 마스크 (안정화됨)
-    const unsigned char* mask_fwd,   // 순방향 워핑된 마스크 (수축된 사람 영역)
+    const unsigned char* src,        // 동기화된 원본 프레임 (Layer 1 - Bottom)
+    const unsigned char* bg,         // 정적 배경 Clean Plate (Layer 2 - Void 전용)
+    const unsigned char* mask_orig,  // 동기화된 원본 마스크 (사람이 "있었던" 영역)
+    const unsigned char* mask_fwd,   // 순방향 워핑된 마스크 (사람이 "현재 있는" 영역)
     unsigned char* dst,              // 출력
     const float* dx_small,           // 역방향 워핑 그리드
     const float* dy_small,
@@ -1859,39 +1891,12 @@ void void_fill_composite_kernel(
     int idx = y * width + x;
     int idx_rgb = idx * 3;
 
-    float m_fwd = (float)mask_fwd[idx] / 255.0f;
-    float m_orig = (float)mask_orig[idx] / 255.0f;
+    // === 마스크 값 읽기 ===
+    float m_fwd = (float)mask_fwd[idx] / 255.0f;   // 현재 사람 위치
+    float m_orig = (float)mask_orig[idx] / 255.0f; // 원래 사람 위치
 
-    // === [V33] 3x3 Max Dilate + Erosion Guard ===
-    // 마스크 마진을 2px 물리적으로 확장하여 경계면 보호
-    float max_neighbor_fwd = m_fwd;
-    float min_neighbor_fwd = m_fwd;
-    bool is_near_edge = false;
-
-    for (int dy_off = -1; dy_off <= 1; dy_off++) {
-        for (int dx_off = -1; dx_off <= 1; dx_off++) {
-            if (dx_off == 0 && dy_off == 0) continue;
-
-            int nx = x + dx_off;
-            int ny = y + dy_off;
-
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                float neighbor_fwd = (float)mask_fwd[ny * width + nx] / 255.0f;
-                max_neighbor_fwd = fmaxf(max_neighbor_fwd, neighbor_fwd);
-                min_neighbor_fwd = fminf(min_neighbor_fwd, neighbor_fwd);
-
-                // 주변에 배경(0.1 미만)이 있으면 경계
-                if (neighbor_fwd < 0.1f) {
-                    is_near_edge = true;
-                }
-            }
-        }
-    }
-
-    // [V33] 3x3 Max로 마스크 확장 (2px 마진)
-    float m_fwd_dilated = max_neighbor_fwd;
-
-    // --- 역방향 워핑으로 전경 이미지 가져오기 ---
+    // === 역방향 워핑으로 전경(인물) 샘플링 ===
+    // 중요: 동기화된 원본 프레임(src)에서 샘플링해야 잔상이 안 생김
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -1904,7 +1909,7 @@ void void_fill_composite_kernel(
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
-    // 워핑된 전경 픽셀
+    // 워핑된 전경 픽셀 (동기화된 src에서 샘플링)
     float fg_b, fg_g, fg_r;
     if (u >= 0 && u < width && v >= 0 && v < height) {
         int warped_idx_rgb = (v * width + u) * 3;
@@ -1912,6 +1917,7 @@ void void_fill_composite_kernel(
         fg_g = (float)src[warped_idx_rgb + 1];
         fg_r = (float)src[warped_idx_rgb + 2];
     } else {
+        // 범위 밖: 원본 위치 사용
         fg_b = (float)src[idx_rgb + 0];
         fg_g = (float)src[idx_rgb + 1];
         fg_r = (float)src[idx_rgb + 2];
@@ -1926,78 +1932,147 @@ void void_fill_composite_kernel(
     float bg_g = (float)bg[idx_rgb + 1];
     float bg_r = (float)bg[idx_rgb + 2];
 
-    // === [V33] Chromatic Ghost Guard ===
-    // 피부색 영역에 배경이 침투하는 것을 색상 비교로 차단
-    // YCrCb 색공간에서 피부색 범위 검사 (간략화된 RGB 근사)
-
-    // 1. RGB를 YCrCb 근사로 변환 (피부색 검출용)
-    float Y_src = 0.299f * src_r + 0.587f * src_g + 0.114f * src_b;
-    float Cr_src = (src_r - Y_src) * 0.713f + 128.0f;
-    float Cb_src = (src_b - Y_src) * 0.564f + 128.0f;
-
-    // 2. 피부색 범위 검사 (Cr: 133~173, Cb: 77~127)
-    bool is_skin_color = (Cr_src >= 130.0f && Cr_src <= 180.0f &&
-                          Cb_src >= 70.0f && Cb_src <= 135.0f &&
-                          Y_src >= 50.0f);  // 너무 어두운 색 제외
-
-    // 3. 원본과 배경의 색상 거리 계산
-    float color_dist = sqrtf(
-        (src_r - bg_r) * (src_r - bg_r) +
-        (src_g - bg_g) * (src_g - bg_g) +
-        (src_b - bg_b) * (src_b - bg_b)
-    );
-
-    // 4. Chromatic Guard 활성화 조건:
-    //    - 원본이 피부색이고, 배경과 색상 차이가 크면(>40) 배경 패치 차단
-    bool chromatic_guard = (is_skin_color && color_dist > 40.0f);
-
-    // === [V33] 개선된 트리플 레이어 합성 ===
+    // === [V35] 클린 트리플 레이어 합성 ===
     float out_b, out_g, out_r;
 
+    // 임계값 정의
+    const float PERSON_THRESHOLD = 0.15f;  // 사람 영역 판정 임계값
+    const float VOID_THRESHOLD = 0.10f;    // Void 판정 임계값
+
     if (!use_bg) {
+        // 배경 미사용: 단순 워핑만 적용
         out_b = fg_b;
         out_g = fg_g;
         out_r = fg_r;
     }
-    else if (m_fwd_dilated > 0.1f && !is_near_edge) {
-        // [Top Layer] 확실한 사람 영역 (확장된 마스크 기준)
+    else if (m_fwd > PERSON_THRESHOLD) {
+        // === [Layer 3 - Top] 사람 영역 ===
+        // mask_fwd가 있는 곳 = 현재 사람이 있는 위치
+        // → 워핑된 전경(fg) 출력
         out_b = fg_b;
         out_g = fg_g;
         out_r = fg_r;
     }
-    else if (chromatic_guard) {
-        // [V33] Chromatic Guard: 피부색인데 배경을 넣으려 하면 차단
-        // 원본 유지 (배경 패치 완전 차단)
-        out_b = fg_b;
-        out_g = fg_g;
-        out_r = fg_r;
+    else if (m_orig > VOID_THRESHOLD && m_fwd <= PERSON_THRESHOLD) {
+        // === [Layer 2 - Middle] 슬리밍 Void 영역 ===
+        // mask_orig > 0 이지만 mask_fwd == 0
+        // = "사람이 있었으나 슬리밍으로 사라진 공간"
+        // → 정적 배경(bg)으로 채움 (Bending 해결)
+
+        // Void 강도 계산: 원래 마스크값이 높을수록 확실한 Void
+        float void_strength = m_orig;
+
+        // 부드러운 블렌딩 (경계면 자연스럽게)
+        // smoothstep으로 부드러운 전환
+        float t = (void_strength - VOID_THRESHOLD) / (0.5f - VOID_THRESHOLD);
+        t = fmaxf(0.0f, fminf(1.0f, t));
+        float blend = t * t * (3.0f - 2.0f * t);  // smoothstep
+
+        out_b = bg_b * blend + src_b * (1.0f - blend);
+        out_g = bg_g * blend + src_g * (1.0f - blend);
+        out_r = bg_r * blend + src_r * (1.0f - blend);
     }
     else {
-        // [Middle/Bottom Layer] 보이드 또는 경계 영역
-        float void_diff = fmaxf(m_orig - m_fwd_dilated, 0.0f);
-
-        // [V31] Erosion Guard 적용: 경계에서는 배경 합성 강도 감소
-        if (is_near_edge) {
-            void_diff *= 0.5f;
-        }
-
-        // [V31] smoothstep(0.12, 0.40) + pow4 조합
-        float edge0 = 0.12f;
-        float edge1 = 0.40f;
-
-        float t = (void_diff - edge0) / (edge1 - edge0);
-        t = fmaxf(0.0f, fminf(1.0f, t));
-        float smooth_void = t * t * (3.0f - 2.0f * t);
-
-        // pow4로 추가 감쇠
-        float void_alpha = powf(smooth_void, 4.0f);
-        void_alpha = fminf(void_alpha, 1.0f);
-
-        // 합성
-        out_b = bg_b * void_alpha + src_b * (1.0f - void_alpha);
-        out_g = bg_g * void_alpha + src_g * (1.0f - void_alpha);
-        out_r = bg_r * void_alpha + src_r * (1.0f - void_alpha);
+        // === [Layer 1 - Bottom] 일반 배경 영역 ===
+        // 사람도 없고 Void도 아닌 순수 배경
+        // → 동기화된 원본 프레임(src) 그대로 출력
+        // (자연스러운 카메라 노이즈/조명 변화 유지 → Floating 해결)
+        out_b = src_b;
+        out_g = src_g;
+        out_r = src_r;
     }
+
+    dst[idx_rgb + 0] = (unsigned char)out_b;
+    dst[idx_rgb + 1] = (unsigned char)out_g;
+    dst[idx_rgb + 2] = (unsigned char)out_r;
+}
+'''
+
+# ==============================================================================
+# [KERNEL 20] Layered Composite (V34 - Clean 2-Layer Architecture)
+# - 정적 배경(Base) + 워핑된 인물(Top)의 단순 2레이어 구조
+# - 배경은 절대 워핑 좌표 참조 없이 정적 좌표(x, y)만 사용
+# - 인물은 역방향 워핑된 좌표(u, v)에서 샘플링
+# - Chromatic Guard 및 복잡한 에지 보정 로직 제거
+# ==============================================================================
+LAYERED_COMPOSITE_KERNEL_CODE = r'''
+extern "C" __global__
+void layered_composite_kernel(
+    const unsigned char* src,        // 워핑 대상 원본 (피부 보정 적용됨)
+    const unsigned char* bg,         // 정적 배경 (절대 워핑 안 됨)
+    const unsigned char* mask,       // 인물 마스크 (동기화됨, 0-255)
+    unsigned char* dst,              // 출력
+    const float* dx_small,           // 역방향 워핑 그리드
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    // === [BASE LAYER] 정적 배경 (항상 정적 좌표 사용) ===
+    float bg_b = (float)bg[idx_rgb + 0];
+    float bg_g = (float)bg[idx_rgb + 1];
+    float bg_r = (float)bg[idx_rgb + 2];
+
+    if (!use_bg) {
+        // 배경 미사용 시 원본 그대로 출력
+        dst[idx_rgb + 0] = src[idx_rgb + 0];
+        dst[idx_rgb + 1] = src[idx_rgb + 1];
+        dst[idx_rgb + 2] = src[idx_rgb + 2];
+        return;
+    }
+
+    // === 역방향 워핑 좌표 계산 ===
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    // === [TOP LAYER] 워핑된 인물 샘플링 ===
+    float fg_b, fg_g, fg_r;
+    float fg_alpha = 0.0f;
+
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx = v * width + u;
+        int warped_idx_rgb = warped_idx * 3;
+
+        // 워핑된 위치의 마스크 값 (인물 영역 판정)
+        fg_alpha = (float)mask[warped_idx] / 255.0f;
+
+        fg_b = (float)src[warped_idx_rgb + 0];
+        fg_g = (float)src[warped_idx_rgb + 1];
+        fg_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        // 범위 밖: 배경 사용
+        fg_b = bg_b;
+        fg_g = bg_g;
+        fg_r = bg_r;
+        fg_alpha = 0.0f;
+    }
+
+    // === 단순 2레이어 합성 ===
+    // fg_alpha = 1.0: 완전 인물 (워핑된 src 사용)
+    // fg_alpha = 0.0: 완전 배경 (정적 bg 사용)
+    // 중간값: 블렌딩
+
+    float out_b = fg_b * fg_alpha + bg_b * (1.0f - fg_alpha);
+    float out_g = fg_g * fg_alpha + bg_g * (1.0f - fg_alpha);
+    float out_r = fg_r * fg_alpha + bg_r * (1.0f - fg_alpha);
 
     dst[idx_rgb + 0] = (unsigned char)out_b;
     dst[idx_rgb + 1] = (unsigned char)out_g;

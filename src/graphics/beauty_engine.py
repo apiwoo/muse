@@ -1,9 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V33.0: Frame Sync & Chromatic Guard (하드웨어 동기화 + 색상 보호)
-# - [V33] FrameSyncBuffer: AI 마스크 지연 보상을 위한 프레임 버퍼링
-# - [V33] Adaptive WarpGridStabilizer: 속도 기반 동적 alpha (느림: 0.15, 빠름: 0.8)
-# - [V33] Chromatic Ghost Guard: 피부색 감지로 몸 안쪽 배경 침투 차단
-# - Preserved: V31 Dual-Pass, V31 3x3 Erosion Guard, V30 bg_stable, V29 High-Fidelity
+# V35.0: Triple-Layer Void Fill & Ghost Removal
+# - [V35] 트리플 레이어 합성: 원본 배경 + Void(슬리밍 빈 공간)만 정적 배경 + 워핑된 인물
+# - [V35] 동기화된 프레임을 모든 연산에 사용하여 잔상(Ghosting) 원천 차단
+# - [V35] 배경 전체 교체 대신 Void만 채워서 "떠다니는 느낌(Floating)" 해결
+# - Preserved: V34 Grid Modulation, V33 FrameSyncBuffer, V31 Dual-Pass
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -24,7 +24,9 @@ from graphics.kernels.cuda_kernels import (
     # V29: High-Fidelity Skin Smoothing (Guided Filter + LAB Color Space)
     GUIDED_FILTER_KERNEL_CODE, FAST_SKIN_SMOOTH_KERNEL_CODE, LAB_SKIN_SMOOTH_KERNEL_CODE,
     # V31: Dual-Pass Smooth Kernel (Wide/Fine 합성)
-    DUAL_PASS_SMOOTH_KERNEL_CODE
+    DUAL_PASS_SMOOTH_KERNEL_CODE,
+    # V34: Background Warp Prevention & Clean 2-Layer Composite
+    MODULATE_DISPLACEMENT_KERNEL_CODE, LAYERED_COMPOSITE_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -390,29 +392,29 @@ class MaskManager:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V33.0 Frame Sync & Chromatic Guard
+# [메인 클래스] BeautyEngine - V35.0 Triple-Layer Void Fill
 # ==============================================================================
 class BeautyEngine:
     """
-    V33.0 Beauty Processing Engine - Frame Sync & Chromatic Guard
+    V35.0 Beauty Processing Engine - Triple-Layer Void Fill
 
-    Key Changes (V33.0):
-    - FrameSyncBuffer: AI 지연 보상을 위한 프레임 버퍼링 (Trailing 현상 차단)
-    - Adaptive WarpGridStabilizer: 속도 기반 동적 alpha (느림: 0.15, 빠름: 0.8)
-    - Chromatic Ghost Guard: 색상 비교로 몸 안쪽 배경 침투 차단
+    Key Changes (V35.0):
+    - Triple-Layer Composite: 원본 배경 유지 + Void만 정적 배경 + 워핑된 인물
+    - 동기화된 프레임을 모든 연산에 사용 (잔상/Ghosting 원천 차단)
+    - 배경 전체 교체 대신 Void만 채움 (Floating 현상 해결)
 
-    Preserved from V31.0:
-    - Dual-Pass Guided Filter, Non-linear Detail Curve, Contrast Boost
-    - 3x3 Erosion Guard + smoothstep + pow4
+    Preserved from V34.0:
+    - Grid Modulation: 인물 마스크로 dx/dy 변위 그리드 마스킹
 
-    Preserved from V30.0/V29.0/V28.0:
-    - bg_stable 감쇄, High-Fidelity Skin Smoothing, Synchronized Composite
+    Preserved from V33.0:
+    - FrameSyncBuffer: AI 마스크 지연 보상을 위한 프레임 버퍼링
+    - Adaptive WarpGridStabilizer: 속도 기반 동적 alpha
 
-    Result: 완벽한 잔상 제거 + 도자기 피부 + 초선명 눈코입
+    Result: 잔상 제거 + Floating 해결 + 자연스러운 배경 노이즈 유지
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V33.0 Frame Sync Ready")
+        print("[BEAUTY] [BeautyEngine] V35.0 Triple-Layer Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -503,6 +505,10 @@ class BeautyEngine:
 
             # V28.0: Void Fill Composite (동기화된 트리플 레이어)
             self.void_fill_composite_kernel = cp.RawKernel(VOID_FILL_COMPOSITE_KERNEL_CODE, 'void_fill_composite_kernel')
+
+            # V34: Background Warp Prevention & Clean 2-Layer Composite
+            self.modulate_displacement_kernel = cp.RawKernel(MODULATE_DISPLACEMENT_KERNEL_CODE, 'modulate_displacement_kernel')
+            self.layered_composite_kernel = cp.RawKernel(LAYERED_COMPOSITE_KERNEL_CODE, 'layered_composite_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -1035,29 +1041,25 @@ class BeautyEngine:
                 self.has_bg = True
 
             # ==================================================================
-            # [V33] Frame Synchronization - AI 지연 보상
+            # [V35] Frame Synchronization - 잔상 제거의 핵심
             # - 현재 프레임을 버퍼에 저장
-            # - AI 마스크가 생성된 시점의 프레임과 매칭하여 Trailing 현상 제거
+            # - 모든 연산(워핑, 마스크, 합성)을 동기화된 과거 프레임으로 통일
+            # - 이것이 잔상(Ghosting) 해결의 핵심
             # ==================================================================
+            synced_frame = frame_gpu  # 기본값: 현재 프레임
+
             if self.frame_sync_buffer is not None:
                 # 현재 프레임을 버퍼에 저장
                 self.frame_sync_buffer.push(frame_gpu)
 
-                # AI 마스크가 있을 때만 동기화된 프레임 사용
+                # AI 마스크가 있을 때 동기화된 프레임 사용
                 if mask is not None and bg_stable:
                     # AI 지연만큼 과거 프레임 가져오기
-                    synced_frame = self.frame_sync_buffer.get_synced_frame(
+                    _synced = self.frame_sync_buffer.get_synced_frame(
                         delay_frames=self.ai_latency_frames
                     )
-                    if synced_frame is not None:
-                        # 동기화된 프레임을 source로 사용
-                        source_frame_for_composite = synced_frame
-                    else:
-                        source_frame_for_composite = frame_gpu
-                else:
-                    source_frame_for_composite = frame_gpu
-            else:
-                source_frame_for_composite = frame_gpu
+                    if _synced is not None:
+                        synced_frame = _synced
 
             # Mask handling
             # [V6] 정적 배경이 안정적일 때만 슬리밍 합성 활성화 (일렁임 방지)
@@ -1075,8 +1077,9 @@ class BeautyEngine:
 
             # ==================================================================
             # [Step 1] Skin Processing
+            # [V35] 동기화된 프레임(synced_frame)을 베이스로 사용
             # ==================================================================
-            source_for_warp = frame_gpu
+            source_for_warp = synced_frame
             skin_mask_debug = None
 
             if faces:
@@ -1084,8 +1087,9 @@ class BeautyEngine:
                 stable_face = self.face_stabilizer.update(raw_face)
 
                 # YY-Style Pipeline (Bilateral Filter based)
+                # [V35] synced_frame을 입력으로 사용하여 시점 통일
                 source_for_warp, skin_mask_debug = self._process_skin_yy_style(
-                    frame_gpu, stable_face, params
+                    synced_frame, stable_face, params
                 )
 
             # ==================================================================
@@ -1155,10 +1159,39 @@ class BeautyEngine:
                 if self.warp_grid_stabilizer is not None:
                     self.gpu_dx, self.gpu_dy = self.warp_grid_stabilizer.update(self.gpu_dx, self.gpu_dy)
 
+                # ==============================================================
+                # [V34] Grid Modulation - 배경 워핑 원천 차단
+                # - 인물 마스크를 small scale로 리사이즈
+                # - dx, dy 그리드에 마스크를 곱하여 배경 영역 변위 = 0
+                # ==============================================================
+                if use_bg and mask_gpu is not None:
+                    # 마스크를 small scale로 리사이즈
+                    mask_small_gpu = cupyx.scipy.ndimage.zoom(
+                        mask_gpu.astype(cp.float32),
+                        (sh / h, sw / w),
+                        order=1
+                    ).astype(cp.uint8)
+
+                    # [주의사항] 마스크 경계면 블러링 (너무 칼같으면 인물 외곽 잘림 방지)
+                    mask_small_blurred = cupyx.scipy.ndimage.gaussian_filter(
+                        mask_small_gpu.astype(cp.float32), sigma=2.0
+                    ).astype(cp.uint8)
+
+                    # 그리드 모듈레이션 적용
+                    small_block_dim = (16, 16)
+                    small_grid_dim = ((sw + small_block_dim[0] - 1) // small_block_dim[0],
+                                      (sh + small_block_dim[1] - 1) // small_block_dim[1])
+
+                    self.modulate_displacement_kernel(
+                        small_grid_dim, small_block_dim,
+                        (self.gpu_dx, self.gpu_dy, mask_small_blurred, sw, sh)
+                    )
+
             # ==================================================================
-            # [Step 4] V28.0: 동기화된 트리플 레이어 합성
-            # - MaskStabilizer로 마스크-워핑 시간 동기화 (번개 현상 해결)
-            # - Void Fill: 원본 유지 + 슬리밍 빈 공간만 배경 패치
+            # [Step 4] V35: 트리플 레이어 합성 (Void Fill)
+            # - Layer 1 (Bottom): 동기화된 원본 프레임 (자연스러운 노이즈 유지)
+            # - Layer 2 (Middle): 정적 배경 - Void(슬리밍 빈 공간)에만 노출
+            # - Layer 3 (Top): 워핑된 인물 영역
             # ==================================================================
             block_dim = (16, 16)
             grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
@@ -1169,7 +1202,6 @@ class BeautyEngine:
             if self.forward_mask_gpu is None or self.forward_mask_gpu.shape != (h, w):
                 self.forward_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
                 self.forward_mask_dilated_gpu = cp.zeros((h, w), dtype=cp.uint8)
-                self.stabilized_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
 
             # 4-2. 마스크 시간 동기화 (MaskStabilizer)
             # 워핑 그리드는 LandmarkStabilizer로 지연됨, 마스크도 동일하게 지연
@@ -1178,42 +1210,41 @@ class BeautyEngine:
             else:
                 stabilized_mask = mask_gpu
 
-            # 4-3. 순방향 마스크 초기화 및 워핑
+            # 4-3. 마스크 경계면 부드럽게 처리 (일렁임 방지)
+            smoothed_orig_mask = cupyx.scipy.ndimage.gaussian_filter(
+                stabilized_mask.astype(cp.float32), sigma=1.5
+            ).astype(cp.uint8)
+
+            # 4-4. 순방향 마스크 워핑 (Void 감지용)
+            # mask_orig: 사람이 "있었던" 영역
+            # mask_fwd: 사람이 "현재 있는" 영역 (슬리밍으로 수축됨)
+            # Void = mask_orig > 0 && mask_fwd == 0
             self.forward_mask_gpu.fill(0)
 
-            # 동기화된 마스크를 순방향 워핑 → 슬리밍으로 수축된 영역 계산
             self.forward_warp_mask_kernel(
                 grid_dim, block_dim,
-                (stabilized_mask, self.forward_mask_gpu,
+                (smoothed_orig_mask, self.forward_mask_gpu,
                  self.gpu_dx, self.gpu_dy,
                  w, h, sw, sh, scale)
             )
 
-            # 4-4. 마스크 홀 채우기 (Dilate, radius=2)
+            # 4-5. 마스크 홀 채우기 (Dilate, radius=2)
             self.mask_dilate_kernel(
                 grid_dim, block_dim,
                 (self.forward_mask_gpu, self.forward_mask_dilated_gpu,
-                 w, h, 2)  # radius=2 for small holes
+                 w, h, 2)
             )
 
-            # [V6 Advanced] 4-4.5. 마스크 공간 평활화 (에지 일렁임 해결)
-            # 가우시안 필터로 마스크 경계면을 부드럽게 만들어 떨림 전이 방지
+            # 4-6. 순방향 마스크도 평활화
             smoothed_fwd_mask = cupyx.scipy.ndimage.gaussian_filter(
                 self.forward_mask_dilated_gpu.astype(cp.float32), sigma=1.5
             ).astype(cp.uint8)
 
-            # stabilized_mask에도 에지 평활화 적용 (선택적)
-            smoothed_orig_mask = cupyx.scipy.ndimage.gaussian_filter(
-                stabilized_mask.astype(cp.float32), sigma=1.0
-            ).astype(cp.uint8)
-
-            # 4-5. 트리플 레이어 합성 (Void Fill)
-            # - mask_orig (smoothed): 사람이 "있었던" 영역 (평활화됨)
-            # - mask_fwd (smoothed): 사람이 "현재 있는" 영역 (평활화됨)
-            # - Void = mask_orig > 0 && mask_fwd == 0
-            # [V33] 동기화된 프레임을 피부보정 후 합성에 사용
-            # source_for_warp: 피부 보정이 적용된 현재 프레임
-            # source_frame_for_composite: AI 지연 보상된 동기화 프레임 (배경 매칭용)
+            # 4-7. V35 트리플 레이어 합성
+            # - source_for_warp: 피부 보정된 동기화 프레임 (워핑 + Layer 1 원본)
+            # - bg_gpu: 정적 배경 (Layer 2 - Void 전용)
+            # - smoothed_orig_mask: 원래 사람 위치
+            # - smoothed_fwd_mask: 현재 사람 위치 (슬리밍 후)
             result_gpu = cp.empty_like(frame_gpu)
 
             self.void_fill_composite_kernel(
@@ -1241,7 +1272,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                cv2.putText(debug_img, "V29 High-Pass (Smooth+Detail)", (10, 30),
+                cv2.putText(debug_img, "V35 Triple-Layer Void Fill", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)
