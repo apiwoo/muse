@@ -1569,7 +1569,7 @@ void clean_composite_kernel(
     float bg_g = (float)bg[idx_rgb + 1];
     float bg_r = (float)bg[idx_rgb + 2];
 
-    // === [V37] Void Only Fill 합성 (Smooth Weight) ===
+    // === [V37.1] 사람 영역 보호가 추가된 Void Only Fill 합성 ===
     float out_b, out_g, out_r;
 
     if (!use_bg) {
@@ -1578,23 +1578,30 @@ void clean_composite_kernel(
         out_g = warped_g;
         out_r = warped_r;
     } else {
-        // [V37] Smooth Void Weight - 이진 판정 대신 연속 가중치
+        // Step 1: 기본 void weight 계산
         float void_weight = m_orig * (1.0f - m_fwd);
 
-        // [V37] Noise Floor: 아주 작은 void는 무시
-        const float VOID_NOISE_FLOOR = 0.03f;
+        // [V37.1 핵심] Step 2: 사람 영역 완전 보호
+        // m_fwd > 0.5 = 확실한 사람 영역 → 배경 절대 안 보임
+        const float PERSON_PROTECT_THRESHOLD = 0.5f;
+        if (m_fwd > PERSON_PROTECT_THRESHOLD) {
+            void_weight = 0.0f;
+        }
+
+        // Step 3: Noise Floor 상향 (미세 번개 추가 방지)
+        const float VOID_NOISE_FLOOR = 0.1f;  // [V37.1] 0.03 → 0.1
         if (void_weight < VOID_NOISE_FLOOR) {
             void_weight = 0.0f;
         }
 
-        // [V37] Smoothstep for gradual transition
-        float edge0 = 0.05f;
-        float edge1 = 0.25f;
+        // Step 4: Smoothstep (경계만 부드럽게)
+        float edge0 = 0.1f;   // [V37.1] 0.05 → 0.1
+        float edge1 = 0.3f;   // [V37.1] 0.25 → 0.3
         float t = (void_weight - edge0) / (edge1 - edge0);
         t = fmaxf(0.0f, fminf(1.0f, t));
         float smooth_void = t * t * (3.0f - 2.0f * t);
 
-        // [V37] 연속 블렌딩 (경계 토글링 방지)
+        // Step 5: 최종 블렌딩
         out_b = bg_b * smooth_void + warped_b * (1.0f - smooth_void);
         out_g = bg_g * smooth_void + warped_g * (1.0f - smooth_void);
         out_r = bg_r * smooth_void + warped_r * (1.0f - smooth_void);

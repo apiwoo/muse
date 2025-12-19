@@ -138,8 +138,8 @@ class BeautyEngine:
         self.warp_grid_mask_forward_gpu = None   # 순방향 워핑된 마스크
 
         if HAS_CUDA:
-            # [V37] 강화된 안정화
-            self.mask_stabilizer = MaskStabilizer(alpha=0.10, consensus_frames=5)
+            # [V37.1] Median 합의 제거, 단순 EMA만 사용 (잔상 해결)
+            self.mask_stabilizer = MaskStabilizer(alpha=0.15)
             self.warp_grid_stabilizer = WarpGridStabilizer(
                 base_alpha=0.08,
                 snap_alpha=0.6,

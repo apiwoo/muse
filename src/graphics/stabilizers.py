@@ -91,22 +91,14 @@ class LandmarkStabilizer:
         self.last_time = None
 
 
+"""
+[V37 Original - Preserved for Rollback]
 class MaskStabilizer:
-    """
-    [V37] Mask Temporal Stabilizer with Multi-Frame Median Consensus.
-
-    Key features:
-    - Multi-Frame Consensus: Uses median of recent N frames
-    - Reusable buffer: Minimizes memory allocation overhead
-    - EMA smoothing for final output
-    """
+    # [V37] Mask Temporal Stabilizer with Multi-Frame Median Consensus.
+    # - 5프레임 Median 합의 방식
+    # - 문제점: 5프레임(0.17초) 지연으로 인한 잔상 발생
 
     def __init__(self, alpha=0.10, consensus_frames=5):
-        """
-        Args:
-            alpha: EMA smoothing factor (lower = more smoothing)
-            consensus_frames: Number of frames for median consensus
-        """
         self.alpha = alpha
         self.consensus_frames = consensus_frames
         self.prev_mask = None
@@ -114,48 +106,59 @@ class MaskStabilizer:
         self.stacked_buffer = None
 
     def update(self, mask_gpu):
-        """
-        Update stabilizer with new mask.
-
-        Args:
-            mask_gpu: New mask (CuPy array, uint8)
-        Returns:
-            Stabilized mask (CuPy array, uint8)
-        """
         if not HAS_CUDA:
             return mask_gpu
-
         if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
             self.prev_mask = mask_gpu.astype(cp.float32)
             self.mask_history = [mask_gpu.copy() for _ in range(self.consensus_frames)]
-            # Initialize stack buffer
             h, w = mask_gpu.shape
             self.stacked_buffer = cp.zeros((self.consensus_frames, h, w), dtype=cp.uint8)
             return mask_gpu
-
-        # Update history (FIFO)
         self.mask_history.pop(0)
         self.mask_history.append(mask_gpu.copy())
-
-        # Stack into reusable buffer (minimize memory allocation)
         for i, m in enumerate(self.mask_history):
             self.stacked_buffer[i] = m
-
-        # Multi-Frame Median Consensus
         consensus_mask = cp.median(self.stacked_buffer, axis=0)
-
-        # EMA smoothing
         curr_float = consensus_mask.astype(cp.float32)
+        stabilized = self.alpha * curr_float + (1.0 - self.alpha) * self.prev_mask
+        self.prev_mask = stabilized
+        return stabilized.astype(cp.uint8)
+
+    def reset(self):
+        self.prev_mask = None
+        self.mask_history = []
+        self.stacked_buffer = None
+"""
+
+
+class MaskStabilizer:
+    """
+    [V37.1] Mask Temporal Stabilizer - Simple EMA Only.
+
+    [V37.1 변경사항]
+    - Median 합의 제거: 5프레임 지연이 잔상 유발
+    - 단순 EMA만 유지: 즉각적인 마스크 반응성 확보
+    - alpha 0.10 → 0.15: 반응성 향상
+    """
+
+    def __init__(self, alpha=0.15):
+        self.alpha = alpha
+        self.prev_mask = None
+
+    def update(self, mask_gpu):
+        if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
+            self.prev_mask = mask_gpu.astype(cp.float32)
+            return mask_gpu
+
+        # [V37.1] 단순 EMA만 적용
+        curr_float = mask_gpu.astype(cp.float32)
         stabilized = self.alpha * curr_float + (1.0 - self.alpha) * self.prev_mask
         self.prev_mask = stabilized
 
         return stabilized.astype(cp.uint8)
 
     def reset(self):
-        """Reset stabilizer state."""
         self.prev_mask = None
-        self.mask_history = []
-        self.stacked_buffer = None
 
 
 class WarpGridStabilizer:
