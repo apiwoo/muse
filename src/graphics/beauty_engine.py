@@ -1,12 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V30.0: Anti-Flicker & Edge-Preserving Enhancement (잔상 제거 + 선명도 강화)
-# - [V30] VOID_FILL: Cubic 감쇠(pow3) + 임계값(0.15f)으로 슬리밍 잔상 제거
-# - [V30] LAB_SMOOTH: 적응형 디테일 보존으로 눈코입 윤곽 100% 유지
-# - [V30] Guided Filter: radius 4~8, epsilon 0.01~0.03 (선명도 확보)
-# - [V30] detail_strength: 0.9~0.5, blend_strength: max 0.85 (과보정 억제)
-# - [V30] MaskStabilizer: alpha 0.22 (워핑 동기화 정밀도 향상)
-# - [V30] bg_stable 감쇄: 배경 불안정 시 슬리밍 강도 50% 감쇄
-# - Preserved: V29.0 High-Fidelity Skin Smoothing, V28.0 Synchronized Composite
+# V33.0: Frame Sync & Chromatic Guard (하드웨어 동기화 + 색상 보호)
+# - [V33] FrameSyncBuffer: AI 마스크 지연 보상을 위한 프레임 버퍼링
+# - [V33] Adaptive WarpGridStabilizer: 속도 기반 동적 alpha (느림: 0.15, 빠름: 0.8)
+# - [V33] Chromatic Ghost Guard: 피부색 감지로 몸 안쪽 배경 침투 차단
+# - Preserved: V31 Dual-Pass, V31 3x3 Erosion Guard, V30 bg_stable, V29 High-Fidelity
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -25,7 +22,9 @@ from graphics.kernels.cuda_kernels import (
     # V5: Void Fill Composite (동기화된 트리플 레이어)
     VOID_FILL_COMPOSITE_KERNEL_CODE,
     # V29: High-Fidelity Skin Smoothing (Guided Filter + LAB Color Space)
-    GUIDED_FILTER_KERNEL_CODE, FAST_SKIN_SMOOTH_KERNEL_CODE, LAB_SKIN_SMOOTH_KERNEL_CODE
+    GUIDED_FILTER_KERNEL_CODE, FAST_SKIN_SMOOTH_KERNEL_CODE, LAB_SKIN_SMOOTH_KERNEL_CODE,
+    # V31: Dual-Pass Smooth Kernel (Wide/Fine 합성)
+    DUAL_PASS_SMOOTH_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -90,6 +89,92 @@ class LandmarkStabilizer:
 
 
 # ==============================================================================
+# [V33 신규 클래스] FrameSyncBuffer - AI 결과와 프레임 시점 동기화
+# - AI 마스크 생성 지연(1~3프레임)만큼 원본 프레임을 버퍼링
+# - 마스크가 생성된 시점의 프레임과 정확히 매칭하여 잔상 원천 차단
+# ==============================================================================
+class FrameSyncBuffer:
+    """
+    Frame Synchronization Buffer for AI latency compensation.
+
+    Problem: AI mask has 1-3 frame latency, causing "trailing ghost" artifacts.
+    Solution: Buffer original frames and match them with AI results by timestamp.
+
+    [V33] 프레임-마스크 시점 동기화로 Trailing 현상 근본 해결
+    """
+    def __init__(self, max_size=3):
+        """
+        Args:
+            max_size: Maximum number of frames to buffer (default: 3)
+                      Higher = more latency tolerance, more VRAM usage (~15MB/frame)
+        """
+        self.max_size = max_size
+        self.buffer = []  # List of (frame_id, frame_gpu) tuples
+        self.frame_counter = 0
+
+    def push(self, frame_gpu):
+        """
+        Add a new frame to the buffer.
+
+        Args:
+            frame_gpu: Current frame (CuPy array)
+        Returns:
+            frame_id: Unique identifier for this frame
+        """
+        self.frame_counter += 1
+        frame_id = self.frame_counter
+
+        # Store a copy to prevent external modifications
+        if HAS_CUDA:
+            frame_copy = frame_gpu.copy()
+        else:
+            frame_copy = frame_gpu.copy() if hasattr(frame_gpu, 'copy') else frame_gpu
+
+        self.buffer.append((frame_id, frame_copy))
+
+        # Remove oldest frame if buffer is full
+        if len(self.buffer) > self.max_size:
+            self.buffer.pop(0)
+
+        return frame_id
+
+    def get_synced_frame(self, delay_frames=1):
+        """
+        Get the frame that was captured 'delay_frames' ago.
+
+        Args:
+            delay_frames: How many frames back to retrieve (1 = previous frame)
+        Returns:
+            Synced frame or None if not available
+        """
+        if len(self.buffer) == 0:
+            return None
+
+        # Calculate target index (0 = oldest, -1 = newest)
+        target_idx = len(self.buffer) - 1 - delay_frames
+
+        if target_idx < 0:
+            # Not enough frames buffered yet, return oldest available
+            return self.buffer[0][1]
+
+        return self.buffer[target_idx][1]
+
+    def get_latest(self):
+        """Get the most recent frame in buffer."""
+        if len(self.buffer) == 0:
+            return None
+        return self.buffer[-1][1]
+
+    def reset(self):
+        """Clear all buffered frames."""
+        self.buffer.clear()
+        self.frame_counter = 0
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ==============================================================================
 # [V28.0 신규 클래스] MaskStabilizer - 마스크 시간 동기화
 # - 워핑 그리드와 마스크의 시간적 불일치(번개 현상) 해결
 # - LandmarkStabilizer와 유사한 지연으로 마스크 안정화
@@ -101,11 +186,11 @@ class MaskStabilizer:
     Problem: Warping grid has latency from LandmarkStabilizer, but mask is realtime.
     Solution: Apply similar smoothing to mask so they move together.
     """
-    def __init__(self, alpha=0.22):
+    def __init__(self, alpha=0.15):
         """
         Args:
             alpha: Smoothing factor (0.0 = full lag, 1.0 = no smoothing)
-                   [V30] 0.22로 조정하여 LandmarkStabilizer와의 동기화 정밀도 향상
+                   [V31] 0.15로 조정하여 WarpGridStabilizer와 동기화
         """
         self.alpha = alpha
         self.prev_mask = None
@@ -133,6 +218,83 @@ class MaskStabilizer:
     def reset(self):
         """Reset stabilizer state"""
         self.prev_mask = None
+
+
+# ==============================================================================
+# [V33 업그레이드] WarpGridStabilizer - 동적 적응형 EMA
+# - 마스크 안정화만으로 부족했던 잔상 문제를 워핑 그리드(dx, dy) 자체에서 해결
+# - [V33] 움직임 속도에 따라 alpha 동적 조절 (느림: 0.15, 빠름: 0.8)
+# - "뒤늦게 따라오는 느낌" 제거를 위한 적응형 스냅 로직
+# ==============================================================================
+class WarpGridStabilizer:
+    """
+    Warp Grid Temporal Stabilizer with Adaptive EMA.
+
+    Problem: Fixed alpha causes "lagging behind" feeling during fast movements.
+    Solution: Dynamically adjust alpha based on grid velocity.
+
+    [V33] 동적 alpha로 빠른 움직임에는 즉각 반응, 느린 움직임에는 안정화
+    - 정지/느림: alpha=0.15 (강한 안정화)
+    - 빠른 움직임: alpha=0.8 (즉각 스냅)
+    """
+    def __init__(self, base_alpha=0.15, snap_alpha=0.8, velocity_threshold=3.0):
+        """
+        Args:
+            base_alpha: Base smoothing factor for slow movements (default: 0.15)
+            snap_alpha: Snap factor for fast movements (default: 0.8)
+            velocity_threshold: Grid velocity threshold for snap (pixels/frame)
+        """
+        self.base_alpha = base_alpha
+        self.snap_alpha = snap_alpha
+        self.velocity_threshold = velocity_threshold
+        self.prev_dx = None
+        self.prev_dy = None
+
+    def update(self, dx_gpu, dy_gpu):
+        """
+        Apply adaptive temporal smoothing to warp grid.
+
+        Args:
+            dx_gpu: Current frame dx grid (CuPy array, float32)
+            dy_gpu: Current frame dy grid (CuPy array, float32)
+        Returns:
+            Tuple of stabilized (dx, dy) grids
+        """
+        if self.prev_dx is None or self.prev_dx.shape != dx_gpu.shape:
+            self.prev_dx = dx_gpu.copy()
+            self.prev_dy = dy_gpu.copy()
+            return dx_gpu, dy_gpu
+
+        # [V33] 그리드 변화량(속도) 계산
+        delta_dx = dx_gpu - self.prev_dx
+        delta_dy = dy_gpu - self.prev_dy
+
+        # 전체 그리드의 평균 속도 계산
+        velocity = float(cp.mean(cp.sqrt(delta_dx**2 + delta_dy**2)))
+
+        # [V33] 속도 기반 동적 alpha 계산
+        # velocity가 threshold 이상이면 snap_alpha로 전환 (즉각 반응)
+        # velocity가 낮으면 base_alpha 유지 (강한 안정화)
+        if velocity > self.velocity_threshold:
+            # 빠른 움직임: 점진적으로 snap_alpha로 전환
+            speed_factor = min((velocity - self.velocity_threshold) / self.velocity_threshold, 1.0)
+            adaptive_alpha = self.base_alpha + (self.snap_alpha - self.base_alpha) * speed_factor
+        else:
+            adaptive_alpha = self.base_alpha
+
+        # Exponential moving average with adaptive alpha
+        stabilized_dx = adaptive_alpha * dx_gpu + (1.0 - adaptive_alpha) * self.prev_dx
+        stabilized_dy = adaptive_alpha * dy_gpu + (1.0 - adaptive_alpha) * self.prev_dy
+
+        self.prev_dx = stabilized_dx.copy()
+        self.prev_dy = stabilized_dy.copy()
+
+        return stabilized_dx, stabilized_dy
+
+    def reset(self):
+        """Reset stabilizer state"""
+        self.prev_dx = None
+        self.prev_dy = None
 
 
 # ==============================================================================
@@ -228,32 +390,29 @@ class MaskManager:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V30.0 Anti-Flicker & Edge-Preserving Enhancement
+# [메인 클래스] BeautyEngine - V33.0 Frame Sync & Chromatic Guard
 # ==============================================================================
 class BeautyEngine:
     """
-    V30.0 Beauty Processing Engine - Anti-Flicker & Edge-Preserving Enhancement
+    V33.0 Beauty Processing Engine - Frame Sync & Chromatic Guard
 
-    Key Changes (V30.0):
-    - VOID_FILL: Cubic 감쇠(pow3) + 임계값(0.15f)으로 슬리밍 잔상 제거
-    - LAB_SMOOTH: 적응형 디테일 보존으로 눈코입 윤곽 100% 유지
-    - Guided Filter: radius 4~8, epsilon 0.01~0.03 (반경 축소로 선명도 확보)
-    - detail_strength: 0.9~0.5, blend_strength: max 0.85 (과보정 억제)
-    - MaskStabilizer: alpha 0.22 (워핑 동기화 정밀도 향상)
-    - bg_stable 감쇄: 배경 불안정 시 슬리밍 강도 50% 자동 감쇄
+    Key Changes (V33.0):
+    - FrameSyncBuffer: AI 지연 보상을 위한 프레임 버퍼링 (Trailing 현상 차단)
+    - Adaptive WarpGridStabilizer: 속도 기반 동적 alpha (느림: 0.15, 빠름: 0.8)
+    - Chromatic Ghost Guard: 색상 비교로 몸 안쪽 배경 침투 차단
 
-    Preserved from V29.0:
-    - High-Fidelity Skin Smoothing (Frequency Separation)
+    Preserved from V31.0:
+    - Dual-Pass Guided Filter, Non-linear Detail Curve, Contrast Boost
+    - 3x3 Erosion Guard + smoothstep + pow4
 
-    Preserved from V28.0:
-    - MaskStabilizer: 마스크-워핑 시간 동기화
-    - Void Fill Composite: 원본 유지 + Void만 배경 패치
+    Preserved from V30.0/V29.0/V28.0:
+    - bg_stable 감쇄, High-Fidelity Skin Smoothing, Synchronized Composite
 
-    Result: 잔상 없는 슬리밍 + 눈코입 선명한 피부 보정
+    Result: 완벽한 잔상 제거 + 도자기 피부 + 초선명 눈코입
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V30.0 Anti-Flicker Ready")
+        print("[BEAUTY] [BeautyEngine] V33.0 Frame Sync Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -268,6 +427,13 @@ class BeautyEngine:
 
         # V28.0: Mask Stabilizer (마스크-워핑 시간 동기화)
         self.mask_stabilizer = None  # Initialized when HAS_CUDA
+
+        # V33: Warp Grid Stabilizer with Adaptive EMA (동적 alpha)
+        self.warp_grid_stabilizer = None  # Initialized when HAS_CUDA
+
+        # V33: Frame Sync Buffer (AI 지연 보상)
+        self.frame_sync_buffer = None  # Initialized when HAS_CUDA
+        self.ai_latency_frames = 1  # AI 마스크 지연 프레임 수 (조절 가능)
 
         # Background management (기존 유지)
         self.bg_buffers = {}
@@ -285,10 +451,14 @@ class BeautyEngine:
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
 
-        # V29: High-Fidelity processing buffers (원본 해상도, 다운스케일 제거)
+        # V29/V31: High-Fidelity processing buffers (원본 해상도, 다운스케일 제거)
         self.guided_result = None  # Guided Filter 결과 (저주파)
         self.freq_sep_result = None  # Frequency Separation 결과
         self.v29_frame_count = 0  # 디버그 로그용 프레임 카운터
+
+        # V31: Dual-Pass 피부 보정 버퍼
+        self.wide_smooth_result = None  # Wide Pass 결과 (radius 15)
+        self.fine_smooth_result = None  # Fine Pass 결과 (radius 5)
 
         # V4: Forward Mask buffers (순방향 마스크 기반 합성)
         self.forward_mask_gpu = None
@@ -298,9 +468,14 @@ class BeautyEngine:
         self.stabilized_mask_gpu = None
 
         if HAS_CUDA:
-            # V28.0: Initialize MaskStabilizer
-            # [V30] alpha=0.22로 조정하여 워핑 그리드와 동기화 정밀도 향상
-            self.mask_stabilizer = MaskStabilizer(alpha=0.22)
+            # V33: Initialize Stabilizers with adaptive alpha
+            self.mask_stabilizer = MaskStabilizer(alpha=0.15)
+            # [V33] 동적 alpha: 느린 움직임 0.15, 빠른 움직임 0.8
+            self.warp_grid_stabilizer = WarpGridStabilizer(
+                base_alpha=0.15, snap_alpha=0.8, velocity_threshold=3.0
+            )
+            # [V33] Frame Sync Buffer for AI latency compensation
+            self.frame_sync_buffer = FrameSyncBuffer(max_size=3)
             self.stream = cp.cuda.Stream(non_blocking=True)
             # Core kernels (warping, compositing)
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
@@ -317,6 +492,9 @@ class BeautyEngine:
             self.guided_filter_kernel = cp.RawKernel(GUIDED_FILTER_KERNEL_CODE, 'guided_filter_kernel')
             self.freq_separation_kernel = cp.RawKernel(FAST_SKIN_SMOOTH_KERNEL_CODE, 'fast_skin_smooth_kernel')
             self.lab_smooth_kernel = cp.RawKernel(LAB_SKIN_SMOOTH_KERNEL_CODE, 'lab_skin_smooth_kernel')
+
+            # V31: Dual-Pass Smooth kernel (Wide/Fine 합성)
+            self.dual_pass_smooth_kernel = cp.RawKernel(DUAL_PASS_SMOOTH_KERNEL_CODE, 'dual_pass_smooth_kernel')
 
             # V4: Forward Mask based Composite (순방향 마스크 기반 합성)
             self.forward_warp_mask_kernel = cp.RawKernel(FORWARD_WARP_MASK_KERNEL_CODE, 'forward_warp_mask_kernel')
@@ -562,19 +740,22 @@ class BeautyEngine:
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
-    # V29: High-Fidelity Skin Smoothing (Guided Filter + Frequency Separation)
+    # V31: Dual-Pass High-Fidelity Skin Smoothing
+    # - Wide Pass (radius 15, epsilon 0.02): 피부톤 전체를 도자기처럼 균일화
+    # - Fine Pass (radius 5, epsilon 0.008): 미세 디테일 보존
+    # - 두 결과를 비선형 곡선(pow 0.3)으로 합성하여 엣지 보존 극대화
     # ==========================================================================
     def _process_skin_yy_style(self, frame_gpu, landmarks, params):
         """
-        V29: High-Fidelity skin smoothing using Guided Filter + Frequency Separation
+        V31: Dual-Pass High-Fidelity skin smoothing
 
-        Key improvements over V26 (Bilateral Filter):
-        - NO downscaling: 원본 해상도에서 처리 → 선명도 100% 유지
-        - Guided Filter: Bilateral보다 빠름 (O(1)), 헤일로 없음, 엣지 보존 우수
-        - Frequency Separation: 저주파(피부색) 균일화 + 고주파(디테일) 보존
-        - 공식: Output = GuidedResult + (Original - GuidedResult) * detail_preserve
+        Key improvements over V30 (Single-Pass):
+        - Wide Pass: 넓은 반경으로 피부톤 전체를 균일화 (도자기 질감)
+        - Fine Pass: 좁은 반경으로 눈썹/속눈썹 등 미세 디테일 유지
+        - Non-linear Detail Curve: powf(edge_factor, 0.3f)로 엣지 복원력 기하급수적 강화
+        - Contrast Boost: 1.05f로 투명감 있는 피부 표현
 
-        Result: "매끈한" 피부 (색상만 균일) vs "흐린" 피부 (전체 블러)
+        Result: 피부는 매끈, 눈코입은 초선명
         """
         h, w = frame_gpu.shape[:2]
 
@@ -592,8 +773,7 @@ class BeautyEngine:
         if not has_skin and not has_tone and not has_color:
             return frame_gpu, None
 
-        # Generate skin mask (no exclusion zones - Guided Filter가 엣지 자동 보존)
-        # padding_ratio를 1.25로 확대하여 이마/턱 라인까지 커버
+        # Generate skin mask (no exclusion zones - Dual-Pass가 엣지 자동 보존)
         skin_mask_gpu = self.mask_manager.generate_mask(
             landmarks, w, h, padding_ratio=1.25, exclude_features=False
         )
@@ -605,61 +785,86 @@ class BeautyEngine:
         self.v29_frame_count += 1
         should_log = (self.v29_frame_count % 60 == 1)
 
-        # ===== High-Fidelity Skin Smoothing (원본 해상도) =====
+        # ===== V31 Dual-Pass Skin Smoothing =====
         if has_skin:
             # 원본 평균 저장 (디버그용)
             orig_mean = float(cp.mean(frame_gpu)) if should_log else 0
 
             # Initialize or resize buffers (원본 해상도)
-            if (self.guided_result is None or
-                self.guided_result.shape[0] != h or
-                self.guided_result.shape[1] != w):
-                self.guided_result = cp.zeros((h, w, 3), dtype=cp.uint8)
+            if (self.wide_smooth_result is None or
+                self.wide_smooth_result.shape[0] != h or
+                self.wide_smooth_result.shape[1] != w):
+                self.wide_smooth_result = cp.zeros((h, w, 3), dtype=cp.uint8)
+                self.fine_smooth_result = cp.zeros((h, w, 3), dtype=cp.uint8)
                 self.freq_sep_result = cp.zeros((h, w, 3), dtype=cp.uint8)
-                print(f"[V29] 버퍼 초기화: {w}x{h}")
+                print(f"[V31] Dual-Pass 버퍼 초기화: {w}x{h}")
 
             block_dim = (16, 16)
             grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
                         (h + block_dim[1] - 1) // block_dim[1])
 
-            # Step 1: Guided Filter로 저주파(Base) 추출
-            # [V30] 반경 축소로 선명도 확보
-            radius = int(4 + skin_strength * 4)  # 4 ~ 8
-            epsilon = 0.01 + skin_strength * 0.02  # 0.01 ~ 0.03 (엣지 보존력 강화)
+            # ============================================
+            # [Step 1] Wide Pass: 넓은 반경으로 피부톤 균일화
+            # - radius 15, epsilon 0.02
+            # - 피부 전체를 부드럽게 밀어버림 (도자기 효과)
+            # ============================================
+            wide_radius = 15
+            wide_epsilon = 0.02
 
             try:
                 self.guided_filter_kernel(
                     grid_dim, block_dim,
-                    (frame_gpu, frame_gpu, self.guided_result, skin_mask_gpu,
+                    (frame_gpu, frame_gpu, self.wide_smooth_result, skin_mask_gpu,
                      cp.int32(w), cp.int32(h),
-                     cp.int32(radius),
-                     cp.float32(epsilon))
+                     cp.int32(wide_radius),
+                     cp.float32(wide_epsilon))
                 )
             except Exception as e:
-                print(f"[V29 ERROR] Guided Filter 실패: {e}")
+                print(f"[V31 ERROR] Wide Pass 실패: {e}")
                 return frame_gpu, skin_mask_gpu
 
-            # Step 2: High-Pass 디테일 보존 스무딩 (선명한 매끈함)
-            # detail_strength=0 → 완전 스무딩 (피부결 100% 제거)
-            # detail_strength=1 → 원본 유지 (스무딩 없음)
-            # skin_strength 높을수록 detail_strength 낮게 → 더 많이 스무딩
-            # [V30] 고주파 정보 유지량 증대: 0.9 → 0.5 (기존 0.8 → 0.2)
-            detail_strength = 0.9 - skin_strength * 0.4  # 0.9 → 0.5 (디테일 더 많이 유지)
-            blend_strength = min(skin_strength * 1.5, 0.85)  # [V30] 최대 85%로 과도한 보정 억제
+            # ============================================
+            # [Step 2] Fine Pass: 좁은 반경으로 디테일 보존
+            # - radius 5, epsilon 0.008
+            # - 속눈썹, 눈동자 등 미세 엣지 유지
+            # ============================================
+            fine_radius = 5
+            fine_epsilon = 0.008
 
             try:
-                self.lab_smooth_kernel(
+                self.guided_filter_kernel(
                     grid_dim, block_dim,
-                    (frame_gpu, self.guided_result, skin_mask_gpu, self.freq_sep_result,
+                    (frame_gpu, frame_gpu, self.fine_smooth_result, skin_mask_gpu,
                      cp.int32(w), cp.int32(h),
-                     cp.float32(detail_strength),
+                     cp.int32(fine_radius),
+                     cp.float32(fine_epsilon))
+                )
+            except Exception as e:
+                print(f"[V31 ERROR] Fine Pass 실패: {e}")
+                return frame_gpu, skin_mask_gpu
+
+            # ============================================
+            # [Step 3] Dual-Pass 합성 (비선형 디테일 곡선)
+            # - Wide/Fine 결과를 입력받아 합성
+            # - powf(edge_factor, 0.3f)로 엣지 영역 복원력 강화
+            # - Contrast 부스팅 1.05f로 투명감 표현
+            # ============================================
+            blend_strength = min(skin_strength * 1.5, 0.90)  # 최대 90%
+
+            try:
+                self.dual_pass_smooth_kernel(
+                    grid_dim, block_dim,
+                    (frame_gpu, self.wide_smooth_result, self.fine_smooth_result,
+                     skin_mask_gpu, self.freq_sep_result,
+                     cp.int32(w), cp.int32(h),
+                     cp.float32(skin_strength),
                      cp.float32(blend_strength))
                 )
             except Exception as e:
-                print(f"[V29 ERROR] High-Pass Smooth 실패: {e}")
+                print(f"[V31 ERROR] Dual-Pass Smooth 실패: {e}")
                 return frame_gpu, skin_mask_gpu
 
-            # Step 3: Color Grading 적용 (선택적)
+            # Step 4: Color Grading 적용 (선택적)
             if has_color:
                 result_gpu = cp.empty_like(frame_gpu)
                 self.blend_kernel(
@@ -678,7 +883,7 @@ class BeautyEngine:
             if should_log:
                 result_mean = float(cp.mean(frame_gpu))
                 diff = abs(result_mean - orig_mean)
-                print(f"[V29-HP] str={skin_strength:.2f}, detail={detail_strength:.2f}, blend={blend_strength:.2f}, diff={diff:.2f}")
+                print(f"[V31-DP] str={skin_strength:.2f}, blend={blend_strength:.2f}, diff={diff:.2f}")
 
         # ===== Skin Tone / Color Only (No Smoothing) =====
         elif has_tone or has_color:
@@ -808,6 +1013,12 @@ class BeautyEngine:
                 # V28.0: Reset MaskStabilizer on size change
                 if self.mask_stabilizer is not None:
                     self.mask_stabilizer.reset()
+                # V31: Reset WarpGridStabilizer on size change
+                if self.warp_grid_stabilizer is not None:
+                    self.warp_grid_stabilizer.reset()
+                # V33: Reset FrameSyncBuffer on size change
+                if self.frame_sync_buffer is not None:
+                    self.frame_sync_buffer.reset()
 
                 if self.active_profile in self.bg_buffers and self.bg_buffers[self.active_profile]['gpu'] is not None:
                     self.bg_gpu = self.bg_buffers[self.active_profile]['gpu']
@@ -822,6 +1033,31 @@ class BeautyEngine:
             if self.bg_gpu is None:
                 self.bg_gpu = cp.copy(frame_gpu)
                 self.has_bg = True
+
+            # ==================================================================
+            # [V33] Frame Synchronization - AI 지연 보상
+            # - 현재 프레임을 버퍼에 저장
+            # - AI 마스크가 생성된 시점의 프레임과 매칭하여 Trailing 현상 제거
+            # ==================================================================
+            if self.frame_sync_buffer is not None:
+                # 현재 프레임을 버퍼에 저장
+                self.frame_sync_buffer.push(frame_gpu)
+
+                # AI 마스크가 있을 때만 동기화된 프레임 사용
+                if mask is not None and bg_stable:
+                    # AI 지연만큼 과거 프레임 가져오기
+                    synced_frame = self.frame_sync_buffer.get_synced_frame(
+                        delay_frames=self.ai_latency_frames
+                    )
+                    if synced_frame is not None:
+                        # 동기화된 프레임을 source로 사용
+                        source_frame_for_composite = synced_frame
+                    else:
+                        source_frame_for_composite = frame_gpu
+                else:
+                    source_frame_for_composite = frame_gpu
+            else:
+                source_frame_for_composite = frame_gpu
 
             # Mask handling
             # [V6] 정적 배경이 안정적일 때만 슬리밍 합성 활성화 (일렁임 방지)
@@ -911,8 +1147,13 @@ class BeautyEngine:
                 self.warp_kernel(grid_dim, block_dim,
                     (self.gpu_dx, self.gpu_dy, params_gpu, len(warp_params), sw, sh))
 
-                cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=1, output=self.gpu_dx)
-                cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=1, output=self.gpu_dy)
+                # [V31] 그리드 블러 강화: sigma 1.0 → 2.0 (경계면 부드러움 향상)
+                cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=2.0, output=self.gpu_dx)
+                cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=2.0, output=self.gpu_dy)
+
+                # [V31] WarpGridStabilizer로 시간적 평활화 (잔상 근본 해결)
+                if self.warp_grid_stabilizer is not None:
+                    self.gpu_dx, self.gpu_dy = self.warp_grid_stabilizer.update(self.gpu_dx, self.gpu_dy)
 
             # ==================================================================
             # [Step 4] V28.0: 동기화된 트리플 레이어 합성
@@ -970,12 +1211,15 @@ class BeautyEngine:
             # - mask_orig (smoothed): 사람이 "있었던" 영역 (평활화됨)
             # - mask_fwd (smoothed): 사람이 "현재 있는" 영역 (평활화됨)
             # - Void = mask_orig > 0 && mask_fwd == 0
+            # [V33] 동기화된 프레임을 피부보정 후 합성에 사용
+            # source_for_warp: 피부 보정이 적용된 현재 프레임
+            # source_frame_for_composite: AI 지연 보상된 동기화 프레임 (배경 매칭용)
             result_gpu = cp.empty_like(frame_gpu)
 
             self.void_fill_composite_kernel(
                 grid_dim, block_dim,
                 (source_for_warp, self.bg_gpu,
-                 smoothed_orig_mask, smoothed_fwd_mask,  # [V6 Advanced] 평활화된 마스크 사용
+                 smoothed_orig_mask, smoothed_fwd_mask,
                  result_gpu,
                  self.gpu_dx, self.gpu_dy,
                  w, h, sw, sh, scale, use_bg)

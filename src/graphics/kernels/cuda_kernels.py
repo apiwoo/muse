@@ -130,8 +130,8 @@ void composite_kernel(
 
     // --- 3. Final Decision (Context-Aware Composite) - V2 Interior Protection ---
 
-    // [V2] 1. 마스크 내부 깊숙한 곳 보호
-    // original_alpha가 높으면 확실한 사람 영역 → 배경 합성 금지
+    // [V2] 1. Protect deep interior of mask
+    // High original_alpha = definite person region -> block background
     // 임계값 0.7 이상이면 "내부"로 간주
     bool is_interior = (original_alpha > 0.7f);
 
@@ -165,7 +165,7 @@ void composite_kernel(
     // [V2] 4. 배경 합성 조건 - 훨씬 엄격하게
     // 기존: is_alpha_loss && is_significant_warp
     // 변경: 경계 근처이고 + 워핑 좌표가 유효하고 + 내부가 아닐 때만 배경 합성
-    bool is_alpha_loss = (original_alpha > warped_alpha + 0.1f);  // 임계값 상향 (0.05 → 0.1)
+    bool is_alpha_loss = (original_alpha > warped_alpha + 0.1f);  // threshold up (0.05 -> 0.1)
 
     // 배경 합성 조건 (모두 만족해야 함):
     // 1) is_near_edge: 마스크 경계 근처일 것
@@ -182,12 +182,12 @@ void composite_kernel(
     float base_b, base_g, base_r;
 
     if (should_use_bg) {
-        // [Case A] 경계 영역에서 슬리밍 효과 → 배경 합성
+        // [Case A] Edge region with slimming effect -> use background
         base_b = (float)bg[idx_rgb+0];
         base_g = (float)bg[idx_rgb+1];
         base_r = (float)bg[idx_rgb+2];
     } else {
-        // [Case B] 내부 영역 또는 경계 아님 → 원본 유지 (보정 효과 보존)
+        // [Case B] Interior or non-edge -> keep original (preserve correction)
         base_b = (float)src[idx_rgb+0];
         base_g = (float)src[idx_rgb+1];
         base_r = (float)src[idx_rgb+2];
@@ -1174,9 +1174,9 @@ void lab_skin_smooth_kernel(
     float edge_factor = fminf(detail_mag / edge_threshold, 1.0f);
     float adaptive_detail = detail_strength + (1.0f - detail_strength) * edge_factor;
 
-    // === 피부 텍스처 스무딩 + 윤곽선 디테일 보존 ===
-    // 피부결(낮은 detail_mag): detail_strength 적용 → 스무딩
-    // 눈코입 윤곽(높은 detail_mag): adaptive_detail → 거의 원본 유지
+    // === Skin texture smoothing + edge detail preservation ===
+    // Low detail_mag (skin): apply detail_strength -> smoothing
+    // High detail_mag (edges): adaptive_detail -> preserve original
     float result_b = smooth_b + detail_b * adaptive_detail;
     float result_g = smooth_g + detail_g * adaptive_detail;
     float result_r = smooth_r + detail_r * adaptive_detail;
@@ -1188,6 +1188,135 @@ void lab_skin_smooth_kernel(
 
     // === 마스크 기반 최종 블렌드 ===
     // 마스크 영역은 스무딩 결과, 마스크 외부는 원본
+    float final_b = orig_b * (1.0f - mask_val) + result_b * mask_val;
+    float final_g = orig_g * (1.0f - mask_val) + result_g * mask_val;
+    float final_r = orig_r * (1.0f - mask_val) + result_r * mask_val;
+
+    // 반올림하여 저장
+    dst[idx3 + 0] = (unsigned char)(final_b + 0.5f);
+    dst[idx3 + 1] = (unsigned char)(final_g + 0.5f);
+    dst[idx3 + 2] = (unsigned char)(final_r + 0.5f);
+}
+'''
+
+
+# ==============================================================================
+# [KERNEL 12-1] V31: Dual-Pass Smooth (Wide/Fine 합성 + 비선형 디테일 곡선)
+# - Wide Pass(넓은 스무딩)와 Fine Pass(좁은 스무딩) 결과를 합성
+# - powf(edge_factor, 0.3f) 비선형 곡선으로 엣지 복원력 기하급수적 강화
+# - Contrast 부스팅 1.05f로 투명감 있는 피부 표현
+# ==============================================================================
+DUAL_PASS_SMOOTH_KERNEL_CODE = r'''
+extern "C" __global__
+void dual_pass_smooth_kernel(
+    const unsigned char* src,          // Original image (BGR)
+    const unsigned char* wide_smooth,  // Wide Pass result (radius 15) - 저주파
+    const unsigned char* fine_smooth,  // Fine Pass result (radius 5) - 미세 디테일
+    const unsigned char* mask,         // Skin mask (0-255)
+    unsigned char* dst,                // Output image (BGR)
+    int width, int height,
+    float skin_strength,               // 피부 보정 강도 (0.0~1.0)
+    float blend_strength               // 전체 블렌드 강도 (0.0~1.0)
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx3 = idx * 3;
+
+    // 마스크 값 (0~1 범위로 정규화)
+    float mask_val = (float)mask[idx] / 255.0f * blend_strength;
+
+    // 마스크 외부: 원본 복사
+    if (mask_val < 0.01f) {
+        dst[idx3 + 0] = src[idx3 + 0];
+        dst[idx3 + 1] = src[idx3 + 1];
+        dst[idx3 + 2] = src[idx3 + 2];
+        return;
+    }
+
+    // === 원본 BGR 읽기 ===
+    float orig_b = (float)src[idx3 + 0];
+    float orig_g = (float)src[idx3 + 1];
+    float orig_r = (float)src[idx3 + 2];
+
+    // === Wide Pass (저주파 - 피부 전체 균일화) ===
+    float wide_b = (float)wide_smooth[idx3 + 0];
+    float wide_g = (float)wide_smooth[idx3 + 1];
+    float wide_r = (float)wide_smooth[idx3 + 2];
+
+    // === Fine Pass (미세 디테일 보존) ===
+    float fine_b = (float)fine_smooth[idx3 + 0];
+    float fine_g = (float)fine_smooth[idx3 + 1];
+    float fine_r = (float)fine_smooth[idx3 + 2];
+
+    // === 채널별 고주파 디테일 추출 ===
+    // Wide에서의 디테일: 원본 - Wide (큰 디테일)
+    float detail_wide_b = orig_b - wide_b;
+    float detail_wide_g = orig_g - wide_g;
+    float detail_wide_r = orig_r - wide_r;
+
+    // Fine에서의 디테일: 원본 - Fine (미세 디테일)
+    float detail_fine_b = orig_b - fine_b;
+    float detail_fine_g = orig_g - fine_g;
+    float detail_fine_r = orig_r - fine_r;
+
+    // === 휘도 기반 엣지 검출 ===
+    // Fine에서 추출한 디테일 크기 (미세 엣지일수록 큼)
+    float detail_mag = fabsf(detail_fine_r * 0.299f + detail_fine_g * 0.587f + detail_fine_b * 0.114f);
+
+    // 엣지 임계값
+    float edge_threshold = 12.0f;
+
+    // === [V31] 비선형 디테일 곡선: powf(edge_factor, 0.3f) ===
+    // 기존: edge_factor 그대로 사용 (선형)
+    // V31: pow(0.3)로 작은 엣지도 기하급수적으로 증폭
+    // - edge_factor 0.1 -> pow(0.1, 0.3) ~= 0.50 (5x boost)
+    // - edge_factor 0.5 -> pow(0.5, 0.3) ~= 0.81 (1.6x boost)
+    // - edge_factor 1.0 -> pow(1.0, 0.3) = 1.0 (unchanged)
+    float edge_factor = fminf(detail_mag / edge_threshold, 1.0f);
+    float nonlinear_edge = powf(edge_factor, 0.3f);
+
+    // === Dual-Pass 합성 전략 ===
+    // - 피부 영역(낮은 edge_factor): Wide 결과 주로 사용 (도자기 효과)
+    // - 엣지 영역(높은 edge_factor): Fine 결과 + 원본 디테일 (선명도 유지)
+
+    // Wide와 Fine의 블렌딩 비율 (엣지에서는 Fine 위주)
+    float wide_weight = 1.0f - nonlinear_edge * 0.7f;  // 피부: 1.0, 엣지: 0.3
+    float fine_weight = nonlinear_edge * 0.7f;          // 피부: 0.0, 엣지: 0.7
+
+    // 기본 스무딩 결과 (Wide + Fine 혼합)
+    float base_b = wide_b * wide_weight + fine_b * fine_weight;
+    float base_g = wide_g * wide_weight + fine_g * fine_weight;
+    float base_r = wide_r * wide_weight + fine_r * fine_weight;
+
+    // 디테일 복원량 (비선형 곡선 적용)
+    // skin_strength가 높을수록 디테일 복원 줄임 (스무딩 강화)
+    float detail_preserve = 0.3f + (1.0f - skin_strength) * 0.5f + nonlinear_edge * 0.2f;
+    detail_preserve = fminf(detail_preserve, 1.0f);
+
+    // 최종 스무딩 결과 = 기본 + 디테일 복원
+    float result_b = base_b + detail_fine_b * detail_preserve;
+    float result_g = base_g + detail_fine_g * detail_preserve;
+    float result_r = base_r + detail_fine_r * detail_preserve;
+
+    // === [V31] Contrast 부스팅 1.05f ===
+    // 피부에 투명감과 입체감 부여
+    float contrast = 1.05f;
+    float mid = 128.0f;
+
+    result_b = (result_b - mid) * contrast + mid;
+    result_g = (result_g - mid) * contrast + mid;
+    result_r = (result_r - mid) * contrast + mid;
+
+    // 클리핑
+    result_b = fmaxf(0.0f, fminf(255.0f, result_b));
+    result_g = fmaxf(0.0f, fminf(255.0f, result_g));
+    result_r = fmaxf(0.0f, fminf(255.0f, result_r));
+
+    // === 마스크 기반 최종 블렌드 ===
     float final_b = orig_b * (1.0f - mask_val) + result_b * mask_val;
     float final_g = orig_g * (1.0f - mask_val) + result_g * mask_val;
     float final_r = orig_r * (1.0f - mask_val) + result_r * mask_val;
@@ -1701,11 +1830,11 @@ void simple_composite_kernel(
 
 
 # ==============================================================================
-# [KERNEL 20] Void Fill Composite (V5 - 동기화된 트리플 레이어)
+# [KERNEL 20] Void Fill Composite (V33 - Chromatic Ghost Guard + 3x3 Max Dilate)
 # - 원본 배경 유지 + Void(슬리밍 빈 공간)만 배경 패치 + 워핑된 사람
-# - mask_orig: 동기화된 원본 마스크 (사람이 "있었던" 영역)
-# - mask_fwd: 순방향 워핑 마스크 (사람이 "현재 있는" 영역)
-# - Void = mask_orig > 0 && mask_fwd == 0 (슬리밍으로 비워진 곳)
+# - [V33] Chromatic Ghost Guard: 피부색 감지로 몸 안쪽 배경 침투 차단
+# - [V33] 3x3 Max Dilate: 마스크 마진 2px 물리적 확장
+# - [V31] 3x3 Erosion Guard + smoothstep + pow4 유지
 # ==============================================================================
 VOID_FILL_COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
@@ -1727,18 +1856,42 @@ void void_fill_composite_kernel(
 
     if (x >= width || y >= height) return;
 
-    // === [V6 Advanced] 좌표 격리 원칙 ===
-    // idx_rgb: 현재 픽셀의 정적 좌표 (배경/원본 샘플링에만 사용)
-    // warped_idx_rgb: 워핑된 좌표 (전경 샘플링에만 사용)
-    // 배경(bg)과 원본(src)은 절대로 워핑 좌표(u,v)를 참조하지 않음
-
     int idx = y * width + x;
-    int idx_rgb = idx * 3;  // 정적 좌표 (bg, src 전용)
+    int idx_rgb = idx * 3;
 
     float m_fwd = (float)mask_fwd[idx] / 255.0f;
     float m_orig = (float)mask_orig[idx] / 255.0f;
 
-    // --- 역방향 워핑으로 전경 이미지 가져오기 (사람 영역만) ---
+    // === [V33] 3x3 Max Dilate + Erosion Guard ===
+    // 마스크 마진을 2px 물리적으로 확장하여 경계면 보호
+    float max_neighbor_fwd = m_fwd;
+    float min_neighbor_fwd = m_fwd;
+    bool is_near_edge = false;
+
+    for (int dy_off = -1; dy_off <= 1; dy_off++) {
+        for (int dx_off = -1; dx_off <= 1; dx_off++) {
+            if (dx_off == 0 && dy_off == 0) continue;
+
+            int nx = x + dx_off;
+            int ny = y + dy_off;
+
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                float neighbor_fwd = (float)mask_fwd[ny * width + nx] / 255.0f;
+                max_neighbor_fwd = fmaxf(max_neighbor_fwd, neighbor_fwd);
+                min_neighbor_fwd = fminf(min_neighbor_fwd, neighbor_fwd);
+
+                // 주변에 배경(0.1 미만)이 있으면 경계
+                if (neighbor_fwd < 0.1f) {
+                    is_near_edge = true;
+                }
+            }
+        }
+    }
+
+    // [V33] 3x3 Max로 마스크 확장 (2px 마진)
+    float m_fwd_dilated = max_neighbor_fwd;
+
+    // --- 역방향 워핑으로 전경 이미지 가져오기 ---
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -1751,10 +1904,10 @@ void void_fill_composite_kernel(
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
-    // 워핑된 전경 픽셀 (성형된 사람)
+    // 워핑된 전경 픽셀
     float fg_b, fg_g, fg_r;
     if (u >= 0 && u < width && v >= 0 && v < height) {
-        int warped_idx_rgb = (v * width + u) * 3;  // 워핑 좌표 (fg 전용)
+        int warped_idx_rgb = (v * width + u) * 3;
         fg_b = (float)src[warped_idx_rgb + 0];
         fg_g = (float)src[warped_idx_rgb + 1];
         fg_r = (float)src[warped_idx_rgb + 2];
@@ -1764,8 +1917,7 @@ void void_fill_composite_kernel(
         fg_r = (float)src[idx_rgb + 2];
     }
 
-    // === [격리] 원본/배경은 정적 좌표(idx_rgb)만 사용 ===
-    // 절대로 u, v, warped_idx_rgb를 참조하지 않음 → 굴절 현상 원천 차단
+    // 정적 좌표 기반 원본/배경
     float src_b = (float)src[idx_rgb + 0];
     float src_g = (float)src[idx_rgb + 1];
     float src_r = (float)src[idx_rgb + 2];
@@ -1774,45 +1926,74 @@ void void_fill_composite_kernel(
     float bg_g = (float)bg[idx_rgb + 1];
     float bg_r = (float)bg[idx_rgb + 2];
 
-    // === [V6 Advanced] 개선된 트리플 레이어 합성 ===
+    // === [V33] Chromatic Ghost Guard ===
+    // 피부색 영역에 배경이 침투하는 것을 색상 비교로 차단
+    // YCrCb 색공간에서 피부색 범위 검사 (간략화된 RGB 근사)
+
+    // 1. RGB를 YCrCb 근사로 변환 (피부색 검출용)
+    float Y_src = 0.299f * src_r + 0.587f * src_g + 0.114f * src_b;
+    float Cr_src = (src_r - Y_src) * 0.713f + 128.0f;
+    float Cb_src = (src_b - Y_src) * 0.564f + 128.0f;
+
+    // 2. 피부색 범위 검사 (Cr: 133~173, Cb: 77~127)
+    bool is_skin_color = (Cr_src >= 130.0f && Cr_src <= 180.0f &&
+                          Cb_src >= 70.0f && Cb_src <= 135.0f &&
+                          Y_src >= 50.0f);  // 너무 어두운 색 제외
+
+    // 3. 원본과 배경의 색상 거리 계산
+    float color_dist = sqrtf(
+        (src_r - bg_r) * (src_r - bg_r) +
+        (src_g - bg_g) * (src_g - bg_g) +
+        (src_b - bg_b) * (src_b - bg_b)
+    );
+
+    // 4. Chromatic Guard 활성화 조건:
+    //    - 원본이 피부색이고, 배경과 색상 차이가 크면(>40) 배경 패치 차단
+    bool chromatic_guard = (is_skin_color && color_dist > 40.0f);
+
+    // === [V33] 개선된 트리플 레이어 합성 ===
     float out_b, out_g, out_r;
 
     if (!use_bg) {
-        // 배경 미사용: 워핑된 이미지 그대로
         out_b = fg_b;
         out_g = fg_g;
         out_r = fg_r;
     }
-    else if (m_fwd > 0.1f) {
-        // [Top Layer] 성형된 사람 영역 (순방향 마스크가 충분한 곳)
-        // 워핑된 전경을 그대로 사용
+    else if (m_fwd_dilated > 0.1f && !is_near_edge) {
+        // [Top Layer] 확실한 사람 영역 (확장된 마스크 기준)
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (chromatic_guard) {
+        // [V33] Chromatic Guard: 피부색인데 배경을 넣으려 하면 차단
+        // 원본 유지 (배경 패치 완전 차단)
         out_b = fg_b;
         out_g = fg_g;
         out_r = fg_r;
     }
     else {
-        // [Middle/Bottom Layer] 보이드 또는 순수 배경 영역
-        // m_orig - m_fwd: 슬리밍으로 비워진 정도
-        float void_diff = fmaxf(m_orig - m_fwd, 0.0f);
+        // [Middle/Bottom Layer] 보이드 또는 경계 영역
+        float void_diff = fmaxf(m_orig - m_fwd_dilated, 0.0f);
 
-        // [V30] 미세 떨림 임계값 - 이 값 이하의 마스크 변화는 노이즈로 간주하여 무시
-        float void_threshold = 0.15f;
-        if (void_diff < void_threshold) {
-            void_diff = 0.0f;
-        } else {
-            // 임계값 이상인 경우 0~1 범위로 재정규화
-            void_diff = (void_diff - void_threshold) / (1.0f - void_threshold);
+        // [V31] Erosion Guard 적용: 경계에서는 배경 합성 강도 감소
+        if (is_near_edge) {
+            void_diff *= 0.5f;
         }
 
-        // [V30] Cubic 감쇠 - 경계면을 더 급격하고 깔끔하게 처리
-        // 3차 함수로 작은 떨림은 강하게 억제, 확실한 보이드만 반영
-        float void_alpha_raw = powf(void_diff, 3.0f);
+        // [V31] smoothstep(0.12, 0.40) + pow4 조합
+        float edge0 = 0.12f;
+        float edge1 = 0.40f;
 
-        // [전환 구간 확장] 부드러운 전이를 위해 1.8배 스케일 후 클램프
-        float void_alpha = fminf(void_alpha_raw * 1.8f, 1.0f);
+        float t = (void_diff - edge0) / (edge1 - edge0);
+        t = fmaxf(0.0f, fminf(1.0f, t));
+        float smooth_void = t * t * (3.0f - 2.0f * t);
 
-        // 보이드 영역: 정적 배경으로 패치 (idx_rgb만 사용)
-        // 비보이드 영역: 원본 유지
+        // pow4로 추가 감쇠
+        float void_alpha = powf(smooth_void, 4.0f);
+        void_alpha = fminf(void_alpha, 1.0f);
+
+        // 합성
         out_b = bg_b * void_alpha + src_b * (1.0f - void_alpha);
         out_g = bg_g * void_alpha + src_g * (1.0f - void_alpha);
         out_r = bg_r * void_alpha + src_r * (1.0f - void_alpha);
