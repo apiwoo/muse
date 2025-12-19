@@ -175,8 +175,17 @@ class BeautyWorker(QThread):
                 current_params = self.params.copy()
 
             clean_bg = self.bg_manager.get_background()
-            self.beauty_engine.bg_gpu = clean_bg 
-            
+            self.beauty_engine.bg_gpu = clean_bg
+
+            # [V6] 배경 안정성 확인 및 슬리밍 사용 여부 체크
+            bg_is_stable = self.bg_manager.is_background_stable()
+            any_slimming = (
+                current_params.get('waist_slim', 0.0) > 0.0 or
+                current_params.get('shoulder_narrow', 0.0) > 0.0 or
+                current_params.get('ribcage_slim', 0.0) > 0.0 or
+                current_params.get('hip_widen', 0.0) > 0.0
+            )
+
             t_beauty_start = time.perf_counter()
             # [DEBUG] Beauty Engine Inputs Logging (Throttled)
             if frame_count % 30 == 0:
@@ -191,12 +200,35 @@ class BeautyWorker(QThread):
                 body_landmarks=keypoints,
                 params=current_params,
                 mask=alpha_matte,
-                frame_cpu=frame_bgr_cpu  # Pass CPU frame to avoid GPU->CPU transfer
+                frame_cpu=frame_bgr_cpu,  # Pass CPU frame to avoid GPU->CPU transfer
+                bg_stable=bg_is_stable    # [V6] 배경 안정성 플래그 전달
             )
             t_beauty_end = time.perf_counter()
             
             # [Added] Skeleton Drawing Logic
             final_output = frame_out_gpu
+
+            # [V6] 배경 미캡처 + 슬리밍 활성화 시 경고 표시
+            if not bg_is_stable and any_slimming:
+                try:
+                    if hasattr(final_output, 'get'):
+                        warn_frame = final_output.get()
+                    else:
+                        warn_frame = final_output.copy()
+
+                    # 빨간색 경고 메시지 오버레이
+                    warning_text = "Press 'B' to capture background for slimming"
+                    cv2.putText(warn_frame, warning_text, (20, 40),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2, cv2.LINE_AA)
+
+                    if hasattr(final_output, 'get'):
+                        final_output = cp.asarray(warn_frame)
+                    else:
+                        final_output = warn_frame
+                except Exception as e:
+                    if frame_count % 60 == 0:
+                        print(f"[WARN] Warning overlay failed: {e}")
+
             if current_params.get('show_body_debug', False) and keypoints is not None:
                 try:
                     # [Fix: Sync Required]

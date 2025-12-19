@@ -761,7 +761,7 @@ class BeautyEngine:
     # ==========================================================================
     # Main Processing Pipeline
     # ==========================================================================
-    def process(self, frame, faces, body_landmarks=None, params=None, mask=None, frame_cpu=None):
+    def process(self, frame, faces, body_landmarks=None, params=None, mask=None, frame_cpu=None, bg_stable=False):
         """
         Main processing pipeline
 
@@ -771,6 +771,7 @@ class BeautyEngine:
         :param params: Processing parameters dict
         :param mask: Alpha mask for compositing
         :param frame_cpu: Optional CPU frame to avoid GPU->CPU transfer
+        :param bg_stable: [V6] 정적 배경 안정성 플래그 (True: 슬리밍 합성 가능)
         :return: Processed frame
         """
         if frame is None or not HAS_CUDA:
@@ -818,7 +819,8 @@ class BeautyEngine:
                 self.has_bg = True
 
             # Mask handling
-            if self.has_bg and mask is not None:
+            # [V6] 정적 배경이 안정적일 때만 슬리밍 합성 활성화 (일렁임 방지)
+            if self.has_bg and mask is not None and bg_stable:
                 if hasattr(mask, 'device'):
                     mask_gpu = mask
                 else:
@@ -944,16 +946,27 @@ class BeautyEngine:
                  w, h, 2)  # radius=2 for small holes
             )
 
+            # [V6 Advanced] 4-4.5. 마스크 공간 평활화 (에지 일렁임 해결)
+            # 가우시안 필터로 마스크 경계면을 부드럽게 만들어 떨림 전이 방지
+            smoothed_fwd_mask = cupyx.scipy.ndimage.gaussian_filter(
+                self.forward_mask_dilated_gpu.astype(cp.float32), sigma=1.5
+            ).astype(cp.uint8)
+
+            # stabilized_mask에도 에지 평활화 적용 (선택적)
+            smoothed_orig_mask = cupyx.scipy.ndimage.gaussian_filter(
+                stabilized_mask.astype(cp.float32), sigma=1.0
+            ).astype(cp.uint8)
+
             # 4-5. 트리플 레이어 합성 (Void Fill)
-            # - mask_orig (stabilized): 사람이 "있었던" 영역
-            # - mask_fwd (dilated): 사람이 "현재 있는" 영역 (슬리밍 후)
+            # - mask_orig (smoothed): 사람이 "있었던" 영역 (평활화됨)
+            # - mask_fwd (smoothed): 사람이 "현재 있는" 영역 (평활화됨)
             # - Void = mask_orig > 0 && mask_fwd == 0
             result_gpu = cp.empty_like(frame_gpu)
 
             self.void_fill_composite_kernel(
                 grid_dim, block_dim,
                 (source_for_warp, self.bg_gpu,
-                 stabilized_mask, self.forward_mask_dilated_gpu,
+                 smoothed_orig_mask, smoothed_fwd_mask,  # [V6 Advanced] 평활화된 마스크 사용
                  result_gpu,
                  self.gpu_dx, self.gpu_dy,
                  w, h, sw, sh, scale, use_bg)

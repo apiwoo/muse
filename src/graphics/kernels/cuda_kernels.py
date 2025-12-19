@@ -1715,13 +1715,18 @@ void void_fill_composite_kernel(
 
     if (x >= width || y >= height) return;
 
+    // === [V6 Advanced] 좌표 격리 원칙 ===
+    // idx_rgb: 현재 픽셀의 정적 좌표 (배경/원본 샘플링에만 사용)
+    // warped_idx_rgb: 워핑된 좌표 (전경 샘플링에만 사용)
+    // 배경(bg)과 원본(src)은 절대로 워핑 좌표(u,v)를 참조하지 않음
+
     int idx = y * width + x;
-    int idx_rgb = idx * 3;
+    int idx_rgb = idx * 3;  // 정적 좌표 (bg, src 전용)
 
     float m_fwd = (float)mask_fwd[idx] / 255.0f;
     float m_orig = (float)mask_orig[idx] / 255.0f;
 
-    // --- 역방향 워핑으로 전경 이미지 가져오기 ---
+    // --- 역방향 워핑으로 전경 이미지 가져오기 (사람 영역만) ---
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -1734,10 +1739,10 @@ void void_fill_composite_kernel(
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
-    // 워핑된 전경 픽셀
+    // 워핑된 전경 픽셀 (성형된 사람)
     float fg_b, fg_g, fg_r;
     if (u >= 0 && u < width && v >= 0 && v < height) {
-        int warped_idx_rgb = (v * width + u) * 3;
+        int warped_idx_rgb = (v * width + u) * 3;  // 워핑 좌표 (fg 전용)
         fg_b = (float)src[warped_idx_rgb + 0];
         fg_g = (float)src[warped_idx_rgb + 1];
         fg_r = (float)src[warped_idx_rgb + 2];
@@ -1747,17 +1752,17 @@ void void_fill_composite_kernel(
         fg_r = (float)src[idx_rgb + 2];
     }
 
-    // 원본 픽셀 (Bottom layer)
+    // === [격리] 원본/배경은 정적 좌표(idx_rgb)만 사용 ===
+    // 절대로 u, v, warped_idx_rgb를 참조하지 않음 → 굴절 현상 원천 차단
     float src_b = (float)src[idx_rgb + 0];
     float src_g = (float)src[idx_rgb + 1];
     float src_r = (float)src[idx_rgb + 2];
 
-    // 정적 배경 픽셀 (Middle layer - Void 패치용)
     float bg_b = (float)bg[idx_rgb + 0];
     float bg_g = (float)bg[idx_rgb + 1];
     float bg_r = (float)bg[idx_rgb + 2];
 
-    // === 트리플 레이어 합성 ===
+    // === [V6 Advanced] 개선된 트리플 레이어 합성 ===
     float out_b, out_g, out_r;
 
     if (!use_bg) {
@@ -1766,28 +1771,30 @@ void void_fill_composite_kernel(
         out_g = fg_g;
         out_r = fg_r;
     }
-    else if (m_fwd > 0.05f) {
-        // [Top Layer] 성형된 사람 영역 (순방향 마스크가 있는 곳)
+    else if (m_fwd > 0.1f) {
+        // [Top Layer] 성형된 사람 영역 (순방향 마스크가 충분한 곳)
         // 워핑된 전경을 그대로 사용
         out_b = fg_b;
         out_g = fg_g;
         out_r = fg_r;
     }
-    else if (m_orig > 0.1f && m_fwd < 0.05f) {
-        // [Middle Layer] VOID 영역 (슬리밍 빈 공간)
-        // 원래 사람이 있었으나 (m_orig > 0) 슬리밍으로 비워진 곳 (m_fwd == 0)
-        // 정적 배경으로 패치
-        float void_alpha = fminf(m_orig * 2.0f, 1.0f);  // 부드러운 전환
+    else {
+        // [Middle/Bottom Layer] 보이드 또는 순수 배경 영역
+        // m_orig - m_fwd: 슬리밍으로 비워진 정도
+        float void_diff = fmaxf(m_orig - m_fwd, 0.0f);
+
+        // [비선형 블렌딩] powf로 마스크 떨림이 노이즈로 나타나는 것 방지
+        // 제곱 함수로 작은 떨림은 억제, 큰 차이만 반영
+        float void_alpha_raw = powf(void_diff, 2.0f);
+
+        // [전환 구간 확장] 부드러운 전이를 위해 1.5배 스케일 후 클램프
+        float void_alpha = fminf(void_alpha_raw * 1.5f, 1.0f);
+
+        // 보이드 영역: 정적 배경으로 패치 (idx_rgb만 사용)
+        // 비보이드 영역: 원본 유지
         out_b = bg_b * void_alpha + src_b * (1.0f - void_alpha);
         out_g = bg_g * void_alpha + src_g * (1.0f - void_alpha);
         out_r = bg_r * void_alpha + src_r * (1.0f - void_alpha);
-    }
-    else {
-        // [Bottom Layer] 순수 배경 영역 (원래부터 배경)
-        // 원본 유지 (화질 손실 없음)
-        out_b = src_b;
-        out_g = src_g;
-        out_r = src_r;
     }
 
     dst[idx_rgb + 0] = (unsigned char)out_b;

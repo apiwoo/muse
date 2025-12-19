@@ -110,6 +110,15 @@ class AdaptiveBackground:
         # 4. Apply Update
         self.bg_buffer = self.bg_buffer * (1.0 - final_rate) + current_frame_float * final_rate
 
+    def is_background_stable(self):
+        """
+        [V6] 배경 안정성 확인
+        정적 배경이 로드된 경우에만 True 반환.
+        - True: 파일에서 로드되었거나 'B'키로 캡처됨 → 슬리밍 합성 가능
+        - False: 적응형 배경 모드 → 슬리밍 합성 시 일렁임 발생 가능
+        """
+        return self.is_static_loaded
+
     def get_background(self):
         if self.bg_buffer is None:
             return cp.zeros((self.h, self.w, 3), dtype=cp.uint8)
