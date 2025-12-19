@@ -1,6 +1,6 @@
 # Project MUSE - download_models.py
 # (C) 2025 MUSE Corp. All rights reserved.
-# Target: SAM 2, ViTPose (Huge & Base), MODNet (CKPT & ONNX)
+# Target: SAM 2, ViTPose (Huge Only), MODNet (CKPT & ONNX)
 # Updated: Added robust Google Drive support without gdown dependency
 
 import os
@@ -13,14 +13,10 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_ROOT = os.path.join(BASE_DIR, "assets", "models")
 LIBS_DIR = os.path.join(BASE_DIR, "libs")
 
-# 1. ViTPose Models (Teacher & Baseline)
-# [Teacher] Huge: 정확도 최우선 (라벨링용)
+# 1. ViTPose Model (Huge Only)
+# [Runtime] Huge: 정확도 최우선 (실시간 + 라벨링용)
 VITPOSE_HUGE_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/coco/vitpose-h-coco.pth"
 VITPOSE_HUGE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_huge_coco_256x192.pth")
-
-# [Runtime] Base: 속도 최우선 (실시간 테스트용)
-VITPOSE_BASE_URL = "https://huggingface.co/JunkyByte/easy_ViTPose/resolve/main/torch/coco/vitpose-b-coco.pth"
-VITPOSE_BASE_PATH = os.path.join(MODEL_ROOT, "tracking", "vitpose_base_coco_256x192.pth")
 
 # 2. SAM 2 Hiera-Large (Teacher for Segmentation - Video)
 SAM2_URL = "https://dl.fbaipublicfiles.com/segment_anything_2/072824/sam2_hiera_large.pt"
@@ -201,10 +197,9 @@ def main():
     os.makedirs(os.path.dirname(VITPOSE_HUGE_PATH), exist_ok=True)
     os.makedirs(os.path.dirname(MODNET_CKPT_PATH), exist_ok=True)
 
-    # 1. ViTPose (Pose Models)
-    print("\n>>> Checking Pose Models...")
+    # 1. ViTPose (Pose Model - Huge Only)
+    print("\n>>> Checking Pose Model (Huge)...")
     download_file(VITPOSE_HUGE_URL, VITPOSE_HUGE_PATH)
-    download_file(VITPOSE_BASE_URL, VITPOSE_BASE_PATH)
     
     # 2. SAM 2 (Teacher Models)
     print("\n>>> Checking SAM 2 Models...")

@@ -1161,13 +1161,25 @@ void lab_skin_smooth_kernel(
     float detail_g = orig_g - smooth_g;
     float detail_r = orig_r - smooth_r;
 
+    // === [V30] 적응형 디테일 보존 ===
+    // 휘도(Luminance) 기반 디테일 크기 계산
+    float detail_mag = fabsf(detail_r * 0.299f + detail_g * 0.587f + detail_b * 0.114f);
+
+    // 엣지 임계값: 이 값 이상의 디테일은 윤곽선(눈코입)으로 간주
+    float edge_threshold = 15.0f;
+
+    // 적응형 디테일 강도: 엣지 영역은 더 많이 보존
+    // detail_mag가 edge_threshold 이상이면 디테일을 100% 유지
+    // detail_mag가 0이면 detail_strength 값 그대로 사용
+    float edge_factor = fminf(detail_mag / edge_threshold, 1.0f);
+    float adaptive_detail = detail_strength + (1.0f - detail_strength) * edge_factor;
+
     // === 피부 텍스처 스무딩 + 윤곽선 디테일 보존 ===
-    // detail_strength=0 → 완전 스무딩 (피부결 제거)
-    // detail_strength=1 → 원본 유지 (스무딩 효과 없음)
-    // 권장값: 0.3~0.5 (피부결은 줄이되 눈코입은 유지)
-    float result_b = smooth_b + detail_b * detail_strength;
-    float result_g = smooth_g + detail_g * detail_strength;
-    float result_r = smooth_r + detail_r * detail_strength;
+    // 피부결(낮은 detail_mag): detail_strength 적용 → 스무딩
+    // 눈코입 윤곽(높은 detail_mag): adaptive_detail → 거의 원본 유지
+    float result_b = smooth_b + detail_b * adaptive_detail;
+    float result_g = smooth_g + detail_g * adaptive_detail;
+    float result_r = smooth_r + detail_r * adaptive_detail;
 
     // 클리핑 (0~255 범위 유지)
     result_b = fmaxf(0.0f, fminf(255.0f, result_b));
@@ -1783,12 +1795,21 @@ void void_fill_composite_kernel(
         // m_orig - m_fwd: 슬리밍으로 비워진 정도
         float void_diff = fmaxf(m_orig - m_fwd, 0.0f);
 
-        // [비선형 블렌딩] powf로 마스크 떨림이 노이즈로 나타나는 것 방지
-        // 제곱 함수로 작은 떨림은 억제, 큰 차이만 반영
-        float void_alpha_raw = powf(void_diff, 2.0f);
+        // [V30] 미세 떨림 임계값 - 이 값 이하의 마스크 변화는 노이즈로 간주하여 무시
+        float void_threshold = 0.15f;
+        if (void_diff < void_threshold) {
+            void_diff = 0.0f;
+        } else {
+            // 임계값 이상인 경우 0~1 범위로 재정규화
+            void_diff = (void_diff - void_threshold) / (1.0f - void_threshold);
+        }
 
-        // [전환 구간 확장] 부드러운 전이를 위해 1.5배 스케일 후 클램프
-        float void_alpha = fminf(void_alpha_raw * 1.5f, 1.0f);
+        // [V30] Cubic 감쇠 - 경계면을 더 급격하고 깔끔하게 처리
+        // 3차 함수로 작은 떨림은 강하게 억제, 확실한 보이드만 반영
+        float void_alpha_raw = powf(void_diff, 3.0f);
+
+        // [전환 구간 확장] 부드러운 전이를 위해 1.8배 스케일 후 클램프
+        float void_alpha = fminf(void_alpha_raw * 1.8f, 1.0f);
 
         // 보이드 영역: 정적 배경으로 패치 (idx_rgb만 사용)
         // 비보이드 영역: 원본 유지

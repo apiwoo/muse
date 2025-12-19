@@ -28,7 +28,7 @@ def merge_and_convert(profile_name, mode='pose'):
         return False
 
 def _merge_pose(profile_name, base_dir, model_dir, personal_dir):
-    base_pth = os.path.join(model_dir, "tracking", "vitpose_base_coco_256x192.pth")
+    base_pth = os.path.join(model_dir, "tracking", "vitpose_huge_coco_256x192.pth")
     lora_pth = os.path.join(personal_dir, f"vitpose_lora_weights_{profile_name}.pth")
     engine_path = os.path.join(personal_dir, f"vitpose_lora_{profile_name}.engine")
     onnx_path = os.path.join(personal_dir, f"vitpose_lora_{profile_name}.onnx")
@@ -55,7 +55,7 @@ def _merge_pose(profile_name, base_dir, model_dir, personal_dir):
         print("   -> Run 'tools/download_models.py' to fetch base weights.")
         return False
 
-    model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=768, depth=12)
+    model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32)
     # [Fix] weights_only=True added to silence warning
     checkpoint = torch.load(base_pth, map_location='cpu', weights_only=True)
     state_dict = checkpoint.get('state_dict', checkpoint)

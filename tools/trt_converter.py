@@ -19,11 +19,10 @@ def run_export_worker(pth_path, onnx_path, variant):
     import torch.nn as nn
     
     # --------------------------------------------------------
-    # ViTPose Configs
+    # ViTPose Configs (Huge Only)
     # --------------------------------------------------------
     MODEL_CONFIGS = {
         'huge': {'embed_dim': 1280, 'depth': 32, 'num_heads': 16},
-        'base': {'embed_dim': 768, 'depth': 12, 'num_heads': 12},
     }
     
     cfg = MODEL_CONFIGS.get(variant.lower())
@@ -32,7 +31,7 @@ def run_export_worker(pth_path, onnx_path, variant):
         sys.exit(1)
 
     class PatchEmbed(nn.Module):
-        def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=768):
+        def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=1280):
             super().__init__()
             self.img_size = img_size
             self.grid_size = (img_size[0] // patch_size, img_size[1] // patch_size)
@@ -44,7 +43,7 @@ def run_export_worker(pth_path, onnx_path, variant):
             return x
 
     class Attention(nn.Module):
-        def __init__(self, dim, num_heads=12, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+        def __init__(self, dim, num_heads=16, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
             super().__init__()
             self.num_heads = num_heads
             head_dim = dim // num_heads
@@ -95,7 +94,7 @@ def run_export_worker(pth_path, onnx_path, variant):
             return x
 
     class ViTPose(nn.Module):
-        def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., num_classes=17):
+        def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4., num_classes=17):
             super().__init__()
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
             self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim)) 
@@ -288,27 +287,20 @@ def main():
 
     # If run directly (Manager Mode for default conversion)
     print("========================================================")
-    print("   MUSE ViTPose Converter (Dual Edition: Huge & Base)")
+    print("   MUSE ViTPose Converter (Huge Model Only)")
     print("========================================================")
 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     MODEL_DIR = os.path.join(BASE_DIR, "assets", "models", "tracking")
     
-    # Define Targets
+    # Define Targets (Huge Only)
     targets = [
         {
-            'name': 'Huge (Teacher)',
+            'name': 'Huge (Runtime)',
             'variant': 'huge',
             'pth': os.path.join(MODEL_DIR, "vitpose_huge_coco_256x192.pth"),
             'onnx': os.path.join(MODEL_DIR, "vitpose_huge.onnx"),
             'engine': os.path.join(MODEL_DIR, "vitpose_huge.engine")
-        },
-        {
-            'name': 'Base (Runtime)',
-            'variant': 'base',
-            'pth': os.path.join(MODEL_DIR, "vitpose_base_coco_256x192.pth"),
-            'onnx': os.path.join(MODEL_DIR, "vitpose_base.onnx"),
-            'engine': os.path.join(MODEL_DIR, "vitpose_base.engine")
         }
     ]
 

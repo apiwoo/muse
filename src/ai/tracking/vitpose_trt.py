@@ -19,27 +19,21 @@ except ImportError:
     pass
 
 class VitPoseTrt:
-    # [Modified] Default Path set to 'vitpose_base.engine'
+    # [Modified] Default Path set to 'vitpose_huge.engine'
     def __init__(self, engine_path=None):
         """
         [High-End] ViTPose TensorRT Inference Engine
         - Backend: TensorRT 10.x + CuPy (Zero-Copy)
-        - Model: ViTPose (Base/Huge)
+        - Model: ViTPose Huge
         - V2.1 Update: Safe Loader (Memory Leak Fix)
         """
         if engine_path is None:
             # Auto-detect path relative to this file
             root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-            engine_path = os.path.join(root_dir, "assets/models/tracking/vitpose_base.engine")
+            engine_path = os.path.join(root_dir, "assets/models/tracking/vitpose_huge.engine")
 
         if not os.path.exists(engine_path):
-            # Fallback to huge if base is missing
-            fallback = engine_path.replace("vitpose_base.engine", "vitpose_huge.engine")
-            if os.path.exists(fallback):
-                print(f"[ViTPose] Base engine not found. Fallback to Huge: {fallback}")
-                engine_path = fallback
-            else:
-                raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}\n-> Please run 'tools/trt_converter.py' to rebuild it.")
+            raise FileNotFoundError(f"[ERROR] Engine file not found: {engine_path}\n-> Please run 'tools/trt_converter.py' to rebuild it.")
 
         # [Safety Check] File Size Validation
         file_size_mb = os.path.getsize(engine_path) / (1024 * 1024)

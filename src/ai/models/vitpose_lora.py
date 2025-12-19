@@ -40,10 +40,10 @@ class LoRALayer(nn.Module):
         lora_out = (x @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
         return out + lora_out
 
-# --- ViTPose Architecture (Matched with Base Weights) ---
+# --- ViTPose Architecture (Matched with Huge Weights) ---
 
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=768):
+    def __init__(self, img_size=(256, 192), patch_size=16, in_chans=3, embed_dim=1280):
         super().__init__()
         self.img_size = img_size
         self.grid_size = (img_size[0] // patch_size, img_size[1] // patch_size)
@@ -55,7 +55,7 @@ class PatchEmbed(nn.Module):
         return x
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=12, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=16, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -106,9 +106,9 @@ class Block(nn.Module):
         return x
 
 class ViTPoseLoRA(nn.Module):
-    def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., num_classes=17):
+    def __init__(self, img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4., num_classes=17):
         super().__init__()
-        # Base Model Config (ViT-Base)
+        # Huge Model Config (ViT-Huge)
         self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
         self.pos_embed = nn.Parameter(torch.zeros(1, self.patch_embed.num_patches + 1, embed_dim)) 
         self.blocks = nn.ModuleList([Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=True) for _ in range(depth)])

@@ -1,12 +1,12 @@
 # Project MUSE - beauty_engine.py
-# V29.0: High-Fidelity Skin Smoothing (선명한 매끈함)
-# - Changed: Bilateral Filter → Guided Filter (O(1), 헤일로 없음, 엣지 보존 우수)
-# - Removed: 0.5x 다운스케일 → 원본 해상도 처리 (선명도 100% 유지)
-# - Added: Frequency Separation (저주파 균일화 + 고주파 디테일 보존)
-# - Formula: Output = GuidedResult + (Original - GuidedResult) * detail_preserve
-# - Preserved: V28.0 Synchronized Triple-Layer Composite
-# - Preserved: V27.0 Forward Mask Warping
-# - Preserved: All legacy features (TPS, Intrusion Handling, One-Euro Filter)
+# V30.0: Anti-Flicker & Edge-Preserving Enhancement (잔상 제거 + 선명도 강화)
+# - [V30] VOID_FILL: Cubic 감쇠(pow3) + 임계값(0.15f)으로 슬리밍 잔상 제거
+# - [V30] LAB_SMOOTH: 적응형 디테일 보존으로 눈코입 윤곽 100% 유지
+# - [V30] Guided Filter: radius 4~8, epsilon 0.01~0.03 (선명도 확보)
+# - [V30] detail_strength: 0.9~0.5, blend_strength: max 0.85 (과보정 억제)
+# - [V30] MaskStabilizer: alpha 0.22 (워핑 동기화 정밀도 향상)
+# - [V30] bg_stable 감쇄: 배경 불안정 시 슬리밍 강도 50% 감쇄
+# - Preserved: V29.0 High-Fidelity Skin Smoothing, V28.0 Synchronized Composite
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -101,11 +101,11 @@ class MaskStabilizer:
     Problem: Warping grid has latency from LandmarkStabilizer, but mask is realtime.
     Solution: Apply similar smoothing to mask so they move together.
     """
-    def __init__(self, alpha=0.3):
+    def __init__(self, alpha=0.22):
         """
         Args:
             alpha: Smoothing factor (0.0 = full lag, 1.0 = no smoothing)
-                   Default 0.3 matches approximate landmark stabilizer lag
+                   [V30] 0.22로 조정하여 LandmarkStabilizer와의 동기화 정밀도 향상
         """
         self.alpha = alpha
         self.prev_mask = None
@@ -228,30 +228,32 @@ class MaskManager:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V29.0 High-Fidelity Skin Smoothing
+# [메인 클래스] BeautyEngine - V30.0 Anti-Flicker & Edge-Preserving Enhancement
 # ==============================================================================
 class BeautyEngine:
     """
-    V29.0 Beauty Processing Engine - High-Fidelity Skin Smoothing
+    V30.0 Beauty Processing Engine - Anti-Flicker & Edge-Preserving Enhancement
 
-    Key Changes (V29.0):
-    - Guided Filter: Bilateral 대체, O(1) 복잡도, 헤일로 없음, 엣지 보존 우수
-    - No Downscaling: 원본 해상도에서 처리 → 선명도 100% 유지
-    - Frequency Separation: 저주파(피부색) 균일화 + 고주파(디테일) 보존
-    - Formula: Output = GuidedResult + (Original - GuidedResult) * 0.85
+    Key Changes (V30.0):
+    - VOID_FILL: Cubic 감쇠(pow3) + 임계값(0.15f)으로 슬리밍 잔상 제거
+    - LAB_SMOOTH: 적응형 디테일 보존으로 눈코입 윤곽 100% 유지
+    - Guided Filter: radius 4~8, epsilon 0.01~0.03 (반경 축소로 선명도 확보)
+    - detail_strength: 0.9~0.5, blend_strength: max 0.85 (과보정 억제)
+    - MaskStabilizer: alpha 0.22 (워핑 동기화 정밀도 향상)
+    - bg_stable 감쇄: 배경 불안정 시 슬리밍 강도 50% 자동 감쇄
+
+    Preserved from V29.0:
+    - High-Fidelity Skin Smoothing (Frequency Separation)
 
     Preserved from V28.0:
-    - MaskStabilizer: 마스크-워핑 시간 동기화로 번개 현상 해결
-    - Void Fill Composite: 원본 유지 + Void(슬리밍 빈 공간)만 배경 패치
+    - MaskStabilizer: 마스크-워핑 시간 동기화
+    - Void Fill Composite: 원본 유지 + Void만 배경 패치
 
-    Preserved from V27.0:
-    - Forward Warp Mask: 순방향 마스크 워핑으로 정확한 슬리밍 영역 계산
-
-    Result: "매끈한" 피부 (색상만 균일) vs "흐린" 피부 (전체 블러)
+    Result: 잔상 없는 슬리밍 + 눈코입 선명한 피부 보정
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V29.0 High-Fidelity Skin Smoothing Ready")
+        print("[BEAUTY] [BeautyEngine] V30.0 Anti-Flicker Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -297,7 +299,8 @@ class BeautyEngine:
 
         if HAS_CUDA:
             # V28.0: Initialize MaskStabilizer
-            self.mask_stabilizer = MaskStabilizer(alpha=0.3)
+            # [V30] alpha=0.22로 조정하여 워핑 그리드와 동기화 정밀도 향상
+            self.mask_stabilizer = MaskStabilizer(alpha=0.22)
             self.stream = cp.cuda.Stream(non_blocking=True)
             # Core kernels (warping, compositing)
             self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
@@ -620,8 +623,9 @@ class BeautyEngine:
                         (h + block_dim[1] - 1) // block_dim[1])
 
             # Step 1: Guided Filter로 저주파(Base) 추출
-            radius = int(8 + skin_strength * 8)  # 8 ~ 16
-            epsilon = 0.02 + skin_strength * 0.04  # 0.02 ~ 0.06
+            # [V30] 반경 축소로 선명도 확보
+            radius = int(4 + skin_strength * 4)  # 4 ~ 8
+            epsilon = 0.01 + skin_strength * 0.02  # 0.01 ~ 0.03 (엣지 보존력 강화)
 
             try:
                 self.guided_filter_kernel(
@@ -639,8 +643,9 @@ class BeautyEngine:
             # detail_strength=0 → 완전 스무딩 (피부결 100% 제거)
             # detail_strength=1 → 원본 유지 (스무딩 없음)
             # skin_strength 높을수록 detail_strength 낮게 → 더 많이 스무딩
-            detail_strength = 0.8 - skin_strength * 0.6  # 0.8 → 0.2 (강도↑ → 디테일↓)
-            blend_strength = min(skin_strength * 1.5, 1.0)  # 최대 100%, 빠르게 도달
+            # [V30] 고주파 정보 유지량 증대: 0.9 → 0.5 (기존 0.8 → 0.2)
+            detail_strength = 0.9 - skin_strength * 0.4  # 0.9 → 0.5 (디테일 더 많이 유지)
+            blend_strength = min(skin_strength * 1.5, 0.85)  # [V30] 최대 85%로 과도한 보정 억제
 
             try:
                 self.lab_smooth_kernel(
@@ -852,20 +857,24 @@ class BeautyEngine:
             # ==================================================================
             self.morph_logic.clear()
 
+            # [V30] bg_stable 감쇄 계수: 배경이 불안정하면 슬리밍 강도 50% 감쇄
+            slim_damping = 1.0 if bg_stable else 0.5
+
             raw_body = body_landmarks.get() if hasattr(body_landmarks, 'get') else body_landmarks
             if raw_body is not None:
                 kpts_xy = raw_body[:, :2]
                 stable_kpts = self.body_stabilizer.update(kpts_xy)
                 scaled_body = stable_kpts * self.map_scale
 
+                # [V30] 슬리밍 파라미터에 damping 적용
                 if params.get('shoulder_narrow', 0) > 0:
-                    self.morph_logic.collect_shoulder_params(scaled_body, params['shoulder_narrow'])
+                    self.morph_logic.collect_shoulder_params(scaled_body, params['shoulder_narrow'] * slim_damping)
                 if params.get('ribcage_slim', 0) > 0:
-                    self.morph_logic.collect_ribcage_params(scaled_body, params['ribcage_slim'])
+                    self.morph_logic.collect_ribcage_params(scaled_body, params['ribcage_slim'] * slim_damping)
                 if params.get('waist_slim', 0) > 0:
-                    self.morph_logic.collect_waist_params(scaled_body, params['waist_slim'])
+                    self.morph_logic.collect_waist_params(scaled_body, params['waist_slim'] * slim_damping)
                 if params.get('hip_widen', 0) > 0:
-                    self.morph_logic.collect_hip_params(scaled_body, params['hip_widen'])
+                    self.morph_logic.collect_hip_params(scaled_body, params['hip_widen'] * slim_damping)
 
             if faces:
                 lm_small = stable_face * self.map_scale

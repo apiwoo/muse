@@ -97,7 +97,7 @@ class ConsensusEngine:
     def __init__(self, root_dir):
         """
         [Hybrid Mode V9.0]
-        - STANDARD: Parallelized MODNet + ViTPose (Base)
+        - STANDARD: Parallelized MODNet + ViTPose (Huge)
         - LORA: Parallelized MODNet + ViTPose (LoRA)
         - PERSONAL: DualInferenceTRT (using CUDA Streams)
         """
@@ -182,22 +182,20 @@ class ConsensusEngine:
                 self.active_mode = "STANDARD"
 
         # --- STRATEGY: STANDARD (Default) ---
-        # Load Base Model
-        if 'base' not in self.pose_models_cache:
-            base_path = os.path.join(self.model_dir, "tracking", "vitpose_base.engine")
-            if not os.path.exists(base_path): # Fallback Huge
-                base_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
-            
-            try:
-                if os.path.exists(base_path) and VitPoseTrt:
-                    print(f"[AI] Loading Standard Base Model...")
-                    self.pose_models_cache['base'] = VitPoseTrt(base_path)
-            except Exception as e:
-                print(f"[ERROR] Base Pose Init Failed: {e}")
+        # Load Huge Model
+        if 'huge' not in self.pose_models_cache:
+            huge_path = os.path.join(self.model_dir, "tracking", "vitpose_huge.engine")
 
-        self.active_pose_model = self.pose_models_cache.get('base')
+            try:
+                if os.path.exists(huge_path) and VitPoseTrt:
+                    print(f"[AI] Loading Standard Huge Model...")
+                    self.pose_models_cache['huge'] = VitPoseTrt(huge_path)
+            except Exception as e:
+                print(f"[ERROR] Huge Pose Init Failed: {e}")
+
+        self.active_pose_model = self.pose_models_cache.get('huge')
         self._ensure_modnet_ready()
-        print(f"[AI] Strategy Active: STANDARD (Base Model)")
+        print(f"[AI] Strategy Active: STANDARD (Huge Model)")
 
     def _ensure_modnet_ready(self):
         if not self.modnet.is_ready:

@@ -34,7 +34,7 @@ class LoRATrainer:
         self.model_save_dir = os.path.join(root_dir, "assets", "models", "personal")
         
         # Model Paths
-        self.pose_base_path = os.path.join(root_dir, "assets", "models", "tracking", "vitpose_base_coco_256x192.pth")
+        self.pose_base_path = os.path.join(root_dir, "assets", "models", "tracking", "vitpose_huge_coco_256x192.pth")
         
         # MODNet Base: Prioritize CKPT, fallback to others if needed.
         # For simplicity, we assume download_models.py fetched 'modnet_webcam_portrait_matting.ckpt'
@@ -146,7 +146,7 @@ class LoRATrainer:
             print("   -> Run 'tools/download_models.py' first.")
             sys.exit(1)
             
-        model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=768, depth=12)
+        model = ViTPoseLoRA(img_size=(256, 192), patch_size=16, embed_dim=1280, depth=32)
         try:
             checkpoint = torch.load(self.pose_base_path, map_location='cpu')
             state_dict = checkpoint.get('state_dict', checkpoint)
