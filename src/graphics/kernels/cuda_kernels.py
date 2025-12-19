@@ -2193,7 +2193,7 @@ void clean_composite_kernel(
     float bg_g = (float)bg[idx_rgb + 1];
     float bg_r = (float)bg[idx_rgb + 2];
 
-    // === Void Only Fill 합성 ===
+    // === [V37] Void Only Fill 합성 (Smooth Weight) ===
     float out_b, out_g, out_r;
 
     if (!use_bg) {
@@ -2202,32 +2202,26 @@ void clean_composite_kernel(
         out_g = warped_g;
         out_r = warped_r;
     } else {
-        // Void 감지: 원래 사람이 있었지만(m_orig > 0) 현재는 없는 곳(m_fwd == 0)
-        // 이 영역이 슬리밍으로 인해 비어진 "Void" 영역
+        // [V37] Smooth Void Weight - 이진 판정 대신 연속 가중치
+        float void_weight = m_orig * (1.0f - m_fwd);
 
-        const float VOID_THRESHOLD = 0.15f;
-        const float PERSON_THRESHOLD = 0.15f;
-
-        bool is_void = (m_orig > VOID_THRESHOLD) && (m_fwd < PERSON_THRESHOLD);
-
-        if (is_void) {
-            // Void 영역: 저장된 배경으로 채움
-            // 부드러운 블렌딩을 위해 void_strength 계산
-            float void_strength = m_orig * (1.0f - m_fwd);
-
-            // smoothstep for soft edges
-            float t = fminf(1.0f, void_strength * 2.0f);
-            float blend = t * t * (3.0f - 2.0f * t);
-
-            out_b = bg_b * blend + warped_b * (1.0f - blend);
-            out_g = bg_g * blend + warped_g * (1.0f - blend);
-            out_r = bg_r * blend + warped_r * (1.0f - blend);
-        } else {
-            // 비-Void 영역: 워핑된 원본 프레임 그대로 사용
-            out_b = warped_b;
-            out_g = warped_g;
-            out_r = warped_r;
+        // [V37] Noise Floor: 아주 작은 void는 무시
+        const float VOID_NOISE_FLOOR = 0.03f;
+        if (void_weight < VOID_NOISE_FLOOR) {
+            void_weight = 0.0f;
         }
+
+        // [V37] Smoothstep for gradual transition
+        float edge0 = 0.05f;
+        float edge1 = 0.25f;
+        float t = (void_weight - edge0) / (edge1 - edge0);
+        t = fmaxf(0.0f, fminf(1.0f, t));
+        float smooth_void = t * t * (3.0f - 2.0f * t);
+
+        // [V37] 연속 블렌딩 (경계 토글링 방지)
+        out_b = bg_b * smooth_void + warped_b * (1.0f - smooth_void);
+        out_g = bg_g * smooth_void + warped_g * (1.0f - smooth_void);
+        out_r = bg_r * smooth_void + warped_r * (1.0f - smooth_void);
     }
 
     dst[idx_rgb + 0] = (unsigned char)out_b;

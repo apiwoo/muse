@@ -1,10 +1,10 @@
 # Project MUSE - beauty_engine.py
-# V36.0: Warp Grid Based Mask - 근본적 재설계
-# - [V36] 워핑 그리드에서 마스크 직접 생성 (시간 동기화 문제 근본 해결)
-# - [V36] AI 마스크는 use_bg 플래그 결정에만 사용
-# - [V36] 배경에 src 절대 미사용으로 휘어짐 완전 방지
-# - [V36] 단순화된 2레이어 합성: 워핑된 사람 + 정적 배경
-# - Preserved: V34 Grid Modulation, V33 FrameSyncBuffer, V31 Dual-Pass
+# V37.0: Stabilization Pipeline Enhancement - 4단계 안정화 파이프라인
+# - [V37] Stage 1: 랜드마크 분리 댐핑 (얼굴 min_cutoff=0.1, 바디 min_cutoff=0.005)
+# - [V37] Stage 2: 워핑 그리드 히스테리시스 (이중 임계값 2.0/5.0 + Alpha EMA)
+# - [V37] Stage 3: 마스크 Median 합의 (최근 5프레임 중간값)
+# - [V37] Stage 4: CUDA Void Smooth Weight 합성 (연속 가중치로 토글링 방지)
+# - Preserved: V36 Warp Grid Based Mask, V34 Grid Modulation, V33 FrameSyncBuffer
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -180,75 +180,91 @@ class FrameSyncBuffer:
 
 
 # ==============================================================================
-# [V28.0 신규 클래스] MaskStabilizer - 마스크 시간 동기화
-# - 워핑 그리드와 마스크의 시간적 불일치(번개 현상) 해결
-# - LandmarkStabilizer와 유사한 지연으로 마스크 안정화
+# [V28.0 레거시 - 주석 처리] MaskStabilizer - 마스크 시간 동기화
 # ==============================================================================
+"""
+[V28 Legacy - Preserved for Rollback]
 class MaskStabilizer:
-    """
-    Mask Temporal Stabilizer for synchronizing mask with warping grid.
-
-    Problem: Warping grid has latency from LandmarkStabilizer, but mask is realtime.
-    Solution: Apply similar smoothing to mask so they move together.
-    """
     def __init__(self, alpha=0.15):
-        """
-        Args:
-            alpha: Smoothing factor (0.0 = full lag, 1.0 = no smoothing)
-                   [V31] 0.15로 조정하여 WarpGridStabilizer와 동기화
-        """
         self.alpha = alpha
         self.prev_mask = None
 
     def update(self, mask_gpu):
-        """
-        Apply temporal smoothing to mask.
-
-        Args:
-            mask_gpu: Current frame mask (CuPy array, uint8)
-        Returns:
-            Stabilized mask (CuPy array, uint8)
-        """
         if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
             self.prev_mask = mask_gpu.astype(cp.float32)
             return mask_gpu
 
-        # Exponential moving average
         curr_float = mask_gpu.astype(cp.float32)
+        stabilized = self.alpha * curr_float + (1.0 - self.alpha) * self.prev_mask
+        self.prev_mask = stabilized
+        return stabilized.astype(cp.uint8)
+
+    def reset(self):
+        self.prev_mask = None
+"""
+
+# ==============================================================================
+# [V37] MaskStabilizer - Multi-Frame Median Consensus
+# - Multi-Frame Consensus: 최근 5프레임 마스크의 median 사용
+# - 재사용 버퍼: 메모리 할당 오버헤드 최소화
+# - [배제] Morphological 연산 - 성능 대비 효과 미미
+# ==============================================================================
+class MaskStabilizer:
+    """
+    [V37] Mask Temporal Stabilizer with Multi-Frame Median Consensus.
+
+    핵심 변경:
+    - Multi-Frame Consensus: 최근 5프레임 마스크의 median 사용
+    - 재사용 버퍼: 메모리 할당 오버헤드 최소화
+    - [배제] Morphological 연산 - 성능 대비 효과 미미
+    """
+    def __init__(self, alpha=0.10, consensus_frames=5):
+        self.alpha = alpha
+        self.consensus_frames = consensus_frames
+        self.prev_mask = None
+        self.mask_history = []
+        self.stacked_buffer = None  # [V37] 재사용 버퍼
+
+    def update(self, mask_gpu):
+        if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
+            self.prev_mask = mask_gpu.astype(cp.float32)
+            self.mask_history = [mask_gpu.copy() for _ in range(self.consensus_frames)]
+            # [V37] 스택 버퍼 초기화
+            h, w = mask_gpu.shape
+            self.stacked_buffer = cp.zeros((self.consensus_frames, h, w), dtype=cp.uint8)
+            return mask_gpu
+
+        # [V37] 히스토리 업데이트 (FIFO)
+        self.mask_history.pop(0)
+        self.mask_history.append(mask_gpu.copy())
+
+        # [V37] 재사용 버퍼에 스택 (메모리 할당 최소화)
+        for i, m in enumerate(self.mask_history):
+            self.stacked_buffer[i] = m
+
+        # [V37] Multi-Frame Median Consensus
+        consensus_mask = cp.median(self.stacked_buffer, axis=0)
+
+        # [V37] EMA 스무딩
+        curr_float = consensus_mask.astype(cp.float32)
         stabilized = self.alpha * curr_float + (1.0 - self.alpha) * self.prev_mask
         self.prev_mask = stabilized
 
         return stabilized.astype(cp.uint8)
 
     def reset(self):
-        """Reset stabilizer state"""
         self.prev_mask = None
+        self.mask_history = []
+        self.stacked_buffer = None
 
 
 # ==============================================================================
-# [V33 업그레이드] WarpGridStabilizer - 동적 적응형 EMA
-# - 마스크 안정화만으로 부족했던 잔상 문제를 워핑 그리드(dx, dy) 자체에서 해결
-# - [V33] 움직임 속도에 따라 alpha 동적 조절 (느림: 0.15, 빠름: 0.8)
-# - "뒤늦게 따라오는 느낌" 제거를 위한 적응형 스냅 로직
+# [V33 레거시 - 주석 처리] WarpGridStabilizer - 동적 적응형 EMA
 # ==============================================================================
+"""
+[V33 Legacy - Preserved for Rollback]
 class WarpGridStabilizer:
-    """
-    Warp Grid Temporal Stabilizer with Adaptive EMA.
-
-    Problem: Fixed alpha causes "lagging behind" feeling during fast movements.
-    Solution: Dynamically adjust alpha based on grid velocity.
-
-    [V33] 동적 alpha로 빠른 움직임에는 즉각 반응, 느린 움직임에는 안정화
-    - 정지/느림: alpha=0.15 (강한 안정화)
-    - 빠른 움직임: alpha=0.8 (즉각 스냅)
-    """
     def __init__(self, base_alpha=0.15, snap_alpha=0.8, velocity_threshold=3.0):
-        """
-        Args:
-            base_alpha: Base smoothing factor for slow movements (default: 0.15)
-            snap_alpha: Snap factor for fast movements (default: 0.8)
-            velocity_threshold: Grid velocity threshold for snap (pixels/frame)
-        """
         self.base_alpha = base_alpha
         self.snap_alpha = snap_alpha
         self.velocity_threshold = velocity_threshold
@@ -256,40 +272,103 @@ class WarpGridStabilizer:
         self.prev_dy = None
 
     def update(self, dx_gpu, dy_gpu):
-        """
-        Apply adaptive temporal smoothing to warp grid.
-
-        Args:
-            dx_gpu: Current frame dx grid (CuPy array, float32)
-            dy_gpu: Current frame dy grid (CuPy array, float32)
-        Returns:
-            Tuple of stabilized (dx, dy) grids
-        """
         if self.prev_dx is None or self.prev_dx.shape != dx_gpu.shape:
             self.prev_dx = dx_gpu.copy()
             self.prev_dy = dy_gpu.copy()
             return dx_gpu, dy_gpu
 
-        # [V33] 그리드 변화량(속도) 계산
         delta_dx = dx_gpu - self.prev_dx
         delta_dy = dy_gpu - self.prev_dy
-
-        # 전체 그리드의 평균 속도 계산
         velocity = float(cp.mean(cp.sqrt(delta_dx**2 + delta_dy**2)))
 
-        # [V33] 속도 기반 동적 alpha 계산
-        # velocity가 threshold 이상이면 snap_alpha로 전환 (즉각 반응)
-        # velocity가 낮으면 base_alpha 유지 (강한 안정화)
         if velocity > self.velocity_threshold:
-            # 빠른 움직임: 점진적으로 snap_alpha로 전환
             speed_factor = min((velocity - self.velocity_threshold) / self.velocity_threshold, 1.0)
             adaptive_alpha = self.base_alpha + (self.snap_alpha - self.base_alpha) * speed_factor
         else:
             adaptive_alpha = self.base_alpha
 
-        # Exponential moving average with adaptive alpha
         stabilized_dx = adaptive_alpha * dx_gpu + (1.0 - adaptive_alpha) * self.prev_dx
         stabilized_dy = adaptive_alpha * dy_gpu + (1.0 - adaptive_alpha) * self.prev_dy
+
+        self.prev_dx = stabilized_dx.copy()
+        self.prev_dy = stabilized_dy.copy()
+        return stabilized_dx, stabilized_dy
+
+    def reset(self):
+        self.prev_dx = None
+        self.prev_dy = None
+"""
+
+# ==============================================================================
+# [V37] WarpGridStabilizer - 히스테리시스 + Alpha 스무딩
+# - 히스테리시스 이중 임계값: 상태 전환 시 떨림 방지
+# - Alpha Smoothing: alpha 자체도 EMA로 스무딩
+# - Velocity EMA: 순간 속도 변동에 덜 민감하게
+# ==============================================================================
+class WarpGridStabilizer:
+    """
+    [V37] Warp Grid Temporal Stabilizer with Hysteresis + Alpha Smoothing.
+
+    핵심 변경:
+    - 히스테리시스 이중 임계값: 상태 전환 시 떨림 방지
+    - Alpha Smoothing: alpha 자체도 EMA로 스무딩
+    - Velocity EMA: 순간 속도 변동에 덜 민감하게
+    """
+    def __init__(self,
+                 base_alpha=0.08,        # [V37] 정지 시 강한 안정화
+                 snap_alpha=0.6,         # [V37] 빠른 움직임 시 적당한 반응
+                 low_threshold=2.0,      # [V37] 히스테리시스 하한
+                 high_threshold=5.0,     # [V37] 히스테리시스 상한
+                 alpha_smooth=0.3):      # [V37] alpha 변화 스무딩 계수
+        self.base_alpha = base_alpha
+        self.snap_alpha = snap_alpha
+        self.low_threshold = low_threshold
+        self.high_threshold = high_threshold
+        self.alpha_smooth = alpha_smooth
+
+        self.prev_dx = None
+        self.prev_dy = None
+        self.prev_velocity = 0.0
+        self.current_alpha = base_alpha
+        self.is_fast_mode = False
+
+    def update(self, dx_gpu, dy_gpu):
+        if self.prev_dx is None or self.prev_dx.shape != dx_gpu.shape:
+            self.prev_dx = dx_gpu.copy()
+            self.prev_dy = dy_gpu.copy()
+            return dx_gpu, dy_gpu
+
+        # 그리드 변화량 계산
+        delta_dx = dx_gpu - self.prev_dx
+        delta_dy = dy_gpu - self.prev_dy
+        raw_velocity = float(cp.mean(cp.sqrt(delta_dx**2 + delta_dy**2)))
+
+        # [V37] 속도 EMA (순간 변동 스무딩)
+        self.prev_velocity = 0.7 * self.prev_velocity + 0.3 * raw_velocity
+        velocity = self.prev_velocity
+
+        # [V37] 히스테리시스 상태 머신
+        if not self.is_fast_mode and velocity > self.high_threshold:
+            self.is_fast_mode = True
+        elif self.is_fast_mode and velocity < self.low_threshold:
+            self.is_fast_mode = False
+
+        # [V37] 목표 alpha 결정
+        if self.is_fast_mode:
+            speed_factor = min((velocity - self.low_threshold) /
+                              (self.high_threshold - self.low_threshold), 1.0)
+            speed_factor = max(0.0, speed_factor)
+            target_alpha = self.base_alpha + (self.snap_alpha - self.base_alpha) * speed_factor
+        else:
+            target_alpha = self.base_alpha
+
+        # [V37] Alpha 스무딩
+        self.current_alpha = (self.alpha_smooth * target_alpha +
+                             (1.0 - self.alpha_smooth) * self.current_alpha)
+
+        # EMA 적용
+        stabilized_dx = self.current_alpha * dx_gpu + (1.0 - self.current_alpha) * self.prev_dx
+        stabilized_dy = self.current_alpha * dy_gpu + (1.0 - self.current_alpha) * self.prev_dy
 
         self.prev_dx = stabilized_dx.copy()
         self.prev_dy = stabilized_dy.copy()
@@ -297,9 +376,11 @@ class WarpGridStabilizer:
         return stabilized_dx, stabilized_dy
 
     def reset(self):
-        """Reset stabilizer state"""
         self.prev_dx = None
         self.prev_dy = None
+        self.prev_velocity = 0.0
+        self.current_alpha = self.base_alpha
+        self.is_fast_mode = False
 
 
 # ==============================================================================
@@ -427,9 +508,17 @@ class BeautyEngine:
         self.gpu_dx = None
         self.gpu_dy = None
 
-        # Stabilizers (기존 유지)
-        self.body_stabilizer = LandmarkStabilizer(min_cutoff=0.01, base_beta=1.0, high_speed_beta=100.0)
-        self.face_stabilizer = LandmarkStabilizer(min_cutoff=0.5, base_beta=5.0, high_speed_beta=50.0)
+        # [V37] 랜드마크 안정화 강화
+        self.body_stabilizer = LandmarkStabilizer(
+            min_cutoff=0.005,      # 강한 저역통과
+            base_beta=0.5,         # 정지 시 안정
+            high_speed_beta=50.0
+        )
+        self.face_stabilizer = LandmarkStabilizer(
+            min_cutoff=0.1,        # 표정 반응성 유지
+            base_beta=3.0,
+            high_speed_beta=30.0
+        )
 
         # V28.0: Mask Stabilizer (마스크-워핑 시간 동기화)
         self.mask_stabilizer = None  # Initialized when HAS_CUDA
@@ -478,11 +567,14 @@ class BeautyEngine:
         self.warp_grid_mask_forward_gpu = None   # 순방향 워핑된 마스크
 
         if HAS_CUDA:
-            # V33: Initialize Stabilizers with adaptive alpha
-            self.mask_stabilizer = MaskStabilizer(alpha=0.15)
-            # [V33] 동적 alpha: 느린 움직임 0.15, 빠른 움직임 0.8
+            # [V37] 강화된 안정화
+            self.mask_stabilizer = MaskStabilizer(alpha=0.10, consensus_frames=5)
             self.warp_grid_stabilizer = WarpGridStabilizer(
-                base_alpha=0.15, snap_alpha=0.8, velocity_threshold=3.0
+                base_alpha=0.08,
+                snap_alpha=0.6,
+                low_threshold=2.0,
+                high_threshold=5.0,
+                alpha_smooth=0.3
             )
             # [V33] Frame Sync Buffer for AI latency compensation
             self.frame_sync_buffer = FrameSyncBuffer(max_size=3)
@@ -1249,9 +1341,9 @@ class BeautyEngine:
                         order=1
                     ).astype(cp.uint8)
 
-                    # [주의사항] 마스크 경계면 블러링 (너무 칼같으면 인물 외곽 잘림 방지)
+                    # [V37] 경계 안정화 강화 (4.0은 인물 외곽 잘림 우려로 3.0 선택)
                     mask_small_blurred = cupyx.scipy.ndimage.gaussian_filter(
-                        mask_small_gpu.astype(cp.float32), sigma=2.0
+                        mask_small_gpu.astype(cp.float32), sigma=3.0
                     ).astype(cp.uint8)
 
                     # 그리드 모듈레이션 적용
