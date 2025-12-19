@@ -1068,10 +1068,7 @@ void skin_color_expand_kernel(
 
 
 # ==============================================================================
-# [KERNEL 12] Fast Skin Smooth Blend
-# - Combines smoothing and blending in one pass
-# - Uses simple box average for smoothing (fast)
-# - Applies frequency separation for natural look
+# [KERNEL 12] Fast Skin Smooth Blend (Legacy)
 # ==============================================================================
 FAST_SKIN_SMOOTH_KERNEL_CODE = r'''
 extern "C" __global__
@@ -1095,24 +1092,98 @@ void fast_skin_smooth_kernel(
     float mask_val = (float)mask[idx] / 255.0f * blend_strength;
 
     if (mask_val < 0.01f) {
-        // Outside mask - copy original
         dst[idx3 + 0] = src[idx3 + 0];
         dst[idx3 + 1] = src[idx3 + 1];
         dst[idx3 + 2] = src[idx3 + 2];
         return;
     }
 
-    // Frequency separation: result = smoothed + (original - smoothed) * detail_preserve
     for (int c = 0; c < 3; c++) {
         float orig = (float)src[idx3 + c];
         float smooth = (float)smoothed[idx3 + c];
         float detail = orig - smooth;
         float result = smooth + detail * detail_preserve;
-
-        // Blend with original based on mask
         float final_val = orig * (1.0f - mask_val) + result * mask_val;
         dst[idx3 + c] = (unsigned char)fminf(fmaxf(final_val, 0.0f), 255.0f);
     }
+}
+'''
+
+# ==============================================================================
+# [KERNEL 12-B] High-Pass Detail Preserve (V29 - 선명한 매끈함)
+# - 핵심 원리: 스무딩된 이미지 + 원본 고주파 디테일
+# - 피부 텍스처(모공, 잔주름)는 스무딩하되 윤곽선(눈, 코, 입)은 선명 유지
+# - LAB 변환 대신 간단한 휘도 기반 디테일 추출 → 안정적이고 빠름
+# ==============================================================================
+LAB_SKIN_SMOOTH_KERNEL_CODE = r'''
+extern "C" __global__
+void lab_skin_smooth_kernel(
+    const unsigned char* src,          // Original image (BGR)
+    const unsigned char* smoothed,     // Guided Filter result (BGR) - 저주파(피부색)
+    const unsigned char* mask,         // Skin mask (0-255)
+    unsigned char* dst,                // Output image (BGR)
+    int width, int height,
+    float detail_strength,             // 디테일 복원 강도 (0.0~1.0) - 낮을수록 더 스무딩
+    float blend_strength               // 전체 블렌드 강도 (0.0~1.0)
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx3 = idx * 3;
+
+    // 마스크 값 (0~1 범위로 정규화)
+    float mask_val = (float)mask[idx] / 255.0f * blend_strength;
+
+    // 마스크 외부: 원본 복사
+    if (mask_val < 0.01f) {
+        dst[idx3 + 0] = src[idx3 + 0];
+        dst[idx3 + 1] = src[idx3 + 1];
+        dst[idx3 + 2] = src[idx3 + 2];
+        return;
+    }
+
+    // === 원본 BGR 읽기 ===
+    float orig_b = (float)src[idx3 + 0];
+    float orig_g = (float)src[idx3 + 1];
+    float orig_r = (float)src[idx3 + 2];
+
+    // === 스무딩된 BGR 읽기 (Guided Filter 결과 = 저주파/피부색) ===
+    float smooth_b = (float)smoothed[idx3 + 0];
+    float smooth_g = (float)smoothed[idx3 + 1];
+    float smooth_r = (float)smoothed[idx3 + 2];
+
+    // === 채널별 고주파 디테일 추출 ===
+    // detail = original - smoothed (양수=밝은점, 음수=어두운점)
+    float detail_b = orig_b - smooth_b;
+    float detail_g = orig_g - smooth_g;
+    float detail_r = orig_r - smooth_r;
+
+    // === 피부 텍스처 스무딩 + 윤곽선 디테일 보존 ===
+    // detail_strength=0 → 완전 스무딩 (피부결 제거)
+    // detail_strength=1 → 원본 유지 (스무딩 효과 없음)
+    // 권장값: 0.3~0.5 (피부결은 줄이되 눈코입은 유지)
+    float result_b = smooth_b + detail_b * detail_strength;
+    float result_g = smooth_g + detail_g * detail_strength;
+    float result_r = smooth_r + detail_r * detail_strength;
+
+    // 클리핑 (0~255 범위 유지)
+    result_b = fmaxf(0.0f, fminf(255.0f, result_b));
+    result_g = fmaxf(0.0f, fminf(255.0f, result_g));
+    result_r = fmaxf(0.0f, fminf(255.0f, result_r));
+
+    // === 마스크 기반 최종 블렌드 ===
+    // 마스크 영역은 스무딩 결과, 마스크 외부는 원본
+    float final_b = orig_b * (1.0f - mask_val) + result_b * mask_val;
+    float final_g = orig_g * (1.0f - mask_val) + result_g * mask_val;
+    float final_r = orig_r * (1.0f - mask_val) + result_r * mask_val;
+
+    // 반올림하여 저장
+    dst[idx3 + 0] = (unsigned char)(final_b + 0.5f);
+    dst[idx3 + 1] = (unsigned char)(final_g + 0.5f);
+    dst[idx3 + 2] = (unsigned char)(final_r + 0.5f);
 }
 '''
 

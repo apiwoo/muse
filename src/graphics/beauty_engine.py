@@ -1,11 +1,11 @@
 # Project MUSE - beauty_engine.py
-# V28.0: Synchronized Triple-Layer Composite (동기화된 트리플 레이어)
-# - Added: MaskStabilizer (마스크-워핑 시간 동기화로 번개 현상 해결)
-# - Added: Void Fill Composite (원본 유지 + Void만 배경 패치)
-# - Fixed: 번개 현상 (마스크-워핑 시점 불일치)
-# - Fixed: 원본 배경 화질 손실 (Void 영역만 정적 배경 사용)
+# V29.0: High-Fidelity Skin Smoothing (선명한 매끈함)
+# - Changed: Bilateral Filter → Guided Filter (O(1), 헤일로 없음, 엣지 보존 우수)
+# - Removed: 0.5x 다운스케일 → 원본 해상도 처리 (선명도 100% 유지)
+# - Added: Frequency Separation (저주파 균일화 + 고주파 디테일 보존)
+# - Formula: Output = GuidedResult + (Original - GuidedResult) * detail_preserve
+# - Preserved: V28.0 Synchronized Triple-Layer Composite
 # - Preserved: V27.0 Forward Mask Warping
-# - Preserved: V26.0 YY-Style Bilateral Filter Pipeline
 # - Preserved: All legacy features (TPS, Intrusion Handling, One-Euro Filter)
 # (C) 2025 MUSE Corp. All rights reserved.
 
@@ -23,7 +23,9 @@ from graphics.kernels.cuda_kernels import (
     # V4: Forward Mask based Composite
     FORWARD_WARP_MASK_KERNEL_CODE, MASK_DILATE_KERNEL_CODE, SIMPLE_COMPOSITE_KERNEL_CODE,
     # V5: Void Fill Composite (동기화된 트리플 레이어)
-    VOID_FILL_COMPOSITE_KERNEL_CODE
+    VOID_FILL_COMPOSITE_KERNEL_CODE,
+    # V29: High-Fidelity Skin Smoothing (Guided Filter + LAB Color Space)
+    GUIDED_FILTER_KERNEL_CODE, FAST_SKIN_SMOOTH_KERNEL_CODE, LAB_SKIN_SMOOTH_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -226,30 +228,30 @@ class MaskManager:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V28.0 Synchronized Triple-Layer Composite
+# [메인 클래스] BeautyEngine - V29.0 High-Fidelity Skin Smoothing
 # ==============================================================================
 class BeautyEngine:
     """
-    V28.0 Beauty Processing Engine - Synchronized Triple-Layer Composite
+    V29.0 Beauty Processing Engine - High-Fidelity Skin Smoothing
 
-    Key Changes (V28.0):
+    Key Changes (V29.0):
+    - Guided Filter: Bilateral 대체, O(1) 복잡도, 헤일로 없음, 엣지 보존 우수
+    - No Downscaling: 원본 해상도에서 처리 → 선명도 100% 유지
+    - Frequency Separation: 저주파(피부색) 균일화 + 고주파(디테일) 보존
+    - Formula: Output = GuidedResult + (Original - GuidedResult) * 0.85
+
+    Preserved from V28.0:
     - MaskStabilizer: 마스크-워핑 시간 동기화로 번개 현상 해결
     - Void Fill Composite: 원본 유지 + Void(슬리밍 빈 공간)만 배경 패치
-    - Triple Layer: Bottom(원본) + Middle(Void 패치) + Top(워핑된 사람)
 
     Preserved from V27.0:
     - Forward Warp Mask: 순방향 마스크 워핑으로 정확한 슬리밍 영역 계산
 
-    Preserved from V26.0:
-    - GPU Bilateral Filter: Smooths texture while preserving edges
-    - Full GPU Processing: No CPU-GPU round trips for low latency
-    - Downscaled Processing: 0.5x scale for performance optimization
-
-    Result: "Smooth" skin (texture reduced) vs "Blurry" (everything fuzzy)
+    Result: "매끈한" 피부 (색상만 균일) vs "흐린" 피부 (전체 블러)
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V28.0 Triple-Layer Composite Ready")
+        print("[BEAUTY] [BeautyEngine] V29.0 High-Fidelity Skin Smoothing Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -281,12 +283,10 @@ class BeautyEngine:
         self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
 
-        # YY-Style processing buffers
-        self.yy_scale = 0.5  # Downscale factor for bilateral filter
-        self.yy_small_frame = None
-        self.yy_small_mask = None
-        self.yy_smoothed_small = None
-        self.yy_smoothed_full = None
+        # V29: High-Fidelity processing buffers (원본 해상도, 다운스케일 제거)
+        self.guided_result = None  # Guided Filter 결과 (저주파)
+        self.freq_sep_result = None  # Frequency Separation 결과
+        self.v29_frame_count = 0  # 디버그 로그용 프레임 카운터
 
         # V4: Forward Mask buffers (순방향 마스크 기반 합성)
         self.forward_mask_gpu = None
@@ -304,11 +304,16 @@ class BeautyEngine:
             self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
             self.skin_kernel = cp.RawKernel(SKIN_SMOOTH_KERNEL_CODE, 'skin_smooth_kernel')
 
-            # YY-Style kernels (bilateral smoothing)
+            # YY-Style kernels (bilateral smoothing) - Legacy
             self.bilateral_kernel = cp.RawKernel(BILATERAL_SMOOTH_KERNEL_CODE, 'bilateral_smooth_kernel')
             self.resize_kernel = cp.RawKernel(GPU_RESIZE_KERNEL_CODE, 'gpu_resize_kernel')
             self.mask_resize_kernel = cp.RawKernel(GPU_MASK_RESIZE_KERNEL_CODE, 'gpu_mask_resize_kernel')
             self.blend_kernel = cp.RawKernel(FINAL_BLEND_KERNEL_CODE, 'final_blend_kernel')
+
+            # V29: High-Fidelity kernels (Guided Filter + LAB Color Space)
+            self.guided_filter_kernel = cp.RawKernel(GUIDED_FILTER_KERNEL_CODE, 'guided_filter_kernel')
+            self.freq_separation_kernel = cp.RawKernel(FAST_SKIN_SMOOTH_KERNEL_CODE, 'fast_skin_smooth_kernel')
+            self.lab_smooth_kernel = cp.RawKernel(LAB_SKIN_SMOOTH_KERNEL_CODE, 'lab_skin_smooth_kernel')
 
             # V4: Forward Mask based Composite (순방향 마스크 기반 합성)
             self.forward_warp_mask_kernel = cp.RawKernel(FORWARD_WARP_MASK_KERNEL_CODE, 'forward_warp_mask_kernel')
@@ -554,19 +559,19 @@ class BeautyEngine:
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
-    # YY-Style Skin Smoothing (Bilateral Filter - GPU Only)
+    # V29: High-Fidelity Skin Smoothing (Guided Filter + Frequency Separation)
     # ==========================================================================
     def _process_skin_yy_style(self, frame_gpu, landmarks, params):
         """
-        YY-style skin smoothing using GPU Bilateral Filter
+        V29: High-Fidelity skin smoothing using Guided Filter + Frequency Separation
 
-        Key differences from _process_skin_v25:
-        - No exclusion zones (bilateral filter preserves edges automatically)
-        - Full GPU processing (no CPU-GPU round trips)
-        - Downscaled processing for performance
-        - Smooth mask blending (no hard boundaries)
+        Key improvements over V26 (Bilateral Filter):
+        - NO downscaling: 원본 해상도에서 처리 → 선명도 100% 유지
+        - Guided Filter: Bilateral보다 빠름 (O(1)), 헤일로 없음, 엣지 보존 우수
+        - Frequency Separation: 저주파(피부색) 균일화 + 고주파(디테일) 보존
+        - 공식: Output = GuidedResult + (Original - GuidedResult) * detail_preserve
 
-        Result: "Smooth" skin (texture reduced) vs "Blurry" (everything fuzzy)
+        Result: "매끈한" 피부 (색상만 균일) vs "흐린" 피부 (전체 블러)
         """
         h, w = frame_gpu.shape[:2]
 
@@ -584,84 +589,94 @@ class BeautyEngine:
         if not has_skin and not has_tone and not has_color:
             return frame_gpu, None
 
-        # Generate skin mask (no exclusion zones for YY-style)
+        # Generate skin mask (no exclusion zones - Guided Filter가 엣지 자동 보존)
+        # padding_ratio를 1.25로 확대하여 이마/턱 라인까지 커버
         skin_mask_gpu = self.mask_manager.generate_mask(
-            landmarks, w, h, padding_ratio=1.15, exclude_features=False
+            landmarks, w, h, padding_ratio=1.25, exclude_features=False
         )
 
         if skin_mask_gpu is None:
             return frame_gpu, None
 
-        # ===== Skin Smoothing (GPU Bilateral Filter) =====
+        # 디버그 로그 (60프레임마다 1회)
+        self.v29_frame_count += 1
+        should_log = (self.v29_frame_count % 60 == 1)
+
+        # ===== High-Fidelity Skin Smoothing (원본 해상도) =====
         if has_skin:
-            # Calculate downscaled dimensions
-            small_w = int(w * self.yy_scale)
-            small_h = int(h * self.yy_scale)
+            # 원본 평균 저장 (디버그용)
+            orig_mean = float(cp.mean(frame_gpu)) if should_log else 0
 
-            # Initialize or resize buffers
-            if (self.yy_small_frame is None or
-                self.yy_small_frame.shape[0] != small_h or
-                self.yy_small_frame.shape[1] != small_w):
-                self.yy_small_frame = cp.zeros((small_h, small_w, 3), dtype=cp.uint8)
-                self.yy_small_mask = cp.zeros((small_h, small_w), dtype=cp.uint8)
-                self.yy_smoothed_small = cp.zeros((small_h, small_w, 3), dtype=cp.uint8)
-                self.yy_smoothed_full = cp.zeros((h, w, 3), dtype=cp.uint8)
+            # Initialize or resize buffers (원본 해상도)
+            if (self.guided_result is None or
+                self.guided_result.shape[0] != h or
+                self.guided_result.shape[1] != w):
+                self.guided_result = cp.zeros((h, w, 3), dtype=cp.uint8)
+                self.freq_sep_result = cp.zeros((h, w, 3), dtype=cp.uint8)
+                print(f"[V29] 버퍼 초기화: {w}x{h}")
 
-            # Step 1: Downscale frame to small size (GPU)
             block_dim = (16, 16)
-            grid_dim_small = ((small_w + block_dim[0] - 1) // block_dim[0],
-                              (small_h + block_dim[1] - 1) // block_dim[1])
+            grid_dim = ((w + block_dim[0] - 1) // block_dim[0],
+                        (h + block_dim[1] - 1) // block_dim[1])
 
-            self.resize_kernel(
-                grid_dim_small, block_dim,
-                (frame_gpu, self.yy_small_frame, w, h, small_w, small_h)
-            )
+            # Step 1: Guided Filter로 저주파(Base) 추출
+            radius = int(8 + skin_strength * 8)  # 8 ~ 16
+            epsilon = 0.02 + skin_strength * 0.04  # 0.02 ~ 0.06
 
-            # Step 2: Downscale mask (GPU)
-            self.mask_resize_kernel(
-                grid_dim_small, block_dim,
-                (skin_mask_gpu, self.yy_small_mask, w, h, small_w, small_h)
-            )
+            try:
+                self.guided_filter_kernel(
+                    grid_dim, block_dim,
+                    (frame_gpu, frame_gpu, self.guided_result, skin_mask_gpu,
+                     cp.int32(w), cp.int32(h),
+                     cp.int32(radius),
+                     cp.float32(epsilon))
+                )
+            except Exception as e:
+                print(f"[V29 ERROR] Guided Filter 실패: {e}")
+                return frame_gpu, skin_mask_gpu
 
-            # Step 3: Apply Bilateral Filter on small image (GPU)
-            # sigma_spatial: smoothing range (10-20), sigma_color: edge preservation (25-40)
-            sigma_spatial = 10.0 + skin_strength * 10.0  # 10 ~ 20
-            sigma_color = 25.0 + skin_strength * 15.0    # 25 ~ 40
+            # Step 2: High-Pass 디테일 보존 스무딩 (선명한 매끈함)
+            # detail_strength=0 → 완전 스무딩 (피부결 100% 제거)
+            # detail_strength=1 → 원본 유지 (스무딩 없음)
+            # skin_strength 높을수록 detail_strength 낮게 → 더 많이 스무딩
+            detail_strength = 0.8 - skin_strength * 0.6  # 0.8 → 0.2 (강도↑ → 디테일↓)
+            blend_strength = min(skin_strength * 1.5, 1.0)  # 최대 100%, 빠르게 도달
 
-            self.bilateral_kernel(
-                grid_dim_small, block_dim,
-                (self.yy_small_frame, self.yy_smoothed_small, self.yy_small_mask,
-                 small_w, small_h,
-                 cp.float32(sigma_spatial), cp.float32(sigma_color))
-            )
+            try:
+                self.lab_smooth_kernel(
+                    grid_dim, block_dim,
+                    (frame_gpu, self.guided_result, skin_mask_gpu, self.freq_sep_result,
+                     cp.int32(w), cp.int32(h),
+                     cp.float32(detail_strength),
+                     cp.float32(blend_strength))
+                )
+            except Exception as e:
+                print(f"[V29 ERROR] High-Pass Smooth 실패: {e}")
+                return frame_gpu, skin_mask_gpu
 
-            # Step 4: Upscale smoothed result to full size (GPU)
-            grid_dim_full = ((w + block_dim[0] - 1) // block_dim[0],
-                             (h + block_dim[1] - 1) // block_dim[1])
+            # Step 3: Color Grading 적용 (선택적)
+            if has_color:
+                result_gpu = cp.empty_like(frame_gpu)
+                self.blend_kernel(
+                    grid_dim, block_dim,
+                    (self.freq_sep_result, self.freq_sep_result, skin_mask_gpu, result_gpu,
+                     cp.int32(w), cp.int32(h),
+                     cp.float32(0.0),
+                     cp.float32(color_temp),
+                     cp.float32(color_tint))
+                )
+                frame_gpu = result_gpu
+            else:
+                frame_gpu = cp.asarray(self.freq_sep_result)
 
-            self.resize_kernel(
-                grid_dim_full, block_dim,
-                (self.yy_smoothed_small, self.yy_smoothed_full, small_w, small_h, w, h)
-            )
+            # 디버그 로그 (60프레임마다)
+            if should_log:
+                result_mean = float(cp.mean(frame_gpu))
+                diff = abs(result_mean - orig_mean)
+                print(f"[V29-HP] str={skin_strength:.2f}, detail={detail_strength:.2f}, blend={blend_strength:.2f}, diff={diff:.2f}")
 
-            # Step 5: Final blend with color grading (GPU)
-            result_gpu = cp.empty_like(frame_gpu)
-            blend_strength = skin_strength * 0.9  # Max 90% blend
-
-            self.blend_kernel(
-                grid_dim_full, block_dim,
-                (frame_gpu, self.yy_smoothed_full, skin_mask_gpu, result_gpu,
-                 w, h,
-                 cp.float32(blend_strength),
-                 cp.float32(color_temp),
-                 cp.float32(color_tint))
-            )
-
-            frame_gpu = result_gpu
-
-        # ===== Skin Tone (GPU) =====
+        # ===== Skin Tone / Color Only (No Smoothing) =====
         elif has_tone or has_color:
-            # Apply color grading without smoothing
             result_gpu = cp.empty_like(frame_gpu)
             grid_dim = ((w + 15) // 16, (h + 15) // 16)
 
@@ -960,7 +975,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                cv2.putText(debug_img, "YY-Style Bilateral", (10, 30),
+                cv2.putText(debug_img, "V29 High-Pass (Smooth+Detail)", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)
