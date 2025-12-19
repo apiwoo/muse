@@ -1,10 +1,10 @@
 # Project MUSE - beauty_engine.py
-# V37.0: Stabilization Pipeline Enhancement - 4단계 안정화 파이프라인
-# - [V37] Stage 1: 랜드마크 분리 댐핑 (얼굴 min_cutoff=0.1, 바디 min_cutoff=0.005)
-# - [V37] Stage 2: 워핑 그리드 히스테리시스 (이중 임계값 2.0/5.0 + Alpha EMA)
-# - [V37] Stage 3: 마스크 Median 합의 (최근 5프레임 중간값)
-# - [V37] Stage 4: CUDA Void Smooth Weight 합성 (연속 가중치로 토글링 방지)
-# - Preserved: V36 Warp Grid Based Mask, V34 Grid Modulation, V33 FrameSyncBuffer
+# V38.1: Void Only Fill + Dual-Criteria (원본 보존 원칙)
+# - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
+# - 사람 보호: is_person (번개 방지)
+# - Void 판정: is_true_void = (!is_valid_source) && (m_orig_here > 0.1)
+# - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
+# - Preserved: V37 Stabilization, V36 Warp Grid Based Mask, V34 Grid Modulation
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -785,10 +785,14 @@ class BeautyEngine:
                 self.forward_mask_dilated_gpu.astype(cp.float32), sigma=1.5
             ).astype(cp.uint8)
 
-            # 4-6. V36 Void Only Fill 합성
-            # - mask_orig: 원래 사람 위치
-            # - mask_fwd: 현재 사람 위치 (슬리밍 후)
-            # - Void = mask_orig > 0 && mask_fwd == 0 인 영역만 배경으로 채움
+            # ==============================================================
+            # [V38.1] Void Only Fill + Dual-Criteria 합성
+            # - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
+            # - is_person: m_fwd > 0.3 → 워핑된 전경 100%
+            # - is_true_void: (!is_valid_source) && (m_orig_here > 0.1)
+            #   → 원래 사람 있었는데 현재 비움 = 정적 배경으로 채움
+            # - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
+            # ==============================================================
             result_gpu = cp.empty_like(frame_gpu)
 
             self.clean_composite_kernel(

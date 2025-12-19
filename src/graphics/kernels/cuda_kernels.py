@@ -1505,10 +1505,11 @@ void warp_mask_from_grid_kernel(
 '''
 
 # ==============================================================================
-# [KERNEL V36] Void Only Fill Composite (Void 영역만 배경으로 채움)
-# - 기본: 워핑된 원본 프레임
-# - Void 영역만: 저장된 배경으로 패치 (슬리밍으로 비어진 공간만)
-# - 배경 전체 교체 X, Void만 채움 O
+# [KERNEL V38.1] Void Only Fill + Dual-Criteria
+# - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
+# - 사람 보호: is_person (번개 방지)
+# - Void 판정: is_true_void = (!is_valid_source) && (m_orig_here > 0.1)
+# - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
 # ==============================================================================
 CLEAN_COMPOSITE_KERNEL_CODE = r'''
 extern "C" __global__
@@ -1516,7 +1517,7 @@ void clean_composite_kernel(
     const unsigned char* src,        // 피부보정된 현재 프레임
     const unsigned char* bg,         // 정적 배경
     const unsigned char* mask_orig,  // 원본 마스크 (사람이 "있었던" 영역)
-    const unsigned char* mask_fwd,   // 순방향 워핑된 마스크 (사람이 "현재 있는" 영역)
+    const unsigned char* mask_fwd,   // 순방향 마스크 (사람이 "현재 있는" 영역)
     unsigned char* dst,              // 출력
     const float* dx_small,           // 역방향 워핑 그리드
     const float* dy_small,
@@ -1533,11 +1534,7 @@ void clean_composite_kernel(
     int idx = y * width + x;
     int idx_rgb = idx * 3;
 
-    // === 마스크 값 읽기 ===
-    float m_orig = (float)mask_orig[idx] / 255.0f;  // 원래 사람 위치
-    float m_fwd = (float)mask_fwd[idx] / 255.0f;    // 현재 사람 위치 (슬리밍 후)
-
-    // === 역방향 워핑으로 src에서 픽셀 가져오기 ===
+    // === 역방향 워핑 좌표 계산 ===
     int sx = x / scale;
     int sy = y / scale;
     if (sx >= small_width) sx = small_width - 1;
@@ -1550,61 +1547,103 @@ void clean_composite_kernel(
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
-    // 워핑된 픽셀
-    float warped_b, warped_g, warped_r;
+    // =========================================================================
+    // [V38.1] 마스크 값 읽기
+    // =========================================================================
+
+    // 현재 좌표(x,y)에서의 마스크 값들
+    float m_fwd = (float)mask_fwd[idx] / 255.0f;         // 현재 사람 위치
+    float m_orig_here = (float)mask_orig[idx] / 255.0f;  // 원래 사람이 있었는지
+
+    // 역방향 좌표(u,v)에서의 유효성 검사
+    bool is_valid_source = false;
+
     if (u >= 0 && u < width && v >= 0 && v < height) {
-        int warped_idx_rgb = (v * width + u) * 3;
-        warped_b = (float)src[warped_idx_rgb + 0];
-        warped_g = (float)src[warped_idx_rgb + 1];
-        warped_r = (float)src[warped_idx_rgb + 2];
-    } else {
-        // 범위 밖: 원본 위치 사용
-        warped_b = (float)src[idx_rgb + 0];
-        warped_g = (float)src[idx_rgb + 1];
-        warped_r = (float)src[idx_rgb + 2];
+        int source_idx = v * width + u;
+        float source_mask_val = (float)mask_orig[source_idx] / 255.0f;
+        is_valid_source = (source_mask_val > 0.1f);
     }
 
-    // 정적 배경 픽셀
+    // =========================================================================
+    // [V38.1] 핵심 판정 조건
+    // =========================================================================
+
+    // 사람 보호: 순방향 마스크 기반 (번개 방지)
+    const float PERSON_THRESHOLD = 0.3f;
+    bool is_person = (m_fwd > PERSON_THRESHOLD);
+
+    // ★ Void 판정: "원래 사람이 있었는데 현재 유효 소스 없음"
+    // - m_orig_here > 0.1: 이 좌표에 원래 사람이 있었음
+    // - !is_valid_source: 역방향 워핑으로 가져올 유효 픽셀 없음
+    // - 이 두 조건이 모두 참이면 = 슬리밍으로 비워진 Void
+    const float VOID_ORIG_THRESHOLD = 0.1f;
+    bool is_true_void = (!is_valid_source) && (m_orig_here > VOID_ORIG_THRESHOLD);
+
+    // =========================================================================
+    // [V38.1] 워핑된 전경 샘플링
+    // =========================================================================
+    float fg_b, fg_g, fg_r;
+
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        fg_b = (float)src[warped_idx_rgb + 0];
+        fg_g = (float)src[warped_idx_rgb + 1];
+        fg_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        // 범위 밖: 현재 좌표의 원본 사용
+        fg_b = (float)src[idx_rgb + 0];
+        fg_g = (float)src[idx_rgb + 1];
+        fg_r = (float)src[idx_rgb + 2];
+    }
+
+    // 정적 배경 (Void 채움용)
     float bg_b = (float)bg[idx_rgb + 0];
     float bg_g = (float)bg[idx_rgb + 1];
     float bg_r = (float)bg[idx_rgb + 2];
 
-    // === [V37.1] 사람 영역 보호가 추가된 Void Only Fill 합성 ===
+    // =========================================================================
+    // [V38.1] 최종 합성 결정
+    // =========================================================================
     float out_b, out_g, out_r;
 
     if (!use_bg) {
-        // 배경 미사용: 워핑된 이미지 그대로
-        out_b = warped_b;
-        out_g = warped_g;
-        out_r = warped_r;
-    } else {
-        // Step 1: 기본 void weight 계산
-        float void_weight = m_orig * (1.0f - m_fwd);
+        // 배경 미사용: 워핑만
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (is_person) {
+        // ★ Case A: 사람 영역 (is_person=true)
+        // → 워핑된 전경 100% (번개 절대 방지)
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (is_true_void) {
+        // ★ Case B: 진짜 Void (원래 사람 + 현재 비움)
+        // → 정적 배경으로 채움
+        out_b = bg_b;
+        out_g = bg_g;
+        out_r = bg_r;
+    }
+    else {
+        // ★ Case C: 원래 배경 영역 또는 경계
+        // → 워핑된 원본 프레임 유지 (bg로 교체 안함!)
 
-        // [V37.1 핵심] Step 2: 사람 영역 완전 보호
-        // m_fwd > 0.5 = 확실한 사람 영역 → 배경 절대 안 보임
-        const float PERSON_PROTECT_THRESHOLD = 0.5f;
-        if (m_fwd > PERSON_PROTECT_THRESHOLD) {
-            void_weight = 0.0f;
+        // 경계 영역에서 부드러운 블렌딩 (선택적)
+        if (m_fwd > 0.05f && m_fwd <= PERSON_THRESHOLD) {
+            // 경계: 살짝 블렌딩
+            float alpha = m_fwd / PERSON_THRESHOLD;
+            float t = alpha * alpha * (3.0f - 2.0f * alpha);
+            out_b = fg_b * t + bg_b * (1.0f - t);
+            out_g = fg_g * t + bg_g * (1.0f - t);
+            out_r = fg_r * t + bg_r * (1.0f - t);
+        } else {
+            // 완전 배경: 원본 프레임 그대로
+            out_b = fg_b;
+            out_g = fg_g;
+            out_r = fg_r;
         }
-
-        // Step 3: Noise Floor 상향 (미세 번개 추가 방지)
-        const float VOID_NOISE_FLOOR = 0.1f;  // [V37.1] 0.03 → 0.1
-        if (void_weight < VOID_NOISE_FLOOR) {
-            void_weight = 0.0f;
-        }
-
-        // Step 4: Smoothstep (경계만 부드럽게)
-        float edge0 = 0.1f;   // [V37.1] 0.05 → 0.1
-        float edge1 = 0.3f;   // [V37.1] 0.25 → 0.3
-        float t = (void_weight - edge0) / (edge1 - edge0);
-        t = fmaxf(0.0f, fminf(1.0f, t));
-        float smooth_void = t * t * (3.0f - 2.0f * t);
-
-        // Step 5: 최종 블렌딩
-        out_b = bg_b * smooth_void + warped_b * (1.0f - smooth_void);
-        out_g = bg_g * smooth_void + warped_g * (1.0f - smooth_void);
-        out_r = bg_r * smooth_void + warped_r * (1.0f - smooth_void);
     }
 
     dst[idx_rgb + 0] = (unsigned char)out_b;
