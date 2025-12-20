@@ -1,9 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V40.0: Skeleton Patch (AI Mask + Torso Patch + Adaptive Sync)
-# - 핵심: AI 마스크 외곽선 유지 + Torso 마스크로 내부 구멍 메움
-# - 해결: 번개/문신 현상 (Final_Mask = Max(AI_Mask, Torso_Mask))
-# - 유지: Void Only Fill, V37 Stabilization, V34 Grid Modulation
-# - 커널 시그니처 변경 없음, 기존 구조 100% 유지
+# V42.0: Void Edge Guard (번개 현상 완전 해결)
+# - 핵심: Void 판정을 "슬리밍 경계"에서만 허용
+# - 해결: 번개 현상 (내부 구멍에서 배경 출력 원천 차단)
+# - 유지: Time-Locked Sync, Skeleton Patch, V37 Stabilization, V34 Grid Modulation
+# - 신규: is_slimming_edge 조건으로 진짜 Void와 마스크 구멍 구분
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -42,7 +42,9 @@ from graphics.kernels.cuda_kernels import (
     # V36: Warp Grid Based Mask (근본적 재설계)
     WARP_MASK_FROM_GRID_KERNEL_CODE, CLEAN_COMPOSITE_KERNEL_CODE,
     # V40: Skeleton Patch (AI Mask + Torso Mask)
-    MASK_COMBINE_KERNEL_CODE
+    MASK_COMBINE_KERNEL_CODE,
+    # V41: Logical Void Fill (Time-Locked Sync)
+    LOGICAL_VOID_FILL_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -56,22 +58,29 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V40.0 Skeleton Patch
+# [메인 클래스] BeautyEngine - V42.0 Void Edge Guard
 # ==============================================================================
 class BeautyEngine:
     """
-    V40.0 Beauty Processing Engine - Skeleton Patch (Hybrid Masking)
+    V42.0 Beauty Processing Engine - Void Edge Guard (번개 현상 완전 해결)
 
-    Key Changes (V40.0):
+    Key Changes (V42.0):
+    - Void Edge Guard: Void 판정을 "슬리밍 경계"에서만 허용
+      * is_slimming_edge = warp_magnitude > 1.0 (슬리밍 효과 발생 지점)
+      * 내부 구멍 (warp_magnitude < 1.0): 전경 출력 → 번개 원천 차단
+      * 슬리밍 경계 Void: 배경 출력 → 정상 Void 채움
+    - 3단계 → 4단계 로직 확장:
+      * CASE 1: 워핑된 위치가 사람 → 워핑된 전경
+      * CASE 2-A: 슬리밍 경계의 진짜 Void → 배경
+      * CASE 2-B: 내부 구멍 → 워핑된 전경 (번개 방지!)
+      * CASE 3: 원래 배경 → 원본 프레임 유지
+
+    Preserved from V41:
+    - Time-Locked Sync: 프레임-마스크 완벽 시간 동기화
+    - Logical Void Fill: 가중치 블렌딩 제거
+
+    Preserved from V40:
     - Skeleton Patch: AI 마스크 + Torso 마스크 병합
-    - Final_Mask = Max(AI_Mask, Torso_Mask)
-    - AI 마스크: 정밀한 외곽선 유지 (배경 침범 방지)
-    - Torso 마스크: 내부 구멍 메움 (번개/문신 현상 방지)
-    - 커널 시그니처 변경 없음, 기존 구조 100% 유지
-
-    Preserved from V38.1:
-    - Void Only Fill: 원본 프레임 베이스, Void만 배경으로 패치
-    - Dual-Criteria: is_person + is_true_void 판정
 
     Preserved from V37:
     - LandmarkStabilizer: One-Euro Filter 기반 랜드마크 안정화
@@ -80,11 +89,11 @@ class BeautyEngine:
     Preserved from V34:
     - Grid Modulation: 배경 영역 워핑 차단
 
-    Result: 번개 현상 해결 + AI 마스크 정밀도 유지 + 배경 안정성 유지
+    Result: 번개 현상 완전 해결 + 슬리밍 Void 정상 채움
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V40.0 Skeleton Patch Ready")
+        print("[BEAUTY] [BeautyEngine] V42.0 Void Edge Guard Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -214,6 +223,9 @@ class BeautyEngine:
 
             # V40: Skeleton Patch (AI Mask + Torso Mask)
             self.mask_combine_kernel = cp.RawKernel(MASK_COMBINE_KERNEL_CODE, 'mask_combine_kernel')
+
+            # V41: Logical Void Fill (Time-Locked Sync)
+            self.logical_void_fill_kernel = cp.RawKernel(LOGICAL_VOID_FILL_KERNEL_CODE, 'logical_void_fill_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -953,8 +965,10 @@ class BeautyEngine:
                     w, h, sw, sh, scale, threshold=0.5
                 )
 
-            # 4-3. 순방향 워핑된 마스크 (mask_fwd: 사람이 "현재 있는" 영역)
-            # 슬리밍으로 인해 수축된 영역
+            # [V41 LEGACY] 순방향 워핑된 마스크 (mask_fwd) 생성
+            # - V41에서는 logical_void_fill_kernel이 단일 마스크만 사용
+            # - 롤백 시 clean_composite_kernel에서 필요하므로 코드 유지
+            # - 슬리밍으로 인해 수축된 영역을 나타냄
             self.forward_mask_gpu.fill(0)
 
             self.forward_warp_mask_kernel(
@@ -964,36 +978,49 @@ class BeautyEngine:
                  w, h, sw, sh, scale)
             )
 
-            # 4-4. 마스크 홀 채우기 (Dilate)
+            # 4-4. 마스크 홀 채우기 (Dilate) - [V41 LEGACY]
             self.mask_dilate_kernel(
                 grid_dim, block_dim,
                 (self.forward_mask_gpu, self.forward_mask_dilated_gpu,
                  w, h, 2)  # [V40] radius 2 (V38.1 복원)
             )
 
-            # 4-5. 순방향 마스크 평활화
+            # 4-5. 순방향 마스크 평활화 - [V41 LEGACY] 롤백용으로 유지
             mask_fwd = cupyx.scipy.ndimage.gaussian_filter(
                 self.forward_mask_dilated_gpu.astype(cp.float32), sigma=1.5
             ).astype(cp.uint8)
+            _ = mask_fwd  # [V41] Suppress unused variable warning (kept for rollback)
 
             # ==============================================================
-            # [V38.1] Void Only Fill + Dual-Criteria 합성
-            # - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
-            # - is_person: m_fwd > 0.3 → 워핑된 전경 100%
-            # - is_true_void: (!is_valid_source) && (m_orig_here > 0.1)
-            #   → 원래 사람 있었는데 현재 비움 = 정적 배경으로 채움
-            # - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
+            # [V41] Time-Locked Sync + Logical Void Fill 합성
+            # - 핵심: 동기화된 프레임 + 동기화된 마스크 = 100% 시점 일치
+            # - 3단계 명확한 논리:
+            #   * CASE 1: mask_at_warped > 0.4 → 워핑된 전경 (번개 방지)
+            #   * CASE 2: mask_at_origin > 0.2 → 배경으로 채움 (Void)
+            #   * CASE 3: 그 외 → 원본 프레임 유지 (배경 왜곡 방지)
             # ==============================================================
             result_gpu = cp.empty_like(frame_gpu)
 
-            self.clean_composite_kernel(
+            # [V41] 동기화된 마스크 사용 (mask_orig를 단일 마스크로 전달)
+            # logical_void_fill_kernel은 단일 mask만 사용
+            self.logical_void_fill_kernel(
                 grid_dim, block_dim,
                 (source_for_warp, self.bg_gpu,
-                 mask_orig, mask_fwd,
+                 mask_orig,  # [V41] 동기화된 단일 마스크
                  result_gpu,
                  self.gpu_dx, self.gpu_dy,
                  w, h, sw, sh, scale, use_bg)
             )
+
+            # [V41 LEGACY] 롤백이 필요한 경우 아래 코드로 교체:
+            # self.clean_composite_kernel(
+            #     grid_dim, block_dim,
+            #     (source_for_warp, self.bg_gpu,
+            #      mask_orig, mask_fwd,
+            #      result_gpu,
+            #      self.gpu_dx, self.gpu_dy,
+            #      w, h, sw, sh, scale, use_bg)
+            # )
 
             # ==================================================================
             # [Debug Visualization]
@@ -1011,7 +1038,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                cv2.putText(debug_img, "V36 Void Only Fill", (10, 30),
+                cv2.putText(debug_img, "V42 Void Edge Guard", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)

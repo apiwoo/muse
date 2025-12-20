@@ -1534,14 +1534,163 @@ void warp_mask_from_grid_kernel(
 '''
 
 # ==============================================================================
-# [KERNEL V39] Void Only Fill + Dual-Criteria + 이중 사람 보호
+# [KERNEL V42] Logical Void Fill + Void Edge Guard
+# - V41 기반 + 번개 현상 완전 해결
+# - 핵심: Void 판정을 "슬리밍 경계"에서만 허용
+# - 슬리밍 경계: warp_magnitude > 1.0 (실제 슬리밍 효과 발생 지점)
+# - 내부 구멍: warp_magnitude < 1.0 (AI 마스크 결함) → 전경 출력으로 번개 방지
+# ==============================================================================
+LOGICAL_VOID_FILL_KERNEL_CODE = r'''
+extern "C" __global__
+void logical_void_fill_kernel(
+    const unsigned char* src,        // 동기화된 원본 프레임 (Time-Locked)
+    const unsigned char* bg,         // 정적 배경 (Clean Plate)
+    const unsigned char* mask,       // 동기화된 마스크 (Time-Locked)
+    unsigned char* dst,              // 출력
+    const float* dx_small,           // 역방향 워핑 그리드
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    // === 워핑 변위 계산 ===
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    // === 배경 미사용 시: 단순 워핑만 ===
+    if (!use_bg) {
+        if (u >= 0 && u < width && v >= 0 && v < height) {
+            int warped_idx_rgb = (v * width + u) * 3;
+            dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
+            dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
+            dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
+        } else {
+            dst[idx_rgb + 0] = src[idx_rgb + 0];
+            dst[idx_rgb + 1] = src[idx_rgb + 1];
+            dst[idx_rgb + 2] = src[idx_rgb + 2];
+        }
+        return;
+    }
+
+    // === [V41] 명확한 3단계 논리 합성 ===
+    // 전제: mask와 src는 동일 시점 (Time-Locked)
+
+    // 1. 마스크 값 조회
+    float mask_at_origin = (float)mask[idx] / 255.0f;  // 현재 좌표의 마스크 (원래 사람 있었나?)
+
+    float mask_at_warped = 0.0f;
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        mask_at_warped = (float)mask[v * width + u] / 255.0f;  // 워핑된 좌표의 마스크
+    }
+
+    // 2. 임계값 정의
+    const float PERSON_THRESHOLD = 0.4f;   // 사람 판정 (약간 높게 설정)
+    const float VOID_THRESHOLD = 0.2f;     // Void 판정
+
+    // 3. 워핑된 전경 픽셀 준비
+    float fg_b, fg_g, fg_r;
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        fg_b = (float)src[warped_idx_rgb + 0];
+        fg_g = (float)src[warped_idx_rgb + 1];
+        fg_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        fg_b = (float)src[idx_rgb + 0];
+        fg_g = (float)src[idx_rgb + 1];
+        fg_r = (float)src[idx_rgb + 2];
+    }
+
+    // 4. 원본 좌표의 배경
+    float bg_b = (float)bg[idx_rgb + 0];
+    float bg_g = (float)bg[idx_rgb + 1];
+    float bg_r = (float)bg[idx_rgb + 2];
+
+    // 5. 원본 좌표의 src (워핑 안 된 원본)
+    float src_b = (float)src[idx_rgb + 0];
+    float src_g = (float)src[idx_rgb + 1];
+    float src_r = (float)src[idx_rgb + 2];
+
+    // =========================================================================
+    // [V42] Void Edge Guard - 번개 현상 근본 해결
+    // =========================================================================
+    // 핵심 통찰: 진짜 Void는 "슬리밍 경계"에서만 발생
+    // - 슬리밍 경계: warp_magnitude가 큰 곳 (허리/턱 등 슬리밍 적용 부위)
+    // - 마스크 내부 구멍: warp_magnitude가 작은 곳 (슬리밍 영향 없음)
+    // - 내부 구멍에서 배경 출력하면 → 번개 현상!
+    // =========================================================================
+
+    // [V42] 슬리밍 경계 판정 (워핑 변위 기반)
+    float warp_magnitude = sqrtf(shift_x * shift_x + shift_y * shift_y);
+    bool is_slimming_edge = (warp_magnitude > 1.0f);  // 1픽셀 이상 변위 = 슬리밍 영향권
+
+    float out_b, out_g, out_r;
+
+    if (mask_at_warped > PERSON_THRESHOLD) {
+        // ★ CASE 1: 워핑된 위치가 사람
+        // → 무조건 워핑된 전경 출력 (번개/문신 현상 원천 차단)
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (mask_at_origin > VOID_THRESHOLD) {
+        // ★ CASE 2: 원래 위치에 사람이 있었지만, 워핑 후 사람 아님
+        // [V42] 슬리밍 경계 여부에 따라 분기
+        if (is_slimming_edge) {
+            // CASE 2-A: 슬리밍 경계의 진짜 Void
+            // → 저장된 배경으로 채움 (정상 동작)
+            out_b = bg_b;
+            out_g = bg_g;
+            out_r = bg_r;
+        } else {
+            // CASE 2-B: 내부 구멍 (AI 마스크 결함)
+            // → 워핑된 전경 출력 (번개 원천 차단!)
+            out_b = fg_b;
+            out_g = fg_g;
+            out_r = fg_r;
+        }
+    }
+    else {
+        // ★ CASE 3: 원래부터 배경 영역
+        // → 원본 프레임 그대로 유지 (배경 왜곡 원천 차단)
+        out_b = src_b;
+        out_g = src_g;
+        out_r = src_r;
+    }
+
+    dst[idx_rgb + 0] = (unsigned char)out_b;
+    dst[idx_rgb + 1] = (unsigned char)out_g;
+    dst[idx_rgb + 2] = (unsigned char)out_r;
+}
+'''
+
+# ==============================================================================
+# [KERNEL V40 LEGACY] Void Only Fill + Dual-Criteria + 이중 사람 보호
+# (V41에서 LOGICAL_VOID_FILL_KERNEL_CODE로 대체됨 - 롤백용으로 보존)
 # - V39 업데이트: is_person 이중 체크 (m_fwd || m_orig_here)
 # - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
 # - 사람 보호: is_person (번개 방지) - m_fwd 또는 m_orig_here 중 하나라도 높으면 사람
 # - Void 판정: is_true_void = (!is_valid_source) && (m_orig_here > 0.1)
 # - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
 # ==============================================================================
-CLEAN_COMPOSITE_KERNEL_CODE = r'''
+CLEAN_COMPOSITE_KERNEL_CODE_LEGACY = r'''
 extern "C" __global__
 void clean_composite_kernel(
     const unsigned char* src,        // 피부보정된 현재 프레임
@@ -1695,3 +1844,10 @@ void clean_composite_kernel(
     dst[idx_rgb + 2] = (unsigned char)out_r;
 }
 '''
+
+# ==============================================================================
+# [V41] Backward Compatibility Alias
+# - CLEAN_COMPOSITE_KERNEL_CODE는 LEGACY를 가리킴 (기존 코드 호환)
+# - 새 코드는 LOGICAL_VOID_FILL_KERNEL_CODE 사용 권장
+# ==============================================================================
+CLEAN_COMPOSITE_KERNEL_CODE = CLEAN_COMPOSITE_KERNEL_CODE_LEGACY
