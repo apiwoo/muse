@@ -40,19 +40,32 @@ def _calc_shoulder_params(l, r, s):
 
 @jit(nopython=True, cache=True)
 def _calc_waist_params(l_sh, r_sh, l_hip, r_hip, s):
+    """
+    [V46] 어깨 너비 기반 반경 상한선 추가
+    """
     l_waist = l_sh * 0.4 + l_hip * 0.6
     r_waist = r_sh * 0.4 + r_hip * 0.6
-    
+
     c = (l_waist + r_waist) * 0.5
     w = np.sqrt(np.sum((l_waist - r_waist)**2))
     if w < 1.0: return None
-    
-    radius = w * 0.6
+
+    # [V46] 어깨 너비 계산 (안정적인 기준점)
+    sh_w = np.sqrt(np.sum((l_sh - r_sh)**2))
+    if sh_w < 1.0: return None  # 어깨도 비정상이면 중단
+
+    # 기본 반경 계산
+    raw_radius = w * 0.6
+
+    # [V46] 어깨 너비 기반 상한선 (어깨 너비의 1.2배 초과 금지)
+    max_safe_radius = sh_w * 1.2
+    radius = min(raw_radius, max_safe_radius)
+
     strength = s * 0.4
-    
+
     v_l = c - l_waist
     v_r = c - r_waist
-    
+
     return l_waist, r_waist, radius, strength, v_l, v_r
 
 @jit(nopython=True, cache=True)
@@ -148,12 +161,18 @@ class MorphLogic:
             if res is None: return
             l_w, r_w, rad, str_val, vl, vr = res
 
-            # [V45] 반경 상한선: 몸통 높이의 일정 비율을 초과하지 않도록 제한
-            # 이는 전체 화면이 왜곡되는 것을 방지
-            MAX_RADIUS_RATIO = 0.25  # 몸통 높이 대비 최대 비율
-            body_height = np.linalg.norm(l_sh - l_hip)  # 대략적인 몸통 높이
-            max_radius = body_height * MAX_RADIUS_RATIO * 4  # small scale 기준
-            rad = min(rad, max_radius)
+            # [V46] 어깨 너비 기반 상한선으로 변경 (JIT 함수 내부에서 이미 적용됨)
+            # 추가 안전장치: 혹시 JIT 결과가 비정상이면 한번 더 체크
+            sh_w = np.linalg.norm(l_sh - r_sh)
+            if sh_w > 1:
+                max_safe_radius = sh_w * 1.2
+                rad = min(rad, max_safe_radius)
+
+            # [V45 LEGACY - 롤백 시 아래 코드 활성화]
+            # MAX_RADIUS_RATIO = 0.25
+            # body_height = np.linalg.norm(l_sh - l_hip)
+            # max_radius = body_height * MAX_RADIUS_RATIO * 4
+            # rad = min(rad, max_radius)
 
             self._add_param(l_w[0], l_w[1], rad, str_val, vl[0], vl[1], 1)
             self._add_param(r_w[0], r_w[1], rad, str_val, vr[0], vr[1], 1)
@@ -162,15 +181,31 @@ class MorphLogic:
             pass
 
     def collect_hip_params(self, kpts, s):
+        """
+        [V46] 어깨 너비 기반 반경 상한선 추가
+        """
         if len(kpts) < 13: return
         l_hip, r_hip = kpts[11, :2], kpts[12, :2]
+        l_sh, r_sh = kpts[5, :2], kpts[6, :2]  # [V46] 어깨 좌표 추가
+
         c = (l_hip + r_hip) * 0.5
         w = np.linalg.norm(l_hip - r_hip)
         if w < 1: return
-        
-        # Widen: Vector away from center (l_hip - c)
-        self._add_param(l_hip[0], l_hip[1], w*0.7, s*0.3, l_hip[0]-c[0], l_hip[1]-c[1], 1)
-        self._add_param(r_hip[0], r_hip[1], w*0.7, s*0.3, r_hip[0]-c[0], r_hip[1]-c[1], 1)
+
+        # [V46] 어깨 너비 계산 (안정적인 기준점)
+        sh_w = np.linalg.norm(l_sh - r_sh)
+        if sh_w < 1: return  # 어깨도 비정상이면 중단
+
+        # 기본 반경 계산
+        raw_radius = w * 0.7
+
+        # [V46] 어깨 너비 기반 상한선 (어깨 너비의 1.2배 초과 금지)
+        max_safe_radius = sh_w * 1.2
+        rad = min(raw_radius, max_safe_radius)
+
+        # Widen: Vector away from center
+        self._add_param(l_hip[0], l_hip[1], rad, s*0.3, l_hip[0]-c[0], l_hip[1]-c[1], 1)
+        self._add_param(r_hip[0], r_hip[1], rad, s*0.3, r_hip[0]-c[0], r_hip[1]-c[1], 1)
 
     # --- Face Reshaping ---
 

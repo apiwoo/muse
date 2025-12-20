@@ -1,10 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V45.1: Keypoint Validation & FrameSyncBuffer Rollback
-# - 긴급수정: FrameSyncBuffer 다시 비활성화 (가변 지연으로 떨림 악화)
-# - 신규: _are_keypoints_valid() - 화면 밖 keypoint 검사
-# - 신규: 각 body 보정 전 keypoint 유효성 검사 (전체화면 왜곡 방지)
-# - 유지: is_slimming_enabled 조건 (hip_widen 제외, ribcage_slim 포함)
-# - 유지: Skeleton Patch, V34 Grid Modulation, Simple Void Fill Kernel
+# V46.2: 허리/골반 검증 로직 정상화
+# - 수정: margin = 0.0 (정확히 화면 내부만)
+# - 수정: min_conf = 0.3 (원래대로)
+# - 유지: original_kpts = raw_body (confidence 정보 포함)
+# - 유지: 어깨 너비 기반 반경 상한선 (morph_logic.py와 연동)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -63,22 +62,26 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V45.1 Keypoint Validation & Rollback
+# [메인 클래스] BeautyEngine - V46.2 허리/골반 검증 로직 정상화
 # ==============================================================================
 class BeautyEngine:
     """
-    V45.1 Beauty Processing Engine - Keypoint Validation & FrameSyncBuffer Rollback
+    V46.2 Beauty Processing Engine - 허리/골반 검증 로직 정상화
 
-    Key Changes (V45.1):
-    - FrameSyncBuffer Rollback: V45에서 복구했으나 다시 비활성화
-      * 원인: AI 지연이 가변적이라 과거 프레임-현재 마스크 불일치 발생
-      * 결론: 현재 프레임 직접 사용이 가장 안정적
-    - Keypoint Validation: 화면 밖 keypoint로 인한 전체화면 왜곡 방지
-      * _are_keypoints_valid(): 화면 내 좌표 + confidence 체크
-      * 각 body 보정 전 해당 keypoint 유효성 검사
-      * 화면 밖 또는 낮은 confidence → 해당 보정 스킵
+    Key Changes (V46.2):
+    - 검증 로직 정상화:
+      * margin = 0.0 (정확히 화면 내부만)
+      * min_conf = 0.3 (원래대로)
+      * V46.1의 -0.1 margin이 너무 엄격해서 정상 보정도 차단됨
 
-    Preserved from V45:
+    Preserved from V46.1:
+    - original_kpts = raw_body (confidence 정보 포함)
+
+    Preserved from V46:
+    - 어깨 너비 기반 반경 상한선 (morph_logic.py)
+
+    Preserved from V45.1:
+    - FrameSyncBuffer 비활성화 (가변 지연으로 떨림 악화)
     - is_slimming_enabled 조건 (hip_widen 제외, ribcage_slim 포함)
 
     Preserved from V44:
@@ -91,11 +94,11 @@ class BeautyEngine:
     Preserved from V34:
     - Grid Modulation: 배경 영역 워핑 차단
 
-    Result: 화면 밖 keypoint 안전 처리 + 안정성 복구
+    Result: 정상 보정 작동 + 화면 밖 keypoint 차단
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V45.1 Keypoint Validation Ready")
+        print("[BEAUTY] [BeautyEngine] V46.2 Validation Normalized")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -580,10 +583,12 @@ class BeautyEngine:
     # ==========================================================================
     def _are_keypoints_valid(self, kpts, indices, w, h, min_conf=0.3):
         """
-        [V45.1] 특정 keypoint들이 화면 내에 있고 신뢰도가 충분한지 검사
+        [V46.2] 화면 밖 keypoint 검증 - 정상화
+        - margin: 0 (정확히 화면 내부만)
+        - min_conf: 0.3 (원래대로)
 
         Args:
-            kpts: body_landmarks 배열 (N, 2) 또는 (N, 3)
+            kpts: body_landmarks 배열 (N, 3) - [x, y, confidence]
             indices: 검사할 keypoint 인덱스 리스트 (예: [11, 12] for hips)
             w, h: 화면 크기
             min_conf: 최소 신뢰도 (기본 0.3)
@@ -601,11 +606,10 @@ class BeautyEngine:
             pt = kpts[idx]
             x, y = pt[0], pt[1]
 
-            # 화면 내 좌표인지 확인 (여유를 두어 화면 가장자리 근처도 허용)
-            margin = 0.05  # 5% 마진
-            if x < -w * margin or x > w * (1 + margin):
+            # [V46.2] 정확히 화면 내부만 허용 (margin = 0)
+            if x < 0 or x > w:
                 return False
-            if y < -h * margin or y > h * (1 + margin):
+            if y < 0 or y > h:
                 return False
 
             # confidence 체크 (3번째 값이 있는 경우)
@@ -895,8 +899,9 @@ class BeautyEngine:
                 stable_kpts = self.body_stabilizer.update(kpts_xy)
                 scaled_body = stable_kpts * self.map_scale
 
-                # [V45.1] keypoint 유효성 검사를 위한 원본 좌표 보존
-                original_kpts = stable_kpts  # 화면 크기 기준 좌표
+                # [V46.1] keypoint 유효성 검사를 위한 원본 좌표 보존
+                # ★ 핵심 변경: raw_body 사용 (confidence 정보 포함)
+                original_kpts = raw_body  # (N, 3) 배열: [x, y, confidence]
 
                 # [V45.1] 각 보정별 필요 keypoint 인덱스 정의
                 # 어깨: 5(왼쪽어깨), 6(오른쪽어깨)
