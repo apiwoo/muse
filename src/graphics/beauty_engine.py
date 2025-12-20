@@ -1,9 +1,10 @@
 # Project MUSE - beauty_engine.py
-# V43.0: Inverse Warp Validity (번개 현상 근본 해결)
-# - 핵심: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
-# - 해결: AI 마스크 구멍으로 인한 번개 현상 근본 해결
-# - 신규: Delta-Adaptive Stabilizer (움직임 즉시 반응)
-# - 유지: Time-Locked Sync, Skeleton Patch, V34 Grid Modulation
+# V44.0: Frame-Independent Strict Void Fill
+# - 핵심: 프레임 독립 처리 (Stabilizer bypass + 동일 시점 마스크)
+# - 해결: 번개/잔상/배경왜곡 동시 해결
+# - 신규: Simple Void Fill Kernel (3단계 무결성 판정)
+# - 신규: 조건부 배경 합성 (슬리밍 파라미터 체크)
+# - 유지: Skeleton Patch, V34 Grid Modulation
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -46,7 +47,9 @@ from graphics.kernels.cuda_kernels import (
     # V41: Logical Void Fill (Time-Locked Sync)
     LOGICAL_VOID_FILL_KERNEL_CODE,
     # V43: Inverse Warp Validity (번개 현상 근본 해결)
-    INVERSE_WARP_VALIDITY_KERNEL_CODE
+    INVERSE_WARP_VALIDITY_KERNEL_CODE,
+    # V44: Simple Void Fill (Frame-Independent)
+    SIMPLE_VOID_FILL_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -60,39 +63,35 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V43.0 Inverse Warp Validity
+# [메인 클래스] BeautyEngine - V44.0 Frame-Independent Strict Void Fill
 # ==============================================================================
 class BeautyEngine:
     """
-    V43.0 Beauty Processing Engine - Inverse Warp Validity (번개 현상 근본 해결)
+    V44.0 Beauty Processing Engine - Frame-Independent Strict Void Fill
 
-    Key Changes (V43.0):
-    - Inverse Warp Validity: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
-      * source_validity = mask[v * width + u] / 255.0f
-      * 소스가 유효한 사람이면 → 전경 출력
-      * 소스가 무효하고 원래 사람 있었으면 → 배경 출력 (Void)
-      * 그 외 → 원본 출력
-    - Delta-Adaptive Stabilizer: 움직임 발생 즉시 alpha 상승 (지연 없음)
-      * 이진(Binary) 속도 판정 제거
-      * 프레임 간 워핑 그리드 변화량(Delta)에 비례하여 alpha 즉시 조절
-
-    Preserved from V41:
-    - Time-Locked Sync: 프레임-마스크 완벽 시간 동기화
+    Key Changes (V44.0):
+    - Frame Independence: 모든 Stabilizer를 bypass 모드로 전환
+      * 이전 프레임 데이터 참조 완전 차단
+      * 마스크와 프레임이 100% 동일 시점 보장
+    - Triggered Composite: 슬리밍 파라미터가 있을 때만 배경 합성 활성화
+      * face_v, waist_slim, hip_widen, shoulder_narrow 체크
+      * 나머지 경우 워핑만 적용, 배경 합성 로직 스킵
+    - Simple Void Fill Kernel: 3단계 무결성 판정
+      * Priority 1: mask_at_warped > 0.4 → 전경 출력 (번개 원천 차단)
+      * Priority 2: mask_at_origin > 0.2 → 배경 출력 (Void 채움)
+      * Priority 3: 그 외 → 원본 유지 (배경 왜곡 차단)
 
     Preserved from V40:
     - Skeleton Patch: AI 마스크 + Torso 마스크 병합
 
-    Preserved from V37:
-    - LandmarkStabilizer: One-Euro Filter 기반 랜드마크 안정화
-
     Preserved from V34:
     - Grid Modulation: 배경 영역 워핑 차단
 
-    Result: 번개 현상 근본 해결 + 움직임 추종성 극대화
+    Result: 번개/잔상/배경왜곡 동시 해결 + 움직임 추종성 극대화
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V43.0 Inverse Warp Validity Ready")
+        print("[BEAUTY] [BeautyEngine] V44.0 Frame-Independent Strict Void Fill Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -101,16 +100,18 @@ class BeautyEngine:
         self.gpu_dx = None
         self.gpu_dy = None
 
-        # [V37] 랜드마크 안정화 강화
+        # [V44] 프레임 독립 처리 - 모든 Stabilizer bypass
         self.body_stabilizer = LandmarkStabilizer(
-            min_cutoff=0.005,      # 강한 저역통과
-            base_beta=0.5,         # 정지 시 안정
-            high_speed_beta=50.0
+            min_cutoff=0.005,
+            base_beta=0.5,
+            high_speed_beta=50.0,
+            bypass=True  # [V44] Frame-independent mode
         )
         self.face_stabilizer = LandmarkStabilizer(
-            min_cutoff=0.1,        # 표정 반응성 유지
+            min_cutoff=0.1,
             base_beta=3.0,
-            high_speed_beta=30.0
+            high_speed_beta=30.0,
+            bypass=True  # [V44] Frame-independent mode
         )
 
         # V28.0: Mask Stabilizer (마스크-워핑 시간 동기화)
@@ -168,18 +169,19 @@ class BeautyEngine:
         self.combined_mask_gpu = None            # AI + Torso 병합 마스크
 
         if HAS_CUDA:
-            # [V40] Adaptive MaskStabilizer
-            # 움직임 감지하여 alpha 동적 조절 (잔상 제거 + 떨림 억제)
+            # [V44] 프레임 독립 처리 - Stabilizer bypass
             self.mask_stabilizer = MaskStabilizer(
-                base_alpha=0.12,      # 정지 시: 강한 스무딩
-                fast_alpha=0.85,      # 움직임 시: 즉각 반응
-                diff_threshold=0.04   # 움직임 감지 임계값
+                base_alpha=0.12,
+                fast_alpha=0.85,
+                diff_threshold=0.04,
+                bypass=True  # [V44] Frame-independent mode
             )
-            # V43: Delta-Adaptive Stabilizer
+            # [V44] 프레임 독립 처리 - Stabilizer bypass
             self.warp_grid_stabilizer = WarpGridStabilizer(
                 base_alpha=0.05,
                 max_alpha=0.98,
-                delta_scale=15.0
+                delta_scale=15.0,
+                bypass=True  # [V44] Frame-independent mode
             )
             # [V33] Frame Sync Buffer for AI latency compensation
             self.frame_sync_buffer = FrameSyncBuffer(max_size=3)
@@ -229,6 +231,12 @@ class BeautyEngine:
             self.inverse_warp_validity_kernel = cp.RawKernel(
                 INVERSE_WARP_VALIDITY_KERNEL_CODE,
                 'inverse_warp_validity_kernel'
+            )
+
+            # V44: Simple Void Fill (Frame-Independent)
+            self.simple_void_fill_kernel = cp.RawKernel(
+                SIMPLE_VOID_FILL_KERNEL_CODE,
+                'simple_void_fill_kernel'
             )
 
             self._warmup_kernels()
@@ -763,29 +771,32 @@ class BeautyEngine:
                 self.has_bg = True
 
             # ==================================================================
-            # [V35] Frame Synchronization - 잔상 제거의 핵심
-            # - 현재 프레임을 버퍼에 저장
-            # - 모든 연산(워핑, 마스크, 합성)을 동기화된 과거 프레임으로 통일
-            # - 이것이 잔상(Ghosting) 해결의 핵심
+            # [V44] Frame Independence - 현재 프레임 직접 사용
+            # - FrameSyncBuffer 비활성화 (프레임 독립 처리)
+            # - 마스크와 프레임이 100% 동일 시점 보장
             # ==================================================================
-            synced_frame = frame_gpu  # 기본값: 현재 프레임
+            synced_frame = frame_gpu  # [V44] 현재 프레임 직접 사용
 
-            if self.frame_sync_buffer is not None:
-                # 현재 프레임을 버퍼에 저장
-                self.frame_sync_buffer.push(frame_gpu)
-
-                # AI 마스크가 있을 때 동기화된 프레임 사용
-                if mask is not None and bg_stable:
-                    # AI 지연만큼 과거 프레임 가져오기
-                    _synced = self.frame_sync_buffer.get_synced_frame(
-                        delay_frames=self.ai_latency_frames
-                    )
-                    if _synced is not None:
-                        synced_frame = _synced
+            # [V44 LEGACY] 프레임 동기화 버퍼 비활성화 (롤백용 보존)
+            # if self.frame_sync_buffer is not None:
+            #     self.frame_sync_buffer.push(frame_gpu)
+            #     if mask is not None and bg_stable:
+            #         _synced = self.frame_sync_buffer.get_synced_frame(
+            #             delay_frames=self.ai_latency_frames
+            #         )
+            #         if _synced is not None:
+            #             synced_frame = _synced
 
             # Mask handling
-            # [V6] 정적 배경이 안정적일 때만 슬리밍 합성 활성화 (일렁임 방지)
-            if self.has_bg and mask is not None and bg_stable:
+            # [V44] 슬리밍 파라미터가 있을 때만 배경 합성 활성화
+            is_slimming_enabled = (
+                params.get('face_v', 0) > 0 or
+                params.get('waist_slim', 0) > 0 or
+                params.get('hip_widen', 0) > 0 or
+                params.get('shoulder_narrow', 0) > 0
+            )
+
+            if self.has_bg and mask is not None and bg_stable and is_slimming_enabled:
                 if hasattr(mask, 'device'):
                     mask_gpu = mask
                 else:
@@ -996,17 +1007,17 @@ class BeautyEngine:
             _ = mask_fwd  # [V41] Suppress unused variable warning (kept for rollback)
 
             # ==============================================================
-            # [V43] Inverse Warp Validity 합성
-            # - 핵심: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
-            # - 3단계 판정:
-            #   * CASE 1: source_validity > 0.35 → 전경 출력
-            #   * CASE 2: mask_at_origin > 0.15 → 배경 출력 (Void)
-            #   * CASE 3: 그 외 → 원본 유지
+            # [V44] Simple Void Fill - 프레임 독립 합성
+            # - 핵심: 프레임과 마스크가 100% 동일 시점
+            # - 3단계 무결성 판정:
+            #   * CASE 1: mask_at_warped > 0.4 → 전경 출력 (번개 차단)
+            #   * CASE 2: mask_at_origin > 0.2 → 배경 출력 (Void 채움)
+            #   * CASE 3: 그 외 → 원본 유지 (왜곡 차단)
             # ==============================================================
             result_gpu = cp.empty_like(frame_gpu)
 
-            # [V43] Inverse Warp Validity 합성
-            self.inverse_warp_validity_kernel(
+            # [V44] Simple Void Fill - 프레임 독립 처리
+            self.simple_void_fill_kernel(
                 grid_dim, block_dim,
                 (source_for_warp, self.bg_gpu,
                  mask_orig,
@@ -1015,8 +1026,8 @@ class BeautyEngine:
                  w, h, sw, sh, scale, use_bg)
             )
 
-            # [V42 LEGACY] 롤백이 필요한 경우 아래 코드로 교체:
-            # self.logical_void_fill_kernel(
+            # [V43 LEGACY] 롤백이 필요한 경우 아래 코드로 교체:
+            # self.inverse_warp_validity_kernel(
             #     grid_dim, block_dim,
             #     (source_for_warp, self.bg_gpu,
             #      mask_orig,
@@ -1041,7 +1052,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                cv2.putText(debug_img, "V43 Inverse Warp Validity", (10, 30),
+                cv2.putText(debug_img, "V44 Frame-Independent Void Fill", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)

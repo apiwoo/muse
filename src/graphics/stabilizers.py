@@ -30,12 +30,13 @@ class LandmarkStabilizer:
     Uses dynamic beta to balance smoothness and responsiveness based on movement speed.
     """
 
-    def __init__(self, min_cutoff=0.01, base_beta=5.0, high_speed_beta=50.0):
+    def __init__(self, min_cutoff=0.01, base_beta=5.0, high_speed_beta=50.0, bypass=False):
         """
         Args:
             min_cutoff: Minimum cutoff frequency (lower = more smoothing)
             base_beta: Base beta for slow movements
             high_speed_beta: Maximum beta for fast movements
+            bypass: [V44] If True, skip stabilization and return input directly
         """
         self.min_cutoff = min_cutoff
         self.base_beta = base_beta
@@ -43,6 +44,7 @@ class LandmarkStabilizer:
         self.prev_val = None
         self.prev_trend = None
         self.last_time = None
+        self.bypass = bypass  # [V44] Frame-independent mode
 
     def update(self, val_array):
         """
@@ -53,6 +55,10 @@ class LandmarkStabilizer:
         Returns:
             Stabilized landmark coordinates
         """
+        # [V44] bypass mode: return input directly (no stabilization)
+        if self.bypass:
+            return val_array
+
         now = time.time()
         if self.prev_val is None:
             self.prev_val = val_array
@@ -166,17 +172,19 @@ class MaskStabilizer:
     - 정지 상태: alpha=0.12 (강한 스무딩 → 떨림 억제)
     """
 
-    def __init__(self, base_alpha=0.12, fast_alpha=0.85, diff_threshold=0.04):
+    def __init__(self, base_alpha=0.12, fast_alpha=0.85, diff_threshold=0.04, bypass=False):
         """
         Args:
             base_alpha: 정지 시 alpha (강한 스무딩) - V40: 0.12
             fast_alpha: 움직임 시 alpha (즉각 반응) - V40: 0.85
             diff_threshold: 움직임 감지 임계값 - V40: 0.04
+            bypass: [V44] If True, skip stabilization and return input directly
         """
         self.base_alpha = base_alpha
         self.fast_alpha = fast_alpha
         self.diff_threshold = diff_threshold
         self.prev_mask = None
+        self.bypass = bypass  # [V44] Frame-independent mode
 
     def update(self, mask_gpu):
         """
@@ -188,6 +196,10 @@ class MaskStabilizer:
         Returns:
             stabilized_mask: 안정화된 마스크
         """
+        # [V44] bypass mode: return input directly (no stabilization)
+        if self.bypass:
+            return mask_gpu
+
         if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
             self.prev_mask = mask_gpu.astype(cp.float32)
             return mask_gpu
@@ -285,23 +297,29 @@ class WarpGridStabilizer:
     - 정지 시 자연스럽게 안정화
     """
 
-    def __init__(self, base_alpha=0.05, max_alpha=0.98, delta_scale=15.0):
+    def __init__(self, base_alpha=0.05, max_alpha=0.98, delta_scale=15.0, bypass=False):
         """
         Args:
             base_alpha: 정지 시 최소 alpha (강한 안정화)
             max_alpha: 움직임 시 최대 alpha (즉각 반응)
             delta_scale: delta → alpha 변환 스케일
+            bypass: [V44] If True, skip stabilization and return input directly
         """
         self.base_alpha = base_alpha
         self.max_alpha = max_alpha
         self.delta_scale = delta_scale
         self.prev_dx = None
         self.prev_dy = None
+        self.bypass = bypass  # [V44] Frame-independent mode
 
     def update(self, dx_gpu, dy_gpu):
         """
         V43 Delta-Adaptive 업데이트
         """
+        # [V44] bypass mode: return input directly (no stabilization)
+        if self.bypass:
+            return dx_gpu, dy_gpu
+
         if not HAS_CUDA:
             return dx_gpu, dy_gpu
 

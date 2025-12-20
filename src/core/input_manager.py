@@ -108,10 +108,13 @@ class InputManager:
                     # 2. Height
                     # 3. FPS
                     # No Codec forcing, No Auto-Exposure messing.
-                    
+
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
                     cap.set(cv2.CAP_PROP_FPS, fps)
+
+                    # [V44 HOTFIX] 버퍼 크기 1로 설정 (항상 최신 프레임만 유지)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                     
                     # Log actual settings
                     real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
@@ -163,18 +166,47 @@ class InputManager:
             return None, False
 
         cap = self.caps[self.active_id]
-        
+
         # Simple read
         ret, frame_cpu = cap.read()
-        
+
         frame_gpu = None
         if ret and frame_cpu is not None:
              if HAS_CUDA:
                  frame_gpu = cp.asarray(frame_cpu)
              else:
-                 frame_gpu = frame_cpu 
-        
+                 frame_gpu = frame_cpu
+
         return frame_gpu, ret
+
+    def read_latest(self):
+        """
+        [V44 HOTFIX] 최신 프레임 반환
+
+        버퍼 크기가 1로 설정되어 있으므로 일반 read()와 동일하게 동작
+        버퍼 크기 설정은 카메라 초기화 시 CAP_PROP_BUFFERSIZE=1로 수행됨
+
+        Returns:
+            frame: 최신 프레임 (없으면 None)
+            success: 성공 여부
+        """
+        # [V44 HOTFIX] 버퍼 크기 1이므로 read()만 호출
+        return self.read()
+
+        # [V44 LEGACY] grab() 루프 방식 (블로킹 문제로 제거)
+        # if self.active_id is None or self.active_id not in self.caps:
+        #     return None, False
+        # cap = self.caps[self.active_id]
+        # if cap is None or not cap.isOpened():
+        #     return None, False
+        # MAX_FLUSH_COUNT = 30
+        # flush_count = 0
+        # while flush_count < MAX_FLUSH_COUNT:
+        #     grabbed = cap.grab()
+        #     if not grabbed:
+        #         break
+        #     flush_count += 1
+        # return self.read()
 
     def release(self):
         for cap in self.caps.values():

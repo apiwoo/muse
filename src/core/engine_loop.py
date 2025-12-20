@@ -141,9 +141,13 @@ class BeautyWorker(QThread):
                 self.pending_profile_index = -1
 
             # Input
+            # [V44] 최신 프레임만 획득 (버퍼 플러시)
             t_read_start = time.perf_counter()
-            frame_gpu, ret = self.input_mgr.read()
+            frame_gpu, ret = self.input_mgr.read_latest()
             t_read_end = time.perf_counter()
+
+            # [V44 LEGACY] 기존 read() 호출 (롤백용)
+            # frame_gpu, ret = self.input_mgr.read()
             
             if not ret or frame_gpu is None:
                 no_frame_tick += 1
