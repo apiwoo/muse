@@ -1,10 +1,10 @@
 # Project MUSE - beauty_engine.py
-# V44.0: Frame-Independent Strict Void Fill
-# - 핵심: 프레임 독립 처리 (Stabilizer bypass + 동일 시점 마스크)
-# - 해결: 번개/잔상/배경왜곡 동시 해결
-# - 신규: Simple Void Fill Kernel (3단계 무결성 판정)
-# - 신규: 조건부 배경 합성 (슬리밍 파라미터 체크)
-# - 유지: Skeleton Patch, V34 Grid Modulation
+# V45.1: Keypoint Validation & FrameSyncBuffer Rollback
+# - 긴급수정: FrameSyncBuffer 다시 비활성화 (가변 지연으로 떨림 악화)
+# - 신규: _are_keypoints_valid() - 화면 밖 keypoint 검사
+# - 신규: 각 body 보정 전 keypoint 유효성 검사 (전체화면 왜곡 방지)
+# - 유지: is_slimming_enabled 조건 (hip_widen 제외, ribcage_slim 포함)
+# - 유지: Skeleton Patch, V34 Grid Modulation, Simple Void Fill Kernel
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -63,23 +63,27 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V44.0 Frame-Independent Strict Void Fill
+# [메인 클래스] BeautyEngine - V45.1 Keypoint Validation & Rollback
 # ==============================================================================
 class BeautyEngine:
     """
-    V44.0 Beauty Processing Engine - Frame-Independent Strict Void Fill
+    V45.1 Beauty Processing Engine - Keypoint Validation & FrameSyncBuffer Rollback
 
-    Key Changes (V44.0):
-    - Frame Independence: 모든 Stabilizer를 bypass 모드로 전환
-      * 이전 프레임 데이터 참조 완전 차단
-      * 마스크와 프레임이 100% 동일 시점 보장
-    - Triggered Composite: 슬리밍 파라미터가 있을 때만 배경 합성 활성화
-      * face_v, waist_slim, hip_widen, shoulder_narrow 체크
-      * 나머지 경우 워핑만 적용, 배경 합성 로직 스킵
+    Key Changes (V45.1):
+    - FrameSyncBuffer Rollback: V45에서 복구했으나 다시 비활성화
+      * 원인: AI 지연이 가변적이라 과거 프레임-현재 마스크 불일치 발생
+      * 결론: 현재 프레임 직접 사용이 가장 안정적
+    - Keypoint Validation: 화면 밖 keypoint로 인한 전체화면 왜곡 방지
+      * _are_keypoints_valid(): 화면 내 좌표 + confidence 체크
+      * 각 body 보정 전 해당 keypoint 유효성 검사
+      * 화면 밖 또는 낮은 confidence → 해당 보정 스킵
+
+    Preserved from V45:
+    - is_slimming_enabled 조건 (hip_widen 제외, ribcage_slim 포함)
+
+    Preserved from V44:
     - Simple Void Fill Kernel: 3단계 무결성 판정
-      * Priority 1: mask_at_warped > 0.4 → 전경 출력 (번개 원천 차단)
-      * Priority 2: mask_at_origin > 0.2 → 배경 출력 (Void 채움)
-      * Priority 3: 그 외 → 원본 유지 (배경 왜곡 차단)
+    - Stabilizer bypass=True
 
     Preserved from V40:
     - Skeleton Patch: AI 마스크 + Torso 마스크 병합
@@ -87,11 +91,11 @@ class BeautyEngine:
     Preserved from V34:
     - Grid Modulation: 배경 영역 워핑 차단
 
-    Result: 번개/잔상/배경왜곡 동시 해결 + 움직임 추종성 극대화
+    Result: 화면 밖 keypoint 안전 처리 + 안정성 복구
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V44.0 Frame-Independent Strict Void Fill Ready")
+        print("[BEAUTY] [BeautyEngine] V45.1 Keypoint Validation Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -122,7 +126,12 @@ class BeautyEngine:
 
         # V33: Frame Sync Buffer (AI 지연 보상)
         self.frame_sync_buffer = None  # Initialized when HAS_CUDA
-        self.ai_latency_frames = 1  # AI 마스크 지연 프레임 수 (조절 가능)
+        # [V45] AI 마스크 지연 프레임 수
+        # - 0: 지연 보상 없음 (현재 프레임 직접 사용)
+        # - 1: 1프레임 전 (권장 - 대부분의 하드웨어)
+        # - 2: 2프레임 전 (느린 GPU에서 권장)
+        # 실제 지연은 GPU 성능에 따라 다름, 테스트 후 조정
+        self.ai_latency_frames = 1
 
         # Background management (기존 유지)
         self.bg_buffers = {}
@@ -567,6 +576,47 @@ class BeautyEngine:
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
+    # V45.1: Body Keypoint Validation
+    # ==========================================================================
+    def _are_keypoints_valid(self, kpts, indices, w, h, min_conf=0.3):
+        """
+        [V45.1] 특정 keypoint들이 화면 내에 있고 신뢰도가 충분한지 검사
+
+        Args:
+            kpts: body_landmarks 배열 (N, 2) 또는 (N, 3)
+            indices: 검사할 keypoint 인덱스 리스트 (예: [11, 12] for hips)
+            w, h: 화면 크기
+            min_conf: 최소 신뢰도 (기본 0.3)
+
+        Returns:
+            bool: 모든 keypoint가 유효하면 True
+        """
+        if kpts is None:
+            return False
+
+        for idx in indices:
+            if idx >= len(kpts):
+                return False
+
+            pt = kpts[idx]
+            x, y = pt[0], pt[1]
+
+            # 화면 내 좌표인지 확인 (여유를 두어 화면 가장자리 근처도 허용)
+            margin = 0.05  # 5% 마진
+            if x < -w * margin or x > w * (1 + margin):
+                return False
+            if y < -h * margin or y > h * (1 + margin):
+                return False
+
+            # confidence 체크 (3번째 값이 있는 경우)
+            if len(pt) >= 3:
+                conf = pt[2]
+                if conf < min_conf:
+                    return False
+
+        return True
+
+    # ==========================================================================
     # V39: Mask-Warp Spatial Alignment
     # ==========================================================================
     def _align_mask_to_landmarks(self, mask_gpu, current_body, stabilized_body):
@@ -771,13 +821,14 @@ class BeautyEngine:
                 self.has_bg = True
 
             # ==================================================================
-            # [V44] Frame Independence - 현재 프레임 직접 사용
-            # - FrameSyncBuffer 비활성화 (프레임 독립 처리)
-            # - 마스크와 프레임이 100% 동일 시점 보장
+            # [V45.1] Frame Independence 유지 - FrameSyncBuffer 비활성화
+            # - V45에서 복구했으나 오히려 떨림 악화
+            # - 원인: AI 지연이 가변적이라 과거 프레임-현재 마스크 불일치 발생
+            # - 결론: 현재 프레임 직접 사용이 가장 안정적
             # ==================================================================
-            synced_frame = frame_gpu  # [V44] 현재 프레임 직접 사용
+            synced_frame = frame_gpu  # 현재 프레임 직접 사용
 
-            # [V44 LEGACY] 프레임 동기화 버퍼 비활성화 (롤백용 보존)
+            # [V45.1 DISABLED] FrameSyncBuffer - 가변 지연으로 인해 비활성화
             # if self.frame_sync_buffer is not None:
             #     self.frame_sync_buffer.push(frame_gpu)
             #     if mask is not None and bg_stable:
@@ -788,13 +839,18 @@ class BeautyEngine:
             #             synced_frame = _synced
 
             # Mask handling
-            # [V44] 슬리밍 파라미터가 있을 때만 배경 합성 활성화
+            # [V45] 배경합성 조건 정교화
+            # - 실루엣이 "안쪽으로 수축"하는 기능에서만 배경합성 활성화
+            # - hip_widen(골반늘리기)은 "바깥으로 확장"이므로 Void가 발생하지 않음
+            # - ribcage_slim(갈비뼈줄이기) 추가: 수축이므로 Void 발생
+            # - nose_slim, eye_scale, head_scale은 얼굴 내부 변형이므로 배경합성 불필요
             is_slimming_enabled = (
                 params.get('face_v', 0) > 0 or
                 params.get('waist_slim', 0) > 0 or
-                params.get('hip_widen', 0) > 0 or
-                params.get('shoulder_narrow', 0) > 0
+                params.get('shoulder_narrow', 0) > 0 or
+                params.get('ribcage_slim', 0) > 0
             )
+            # 주의: hip_widen은 의도적으로 제외됨 (확장은 Void를 만들지 않음)
 
             if self.has_bg and mask is not None and bg_stable and is_slimming_enabled:
                 if hasattr(mask, 'device'):
@@ -839,15 +895,31 @@ class BeautyEngine:
                 stable_kpts = self.body_stabilizer.update(kpts_xy)
                 scaled_body = stable_kpts * self.map_scale
 
-                # [V30] 슬리밍 파라미터에 damping 적용
+                # [V45.1] keypoint 유효성 검사를 위한 원본 좌표 보존
+                original_kpts = stable_kpts  # 화면 크기 기준 좌표
+
+                # [V45.1] 각 보정별 필요 keypoint 인덱스 정의
+                # 어깨: 5(왼쪽어깨), 6(오른쪽어깨)
+                # 갈비뼈: 5, 6, 11, 12 (어깨 + 골반)
+                # 허리: 5, 6, 11, 12 (어깨 + 골반)
+                # 골반: 11(왼쪽골반), 12(오른쪽골반)
+
+                # [V30] 슬리밍 파라미터에 damping 적용 + [V45.1] 유효성 검사
                 if params.get('shoulder_narrow', 0) > 0:
-                    self.morph_logic.collect_shoulder_params(scaled_body, params['shoulder_narrow'] * slim_damping)
+                    if self._are_keypoints_valid(original_kpts, [5, 6], w, h):
+                        self.morph_logic.collect_shoulder_params(scaled_body, params['shoulder_narrow'] * slim_damping)
+
                 if params.get('ribcage_slim', 0) > 0:
-                    self.morph_logic.collect_ribcage_params(scaled_body, params['ribcage_slim'] * slim_damping)
+                    if self._are_keypoints_valid(original_kpts, [5, 6, 11, 12], w, h):
+                        self.morph_logic.collect_ribcage_params(scaled_body, params['ribcage_slim'] * slim_damping)
+
                 if params.get('waist_slim', 0) > 0:
-                    self.morph_logic.collect_waist_params(scaled_body, params['waist_slim'] * slim_damping)
+                    if self._are_keypoints_valid(original_kpts, [5, 6, 11, 12], w, h):
+                        self.morph_logic.collect_waist_params(scaled_body, params['waist_slim'] * slim_damping)
+
                 if params.get('hip_widen', 0) > 0:
-                    self.morph_logic.collect_hip_params(scaled_body, params['hip_widen'] * slim_damping)
+                    if self._are_keypoints_valid(original_kpts, [11, 12], w, h):
+                        self.morph_logic.collect_hip_params(scaled_body, params['hip_widen'] * slim_damping)
 
             if faces:
                 lm_small = stable_face * self.map_scale

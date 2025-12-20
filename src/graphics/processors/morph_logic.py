@@ -142,11 +142,19 @@ class MorphLogic:
         if len(kpts) < 13: return
         l_sh, r_sh = kpts[5, :2], kpts[6, :2]
         l_hip, r_hip = kpts[11, :2], kpts[12, :2]
-        
+
         if HAS_NUMBA:
             res = _calc_waist_params(l_sh, r_sh, l_hip, r_hip, float(s))
             if res is None: return
             l_w, r_w, rad, str_val, vl, vr = res
+
+            # [V45] 반경 상한선: 몸통 높이의 일정 비율을 초과하지 않도록 제한
+            # 이는 전체 화면이 왜곡되는 것을 방지
+            MAX_RADIUS_RATIO = 0.25  # 몸통 높이 대비 최대 비율
+            body_height = np.linalg.norm(l_sh - l_hip)  # 대략적인 몸통 높이
+            max_radius = body_height * MAX_RADIUS_RATIO * 4  # small scale 기준
+            rad = min(rad, max_radius)
+
             self._add_param(l_w[0], l_w[1], rad, str_val, vl[0], vl[1], 1)
             self._add_param(r_w[0], r_w[1], rad, str_val, vr[0], vr[1], 1)
         else:
