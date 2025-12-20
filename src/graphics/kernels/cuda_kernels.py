@@ -2078,7 +2078,7 @@ void simple_void_fill_kernel(
     float bg_r = (float)bg[idx_rgb + 2];
 
     // 임계값 정의
-    const float CERTAIN_BG = 0.1f;       // 이 미만이면 확실히 배경
+    const float CERTAIN_BG = 0.05f;      // [V44.5] 0.1 → 0.05 (번개 완전 차단)
     const float CERTAIN_PERSON = 0.3f;   // 이 초과면 확실히 사람
     const float ORIGIN_THRESHOLD = 0.2f; // 원래 사람이었는지
 

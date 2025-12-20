@@ -888,9 +888,9 @@ class BeautyEngine:
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dx, sigma=2.0, output=self.gpu_dx)
                 cupyx.scipy.ndimage.gaussian_filter(self.gpu_dy, sigma=2.0, output=self.gpu_dy)
 
-                # [V31] WarpGridStabilizer로 시간적 평활화 (잔상 근본 해결)
-                if self.warp_grid_stabilizer is not None:
-                    self.gpu_dx, self.gpu_dy = self.warp_grid_stabilizer.update(self.gpu_dx, self.gpu_dy)
+                # [V44.5] WarpGridStabilizer 호출 비활성화 - 움직임 추적 지연 해결
+                # if self.warp_grid_stabilizer is not None:
+                #     self.gpu_dx, self.gpu_dy = self.warp_grid_stabilizer.update(self.gpu_dx, self.gpu_dy)
 
                 # ==============================================================
                 # [V34] Grid Modulation - 배경 워핑 원천 차단
