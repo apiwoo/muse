@@ -1,9 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V42.0: Void Edge Guard (번개 현상 완전 해결)
-# - 핵심: Void 판정을 "슬리밍 경계"에서만 허용
-# - 해결: 번개 현상 (내부 구멍에서 배경 출력 원천 차단)
-# - 유지: Time-Locked Sync, Skeleton Patch, V37 Stabilization, V34 Grid Modulation
-# - 신규: is_slimming_edge 조건으로 진짜 Void와 마스크 구멍 구분
+# V43.0: Inverse Warp Validity (번개 현상 근본 해결)
+# - 핵심: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
+# - 해결: AI 마스크 구멍으로 인한 번개 현상 근본 해결
+# - 신규: Delta-Adaptive Stabilizer (움직임 즉시 반응)
+# - 유지: Time-Locked Sync, Skeleton Patch, V34 Grid Modulation
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -44,7 +44,9 @@ from graphics.kernels.cuda_kernels import (
     # V40: Skeleton Patch (AI Mask + Torso Mask)
     MASK_COMBINE_KERNEL_CODE,
     # V41: Logical Void Fill (Time-Locked Sync)
-    LOGICAL_VOID_FILL_KERNEL_CODE
+    LOGICAL_VOID_FILL_KERNEL_CODE,
+    # V43: Inverse Warp Validity (번개 현상 근본 해결)
+    INVERSE_WARP_VALIDITY_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -58,42 +60,39 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V42.0 Void Edge Guard
+# [메인 클래스] BeautyEngine - V43.0 Inverse Warp Validity
 # ==============================================================================
 class BeautyEngine:
     """
-    V42.0 Beauty Processing Engine - Void Edge Guard (번개 현상 완전 해결)
+    V43.0 Beauty Processing Engine - Inverse Warp Validity (번개 현상 근본 해결)
 
-    Key Changes (V42.0):
-    - Void Edge Guard: Void 판정을 "슬리밍 경계"에서만 허용
-      * is_slimming_edge = warp_magnitude > 1.0 (슬리밍 효과 발생 지점)
-      * 내부 구멍 (warp_magnitude < 1.0): 전경 출력 → 번개 원천 차단
-      * 슬리밍 경계 Void: 배경 출력 → 정상 Void 채움
-    - 3단계 → 4단계 로직 확장:
-      * CASE 1: 워핑된 위치가 사람 → 워핑된 전경
-      * CASE 2-A: 슬리밍 경계의 진짜 Void → 배경
-      * CASE 2-B: 내부 구멍 → 워핑된 전경 (번개 방지!)
-      * CASE 3: 원래 배경 → 원본 프레임 유지
+    Key Changes (V43.0):
+    - Inverse Warp Validity: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
+      * source_validity = mask[v * width + u] / 255.0f
+      * 소스가 유효한 사람이면 → 전경 출력
+      * 소스가 무효하고 원래 사람 있었으면 → 배경 출력 (Void)
+      * 그 외 → 원본 출력
+    - Delta-Adaptive Stabilizer: 움직임 발생 즉시 alpha 상승 (지연 없음)
+      * 이진(Binary) 속도 판정 제거
+      * 프레임 간 워핑 그리드 변화량(Delta)에 비례하여 alpha 즉시 조절
 
     Preserved from V41:
     - Time-Locked Sync: 프레임-마스크 완벽 시간 동기화
-    - Logical Void Fill: 가중치 블렌딩 제거
 
     Preserved from V40:
     - Skeleton Patch: AI 마스크 + Torso 마스크 병합
 
     Preserved from V37:
     - LandmarkStabilizer: One-Euro Filter 기반 랜드마크 안정화
-    - WarpGridStabilizer: 히스테리시스 + Alpha Smoothing
 
     Preserved from V34:
     - Grid Modulation: 배경 영역 워핑 차단
 
-    Result: 번개 현상 완전 해결 + 슬리밍 Void 정상 채움
+    Result: 번개 현상 근본 해결 + 움직임 추종성 극대화
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V42.0 Void Edge Guard Ready")
+        print("[BEAUTY] [BeautyEngine] V43.0 Inverse Warp Validity Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -176,12 +175,11 @@ class BeautyEngine:
                 fast_alpha=0.85,      # 움직임 시: 즉각 반응
                 diff_threshold=0.04   # 움직임 감지 임계값
             )
+            # V43: Delta-Adaptive Stabilizer
             self.warp_grid_stabilizer = WarpGridStabilizer(
-                base_alpha=0.08,
-                snap_alpha=0.6,
-                low_threshold=2.0,
-                high_threshold=5.0,
-                alpha_smooth=0.3
+                base_alpha=0.05,
+                max_alpha=0.98,
+                delta_scale=15.0
             )
             # [V33] Frame Sync Buffer for AI latency compensation
             self.frame_sync_buffer = FrameSyncBuffer(max_size=3)
@@ -226,6 +224,12 @@ class BeautyEngine:
 
             # V41: Logical Void Fill (Time-Locked Sync)
             self.logical_void_fill_kernel = cp.RawKernel(LOGICAL_VOID_FILL_KERNEL_CODE, 'logical_void_fill_kernel')
+
+            # V43: Inverse Warp Validity (번개 현상 근본 해결)
+            self.inverse_warp_validity_kernel = cp.RawKernel(
+                INVERSE_WARP_VALIDITY_KERNEL_CODE,
+                'inverse_warp_validity_kernel'
+            )
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -992,31 +996,30 @@ class BeautyEngine:
             _ = mask_fwd  # [V41] Suppress unused variable warning (kept for rollback)
 
             # ==============================================================
-            # [V41] Time-Locked Sync + Logical Void Fill 합성
-            # - 핵심: 동기화된 프레임 + 동기화된 마스크 = 100% 시점 일치
-            # - 3단계 명확한 논리:
-            #   * CASE 1: mask_at_warped > 0.4 → 워핑된 전경 (번개 방지)
-            #   * CASE 2: mask_at_origin > 0.2 → 배경으로 채움 (Void)
-            #   * CASE 3: 그 외 → 원본 프레임 유지 (배경 왜곡 방지)
+            # [V43] Inverse Warp Validity 합성
+            # - 핵심: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
+            # - 3단계 판정:
+            #   * CASE 1: source_validity > 0.35 → 전경 출력
+            #   * CASE 2: mask_at_origin > 0.15 → 배경 출력 (Void)
+            #   * CASE 3: 그 외 → 원본 유지
             # ==============================================================
             result_gpu = cp.empty_like(frame_gpu)
 
-            # [V41] 동기화된 마스크 사용 (mask_orig를 단일 마스크로 전달)
-            # logical_void_fill_kernel은 단일 mask만 사용
-            self.logical_void_fill_kernel(
+            # [V43] Inverse Warp Validity 합성
+            self.inverse_warp_validity_kernel(
                 grid_dim, block_dim,
                 (source_for_warp, self.bg_gpu,
-                 mask_orig,  # [V41] 동기화된 단일 마스크
+                 mask_orig,
                  result_gpu,
                  self.gpu_dx, self.gpu_dy,
                  w, h, sw, sh, scale, use_bg)
             )
 
-            # [V41 LEGACY] 롤백이 필요한 경우 아래 코드로 교체:
-            # self.clean_composite_kernel(
+            # [V42 LEGACY] 롤백이 필요한 경우 아래 코드로 교체:
+            # self.logical_void_fill_kernel(
             #     grid_dim, block_dim,
             #     (source_for_warp, self.bg_gpu,
-            #      mask_orig, mask_fwd,
+            #      mask_orig,
             #      result_gpu,
             #      self.gpu_dx, self.gpu_dy,
             #      w, h, sw, sh, scale, use_bg)
@@ -1038,7 +1041,7 @@ class BeautyEngine:
                     cv2.drawContours(debug_img, contours, -1, (0, 255, 0), 2)
 
                 # Show processing mode
-                cv2.putText(debug_img, "V42 Void Edge Guard", (10, 30),
+                cv2.putText(debug_img, "V43 Inverse Warp Validity", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)

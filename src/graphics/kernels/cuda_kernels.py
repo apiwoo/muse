@@ -1540,7 +1540,7 @@ void warp_mask_from_grid_kernel(
 # - 슬리밍 경계: warp_magnitude > 1.0 (실제 슬리밍 효과 발생 지점)
 # - 내부 구멍: warp_magnitude < 1.0 (AI 마스크 결함) → 전경 출력으로 번개 방지
 # ==============================================================================
-LOGICAL_VOID_FILL_KERNEL_CODE = r'''
+LOGICAL_VOID_FILL_KERNEL_CODE_V42_LEGACY = r'''
 extern "C" __global__
 void logical_void_fill_kernel(
     const unsigned char* src,        // 동기화된 원본 프레임 (Time-Locked)
@@ -1680,6 +1680,9 @@ void logical_void_fill_kernel(
     dst[idx_rgb + 2] = (unsigned char)out_r;
 }
 '''
+
+# V43: 하위 호환성을 위한 alias
+LOGICAL_VOID_FILL_KERNEL_CODE = LOGICAL_VOID_FILL_KERNEL_CODE_V42_LEGACY
 
 # ==============================================================================
 # [KERNEL V40 LEGACY] Void Only Fill + Dual-Criteria + 이중 사람 보호
@@ -1851,3 +1854,129 @@ void clean_composite_kernel(
 # - 새 코드는 LOGICAL_VOID_FILL_KERNEL_CODE 사용 권장
 # ==============================================================================
 CLEAN_COMPOSITE_KERNEL_CODE = CLEAN_COMPOSITE_KERNEL_CODE_LEGACY
+
+
+# ==============================================================================
+# [KERNEL V43] Inverse Warp Validity - 번개 현상 근본 해결
+# - 핵심: 역워핑 소스 좌표(u,v)가 유효한 사람인지 직접 검증
+# - AI 마스크 구멍 문제 근본 해결
+# ==============================================================================
+INVERSE_WARP_VALIDITY_KERNEL_CODE = r'''
+extern "C" __global__
+void inverse_warp_validity_kernel(
+    const unsigned char* src,
+    const unsigned char* bg,
+    const unsigned char* mask,
+    unsigned char* dst,
+    const float* dx_small,
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    // 워핑 변위 계산
+    int sx = x / scale;
+    int sy = y / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    // 배경 미사용 시: 단순 워핑
+    if (!use_bg) {
+        if (u >= 0 && u < width && v >= 0 && v < height) {
+            int warped_idx_rgb = (v * width + u) * 3;
+            dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
+            dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
+            dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
+        } else {
+            dst[idx_rgb + 0] = src[idx_rgb + 0];
+            dst[idx_rgb + 1] = src[idx_rgb + 1];
+            dst[idx_rgb + 2] = src[idx_rgb + 2];
+        }
+        return;
+    }
+
+    // =========================================================================
+    // [V43] Inverse Warp Validity - 핵심 로직
+    // =========================================================================
+
+    // 1. 현재 좌표의 마스크 (원래 사람 있었나?)
+    float mask_at_origin = (float)mask[idx] / 255.0f;
+
+    // 2. 역방향 좌표의 마스크 유효성 (소스가 유효한 사람인가?)
+    float source_validity = 0.0f;
+    bool source_in_bounds = (u >= 0 && u < width && v >= 0 && v < height);
+
+    if (source_in_bounds) {
+        source_validity = (float)mask[v * width + u] / 255.0f;
+    }
+
+    // 3. 임계값
+    const float SOURCE_VALID_THRESHOLD = 0.35f;
+    const float VOID_THRESHOLD = 0.15f;
+
+    // 4. 픽셀 값 준비
+    float fg_b, fg_g, fg_r;
+    if (source_in_bounds) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        fg_b = (float)src[warped_idx_rgb + 0];
+        fg_g = (float)src[warped_idx_rgb + 1];
+        fg_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        fg_b = (float)src[idx_rgb + 0];
+        fg_g = (float)src[idx_rgb + 1];
+        fg_r = (float)src[idx_rgb + 2];
+    }
+
+    float bg_b = (float)bg[idx_rgb + 0];
+    float bg_g = (float)bg[idx_rgb + 1];
+    float bg_r = (float)bg[idx_rgb + 2];
+
+    float src_b = (float)src[idx_rgb + 0];
+    float src_g = (float)src[idx_rgb + 1];
+    float src_r = (float)src[idx_rgb + 2];
+
+    // =========================================================================
+    // [V43] 3단계 판정 로직
+    // =========================================================================
+    float out_b, out_g, out_r;
+
+    if (source_validity > SOURCE_VALID_THRESHOLD && source_in_bounds) {
+        // CASE 1: 역방향 좌표가 유효한 사람 → 전경 출력
+        out_b = fg_b;
+        out_g = fg_g;
+        out_r = fg_r;
+    }
+    else if (mask_at_origin > VOID_THRESHOLD) {
+        // CASE 2: 원래 사람 있었지만 소스 무효 → Void → 배경 출력
+        out_b = bg_b;
+        out_g = bg_g;
+        out_r = bg_r;
+    }
+    else {
+        // CASE 3: 원래 배경 → 원본 유지
+        out_b = src_b;
+        out_g = src_g;
+        out_r = src_r;
+    }
+
+    dst[idx_rgb + 0] = (unsigned char)out_b;
+    dst[idx_rgb + 1] = (unsigned char)out_g;
+    dst[idx_rgb + 2] = (unsigned char)out_r;
+}
+'''

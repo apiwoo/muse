@@ -217,36 +217,20 @@ class MaskStabilizer:
         self.prev_mask = None
 
 
+"""
+[V42 LEGACY] WarpGridStabilizer - Hysteresis + Alpha Smoothing
 class WarpGridStabilizer:
-    """
-    [V37] Warp Grid Temporal Stabilizer with Hysteresis + Alpha Smoothing.
-
-    Key features:
-    - Hysteresis dual-threshold: Prevents jitter during state transitions
-    - Alpha Smoothing: Smooths the alpha value itself via EMA
-    - Velocity EMA: Less sensitive to instantaneous speed changes
-    """
-
     def __init__(self,
                  base_alpha=0.08,
                  snap_alpha=0.6,
                  low_threshold=2.0,
                  high_threshold=5.0,
                  alpha_smooth=0.3):
-        """
-        Args:
-            base_alpha: Alpha for stationary state (strong smoothing)
-            snap_alpha: Alpha for fast movement (responsive)
-            low_threshold: Lower threshold for hysteresis
-            high_threshold: Upper threshold for hysteresis
-            alpha_smooth: EMA factor for alpha smoothing
-        """
         self.base_alpha = base_alpha
         self.snap_alpha = snap_alpha
         self.low_threshold = low_threshold
         self.high_threshold = high_threshold
         self.alpha_smooth = alpha_smooth
-
         self.prev_dx = None
         self.prev_dy = None
         self.prev_velocity = 0.0
@@ -254,14 +238,69 @@ class WarpGridStabilizer:
         self.is_fast_mode = False
 
     def update(self, dx_gpu, dy_gpu):
-        """
-        Update stabilizer with new warp grids.
+        if not HAS_CUDA:
+            return dx_gpu, dy_gpu
+        if self.prev_dx is None or self.prev_dx.shape != dx_gpu.shape:
+            self.prev_dx = dx_gpu.copy()
+            self.prev_dy = dy_gpu.copy()
+            return dx_gpu, dy_gpu
+        delta_dx = dx_gpu - self.prev_dx
+        delta_dy = dy_gpu - self.prev_dy
+        raw_velocity = float(cp.mean(cp.sqrt(delta_dx**2 + delta_dy**2)))
+        self.prev_velocity = 0.7 * self.prev_velocity + 0.3 * raw_velocity
+        velocity = self.prev_velocity
+        if not self.is_fast_mode and velocity > self.high_threshold:
+            self.is_fast_mode = True
+        elif self.is_fast_mode and velocity < self.low_threshold:
+            self.is_fast_mode = False
+        if self.is_fast_mode:
+            speed_factor = min((velocity - self.low_threshold) /
+                              (self.high_threshold - self.low_threshold), 1.0)
+            speed_factor = max(0.0, speed_factor)
+            target_alpha = self.base_alpha + (self.snap_alpha - self.base_alpha) * speed_factor
+        else:
+            target_alpha = self.base_alpha
+        self.current_alpha = (self.alpha_smooth * target_alpha +
+                             (1.0 - self.alpha_smooth) * self.current_alpha)
+        stabilized_dx = self.current_alpha * dx_gpu + (1.0 - self.current_alpha) * self.prev_dx
+        stabilized_dy = self.current_alpha * dy_gpu + (1.0 - self.current_alpha) * self.prev_dy
+        self.prev_dx = stabilized_dx.copy()
+        self.prev_dy = stabilized_dy.copy()
+        return stabilized_dx, stabilized_dy
 
+    def reset(self):
+        self.prev_dx = None
+        self.prev_dy = None
+        self.prev_velocity = 0.0
+        self.current_alpha = self.base_alpha
+        self.is_fast_mode = False
+V42 LEGACY */
+"""
+
+
+class WarpGridStabilizer:
+    """
+    V43: Delta-Adaptive Warp Grid Stabilizer
+    - 움직임 발생 즉시 alpha 상승 (지연 없음)
+    - 정지 시 자연스럽게 안정화
+    """
+
+    def __init__(self, base_alpha=0.05, max_alpha=0.98, delta_scale=15.0):
+        """
         Args:
-            dx_gpu: X displacement grid (CuPy array)
-            dy_gpu: Y displacement grid (CuPy array)
-        Returns:
-            Tuple of stabilized (dx_gpu, dy_gpu)
+            base_alpha: 정지 시 최소 alpha (강한 안정화)
+            max_alpha: 움직임 시 최대 alpha (즉각 반응)
+            delta_scale: delta → alpha 변환 스케일
+        """
+        self.base_alpha = base_alpha
+        self.max_alpha = max_alpha
+        self.delta_scale = delta_scale
+        self.prev_dx = None
+        self.prev_dy = None
+
+    def update(self, dx_gpu, dy_gpu):
+        """
+        V43 Delta-Adaptive 업데이트
         """
         if not HAS_CUDA:
             return dx_gpu, dy_gpu
@@ -271,47 +310,25 @@ class WarpGridStabilizer:
             self.prev_dy = dy_gpu.copy()
             return dx_gpu, dy_gpu
 
-        # Calculate grid change
+        # 1. 프레임 간 변화량 계산
         delta_dx = dx_gpu - self.prev_dx
         delta_dy = dy_gpu - self.prev_dy
-        raw_velocity = float(cp.mean(cp.sqrt(delta_dx**2 + delta_dy**2)))
+        delta_magnitude = float(cp.sqrt(cp.mean(delta_dx**2 + delta_dy**2)))
 
-        # Velocity EMA (smooth instantaneous changes)
-        self.prev_velocity = 0.7 * self.prev_velocity + 0.3 * raw_velocity
-        velocity = self.prev_velocity
+        # 2. delta → alpha 변환 (연속적)
+        alpha = self.base_alpha + delta_magnitude * self.delta_scale
+        alpha = min(self.max_alpha, max(self.base_alpha, alpha))
 
-        # Hysteresis state machine
-        if not self.is_fast_mode and velocity > self.high_threshold:
-            self.is_fast_mode = True
-        elif self.is_fast_mode and velocity < self.low_threshold:
-            self.is_fast_mode = False
+        # 3. EMA 적용
+        smoothed_dx = alpha * dx_gpu + (1.0 - alpha) * self.prev_dx
+        smoothed_dy = alpha * dy_gpu + (1.0 - alpha) * self.prev_dy
 
-        # Determine target alpha
-        if self.is_fast_mode:
-            speed_factor = min((velocity - self.low_threshold) /
-                              (self.high_threshold - self.low_threshold), 1.0)
-            speed_factor = max(0.0, speed_factor)
-            target_alpha = self.base_alpha + (self.snap_alpha - self.base_alpha) * speed_factor
-        else:
-            target_alpha = self.base_alpha
+        # 4. 상태 업데이트
+        self.prev_dx = smoothed_dx.copy()
+        self.prev_dy = smoothed_dy.copy()
 
-        # Alpha smoothing
-        self.current_alpha = (self.alpha_smooth * target_alpha +
-                             (1.0 - self.alpha_smooth) * self.current_alpha)
-
-        # Apply EMA
-        stabilized_dx = self.current_alpha * dx_gpu + (1.0 - self.current_alpha) * self.prev_dx
-        stabilized_dy = self.current_alpha * dy_gpu + (1.0 - self.current_alpha) * self.prev_dy
-
-        self.prev_dx = stabilized_dx.copy()
-        self.prev_dy = stabilized_dy.copy()
-
-        return stabilized_dx, stabilized_dy
+        return smoothed_dx, smoothed_dy
 
     def reset(self):
-        """Reset stabilizer state."""
         self.prev_dx = None
         self.prev_dy = None
-        self.prev_velocity = 0.0
-        self.current_alpha = self.base_alpha
-        self.is_fast_mode = False
