@@ -16,6 +16,7 @@ from ai.tracking.facemesh import FaceMesh
 
 try:
     import cupy as cp
+    import cupyx.scipy.ndimage
     HAS_CUDA = True
 except ImportError:
     HAS_CUDA = False
@@ -126,3 +127,90 @@ class MaskManager:
     def get_mask_gpu(self):
         """Get mask as CuPy array (or None if not available)."""
         return self.mask_gpu
+
+    def generate_hybrid_mask(self, landmarks, ai_skin_mask, w, h, padding_ratio=1.25):
+        """
+        Generate hybrid mask combining FaceMesh polygon and AI skin parsing.
+
+        This method combines the stability of FaceMesh polygon-based masking
+        with the pixel-level precision of AI skin parsing.
+
+        Logic:
+            1. Generate FaceMesh-based face region mask (bounding stability)
+            2. Intersect with AI skin mask if available (pixel precision)
+            3. Apply Gaussian blur for smooth edges
+
+        Benefits:
+            - AI mask: Pixel-level precision (prevents hair intrusion)
+            - FaceMesh mask: Face region bounding (stability/fallback)
+            - Intersection: Combines advantages of both approaches
+
+        Args:
+            landmarks: Face landmarks array (numpy)
+            ai_skin_mask: AI-detected skin mask (CuPy uint8, 0-255) or None
+            w, h: Image dimensions
+            padding_ratio: Padding for face region (default 1.25)
+
+        Returns:
+            Hybrid mask as CuPy array (GPU) if available, else numpy array
+        """
+        # Step 1: Generate FaceMesh-based face region mask
+        # Use slightly larger padding to ensure full coverage
+        face_region = self.generate_mask(
+            landmarks, w, h,
+            padding_ratio=padding_ratio * 1.1,  # Slightly larger for hybrid
+            exclude_features=False  # Don't exclude features (AI mask handles this)
+        )
+
+        if face_region is None:
+            return ai_skin_mask if ai_skin_mask is not None else None
+
+        # Step 2: Combine with AI mask if available
+        if ai_skin_mask is not None and HAS_CUDA:
+            # Ensure both are on GPU
+            if not hasattr(face_region, 'device'):
+                face_region = cp.asarray(face_region)
+
+            if not hasattr(ai_skin_mask, 'device'):
+                ai_skin_mask = cp.asarray(ai_skin_mask)
+
+            # Ensure same shape
+            if ai_skin_mask.shape != face_region.shape:
+                # Resize AI mask to match if needed
+                ai_skin_mask = cupyx.scipy.ndimage.zoom(
+                    ai_skin_mask.astype(cp.float32),
+                    (h / ai_skin_mask.shape[0], w / ai_skin_mask.shape[1]),
+                    order=1
+                ).astype(cp.uint8)
+                ai_skin_mask = ai_skin_mask[:h, :w]
+
+            # Intersection: Take minimum of both masks
+            # This ensures we only process areas that both agree are skin
+            hybrid_mask = cp.minimum(face_region, ai_skin_mask)
+
+            # Step 3: Smooth the edges with Gaussian blur
+            hybrid_mask = cupyx.scipy.ndimage.gaussian_filter(
+                hybrid_mask.astype(cp.float32),
+                sigma=3.0
+            )
+            hybrid_mask = cp.clip(hybrid_mask, 0, 255).astype(cp.uint8)
+
+            # Debug: Log hybrid mask stats (throttled)
+            if not hasattr(self, '_hybrid_log_count'):
+                self._hybrid_log_count = 0
+            self._hybrid_log_count += 1
+            if self._hybrid_log_count % 60 == 1:
+                face_mean = float(cp.mean(face_region))
+                ai_mean = float(cp.mean(ai_skin_mask))
+                hybrid_mean = float(cp.mean(hybrid_mask))
+                print(f"[HYBRID-DEBUG] FaceMesh={face_mean:.1f}, AI={ai_mean:.1f}, Hybrid={hybrid_mean:.1f} (intersection)")
+
+            return hybrid_mask
+        else:
+            # Fallback: Use FaceMesh mask only
+            if not hasattr(self, '_fallback_log_count'):
+                self._fallback_log_count = 0
+            self._fallback_log_count += 1
+            if self._fallback_log_count % 300 == 1:
+                print(f"[HYBRID-DEBUG] Fallback to FaceMesh-only (AI mask unavailable)")
+            return face_region

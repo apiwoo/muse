@@ -45,7 +45,19 @@ MODNET_CKPT_PATH = os.path.join(MODEL_ROOT, "segmentation", "modnet_webcam_portr
 MODNET_ONNX_URL = "https://github.com/Zeyi-Lin/HivisionIDPhotos/releases/download/pretrained-model/modnet_photographic_portrait_matting.onnx"
 MODNET_ONNX_PATH = os.path.join(MODEL_ROOT, "segmentation", "modnet.onnx")
 
-# 5. InsightFace & FFmpeg
+# 5. BiSeNet (Face Parsing for Skin Detection)
+# [V39] AI Skin Parsing - CelebAMask-HQ pretrained
+# Original: https://github.com/zllrunning/face-parsing.PyTorch
+# Checkpoint: 79999_iter.pth (trained on CelebAMask-HQ)
+BISENET_MIRRORS = [
+    # Mirror 1: Google Drive (zllrunning/face-parsing.PyTorch official - 79999_iter.pth)
+    "gdrive:154JgKpzCPW82qINcVieuPH3fZ2e0P812",
+    # Mirror 2: Alternative Google Drive mirror
+    "gdrive:1o1m-eT38zNCIPlptTGk_8B_6aq7d9qMk",
+]
+BISENET_PATH = os.path.join(MODEL_ROOT, "parsing", "79999_iter.pth")
+
+# 6. InsightFace & FFmpeg
 INSIGHTFACE_URL = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 INSIGHTFACE_DIR = os.path.join(MODEL_ROOT, "insightface")
 INSIGHTFACE_ZIP = os.path.join(INSIGHTFACE_DIR, "buffalo_l.zip")
@@ -212,8 +224,13 @@ def main():
     # [Fix] Use Fallback downloader for MODNet CKPT
     download_with_fallback(MODNET_CKPT_MIRRORS, MODNET_CKPT_PATH)
     download_file(MODNET_ONNX_URL, MODNET_ONNX_PATH)
-    
-    # 4. Utilities
+
+    # 4. BiSeNet V2 (Face Parsing for Skin Detection)
+    print("\n>>> Checking BiSeNet V2 (Face Parsing)...")
+    os.makedirs(os.path.dirname(BISENET_PATH), exist_ok=True)
+    download_with_fallback(BISENET_MIRRORS, BISENET_PATH)
+
+    # 5. Utilities
     print("\n>>> Checking Utilities...")
     os.makedirs(INSIGHTFACE_DIR, exist_ok=True)
     if not os.path.exists(os.path.join(INSIGHTFACE_DIR, "1k3d68.onnx")):

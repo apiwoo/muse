@@ -95,6 +95,10 @@ class BeautyWorker(QThread):
             print(f"[ENGINE] Initializing Beauty Engine...")
             self.beauty_engine = BeautyEngine(profiles=self.profiles)
 
+            # [V39] Initialize AI Skin Parser for hybrid masking
+            print(f"[ENGINE] Initializing Skin Parser...")
+            self.beauty_engine._init_skin_parser()
+
             # [V35] AI 마스크 지연 프레임 수 설정 (잔상 제거의 핵심)
             # - 일반적으로 1~2프레임 (GPU 성능에 따라 조절)
             # - 지연이 클수록 더 과거 프레임과 매칭하여 잔상 제거

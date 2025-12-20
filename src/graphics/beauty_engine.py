@@ -17,6 +17,14 @@ from graphics.stabilizers import LandmarkStabilizer, MaskStabilizer, WarpGridSta
 from graphics.buffers import FrameSyncBuffer
 from graphics.mask_manager import MaskManager
 
+# Import AI Skin Parser (optional - graceful fallback if not available)
+try:
+    from ai.parsing.skin_parser import SkinParser
+    HAS_SKIN_PARSER = True
+except ImportError:
+    SkinParser = None
+    HAS_SKIN_PARSER = False
+
 # Import Kernels & Logic
 from graphics.kernels.cuda_kernels import (
     WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE,
@@ -126,6 +134,10 @@ class BeautyEngine:
         self.wide_smooth_result = None  # Wide Pass 결과 (radius 15)
         self.fine_smooth_result = None  # Fine Pass 결과 (radius 5)
 
+        # V39: AI Skin Parser for hybrid masking
+        self.skin_parser = None
+        self.skin_parser_enabled = True  # Can be disabled via settings
+
         # V4: Forward Mask buffers (순방향 마스크 기반 합성)
         self.forward_mask_gpu = None
         self.forward_mask_dilated_gpu = None
@@ -211,6 +223,44 @@ class BeautyEngine:
             print("   [INIT] Core Kernels Compiled")
         except Exception as e:
             print(f"   [WARNING] Warm-up failed: {e}")
+
+    def _init_skin_parser(self):
+        """
+        [V39] Initialize AI Skin Parser for hybrid masking.
+
+        Lazy initialization of BiSeNet V2 based skin parsing.
+        Falls back to FaceMesh-only masking if engine not found.
+        """
+        if self.skin_parser is not None:
+            return  # Already initialized
+
+        if not self.skin_parser_enabled:
+            return  # Disabled by user
+
+        if not HAS_SKIN_PARSER:
+            print("[BEAUTY] SkinParser module not available, using FaceMesh only")
+            return
+
+        try:
+            engine_path = os.path.join(
+                self.root_dir, "assets", "models", "parsing", "bisenet_v2_fp16.engine"
+            )
+
+            if os.path.exists(engine_path):
+                self.skin_parser = SkinParser(engine_path)
+                if self.skin_parser.is_ready:
+                    print("[BEAUTY] SkinParser loaded successfully (Hybrid Masking enabled)")
+                else:
+                    print("[BEAUTY] SkinParser failed to initialize, using FaceMesh only")
+                    self.skin_parser = None
+            else:
+                print(f"[BEAUTY] SkinParser engine not found at {engine_path}")
+                print("[BEAUTY] Using FaceMesh-only masking (run tools/convert_bisenet.py to enable)")
+
+        except Exception as e:
+            print(f"[BEAUTY] SkinParser init failed: {e}")
+            self.skin_parser = None
+            self.skin_parser_enabled = False
 
     # ==========================================================================
     # Background Management (기존 100% 유지)
@@ -326,9 +376,28 @@ class BeautyEngine:
         if not has_skin and not has_tone and not has_color:
             return frame_gpu, None
 
-        # Generate skin mask (no exclusion zones - Dual-Pass가 엣지 자동 보존)
-        skin_mask_gpu = self.mask_manager.generate_mask(
-            landmarks, w, h, padding_ratio=1.25, exclude_features=False
+        # [V39] AI Skin Parsing for hybrid masking
+        ai_skin_mask = None
+        if self.skin_parser is not None and self.skin_parser.is_ready:
+            try:
+                ai_skin_mask = self.skin_parser.infer(frame_gpu)
+                # Debug: Log AI mask stats every 60 frames
+                if ai_skin_mask is not None and self.v29_frame_count % 60 == 0:
+                    mask_mean = float(cp.mean(ai_skin_mask))
+                    mask_max = float(cp.max(ai_skin_mask))
+                    mask_coverage = float(cp.sum(ai_skin_mask > 128)) / (w * h) * 100
+                    print(f"[SKIN-DEBUG] AI Mask: mean={mask_mean:.1f}, max={mask_max:.0f}, coverage={mask_coverage:.1f}%")
+            except Exception as e:
+                if self.v29_frame_count % 300 == 1:  # Log every 10 seconds at 30fps
+                    print(f"[BEAUTY] SkinParser inference failed: {e}")
+        elif self.v29_frame_count % 300 == 0:
+            # Log fallback mode periodically
+            print(f"[SKIN-DEBUG] Using FaceMesh-only (SkinParser not ready)")
+
+        # Generate skin mask using hybrid approach (AI + FaceMesh)
+        # Falls back to FaceMesh-only if AI mask is None
+        skin_mask_gpu = self.mask_manager.generate_hybrid_mask(
+            landmarks, ai_skin_mask, w, h, padding_ratio=1.25
         )
 
         if skin_mask_gpu is None:
