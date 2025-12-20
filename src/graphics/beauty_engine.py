@@ -1,10 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V38.1: Void Only Fill + Dual-Criteria (원본 보존 원칙)
-# - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
-# - 사람 보호: is_person (번개 방지)
-# - Void 판정: is_true_void = (!is_valid_source) && (m_orig_here > 0.1)
-# - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
-# - Preserved: V37 Stabilization, V36 Warp Grid Based Mask, V34 Grid Modulation
+# V40.0: Skeleton Patch (AI Mask + Torso Patch + Adaptive Sync)
+# - 핵심: AI 마스크 외곽선 유지 + Torso 마스크로 내부 구멍 메움
+# - 해결: 번개/문신 현상 (Final_Mask = Max(AI_Mask, Torso_Mask))
+# - 유지: Void Only Fill, V37 Stabilization, V34 Grid Modulation
+# - 커널 시그니처 변경 없음, 기존 구조 100% 유지
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -41,7 +40,9 @@ from graphics.kernels.cuda_kernels import (
     # V34: Background Warp Prevention & Clean 2-Layer Composite
     MODULATE_DISPLACEMENT_KERNEL_CODE, LAYERED_COMPOSITE_KERNEL_CODE,
     # V36: Warp Grid Based Mask (근본적 재설계)
-    WARP_MASK_FROM_GRID_KERNEL_CODE, CLEAN_COMPOSITE_KERNEL_CODE
+    WARP_MASK_FROM_GRID_KERNEL_CODE, CLEAN_COMPOSITE_KERNEL_CODE,
+    # V40: Skeleton Patch (AI Mask + Torso Mask)
+    MASK_COMBINE_KERNEL_CODE
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -55,30 +56,35 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V36.0 Warp Grid Based Mask
+# [메인 클래스] BeautyEngine - V40.0 Skeleton Patch
 # ==============================================================================
 class BeautyEngine:
     """
-    V36.0 Beauty Processing Engine - Warp Grid Based Mask
+    V40.0 Beauty Processing Engine - Skeleton Patch (Hybrid Masking)
 
-    Key Changes (V36.0):
-    - 워핑 그리드에서 마스크 직접 생성 (시간 동기화 문제 근본 해결)
-    - AI 마스크와 워핑 그리드의 "시점 불일치" 문제 완전 해결
-    - 배경에 src 절대 미사용으로 휘어짐 완전 방지
-    - 단순화된 2레이어 합성: 워핑된 사람 + 정적 배경
+    Key Changes (V40.0):
+    - Skeleton Patch: AI 마스크 + Torso 마스크 병합
+    - Final_Mask = Max(AI_Mask, Torso_Mask)
+    - AI 마스크: 정밀한 외곽선 유지 (배경 침범 방지)
+    - Torso 마스크: 내부 구멍 메움 (번개/문신 현상 방지)
+    - 커널 시그니처 변경 없음, 기존 구조 100% 유지
 
-    Preserved from V34.0:
-    - Grid Modulation: 인물 마스크로 dx/dy 변위 그리드 마스킹
+    Preserved from V38.1:
+    - Void Only Fill: 원본 프레임 베이스, Void만 배경으로 패치
+    - Dual-Criteria: is_person + is_true_void 판정
 
-    Preserved from V33.0:
-    - FrameSyncBuffer: AI 마스크 지연 보상을 위한 프레임 버퍼링
-    - Adaptive WarpGridStabilizer: 속도 기반 동적 alpha
+    Preserved from V37:
+    - LandmarkStabilizer: One-Euro Filter 기반 랜드마크 안정화
+    - WarpGridStabilizer: 히스테리시스 + Alpha Smoothing
 
-    Result: 일렁임 완전 해결 + 배경 휘어짐 방지 + 예측 가능한 동작
+    Preserved from V34:
+    - Grid Modulation: 배경 영역 워핑 차단
+
+    Result: 번개 현상 해결 + AI 마스크 정밀도 유지 + 배경 안정성 유지
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V36.0 Warp Grid Based Mask Ready")
+        print("[BEAUTY] [BeautyEngine] V40.0 Skeleton Patch Ready")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -149,9 +155,18 @@ class BeautyEngine:
         self.warp_grid_mask_gpu = None           # 워핑 강도 기반 마스크
         self.warp_grid_mask_forward_gpu = None   # 순방향 워핑된 마스크
 
+        # V40: Skeleton Patch buffers
+        self.torso_mask_gpu = None               # 몸통 영역 마스크
+        self.combined_mask_gpu = None            # AI + Torso 병합 마스크
+
         if HAS_CUDA:
-            # [V37.1] Median 합의 제거, 단순 EMA만 사용 (잔상 해결)
-            self.mask_stabilizer = MaskStabilizer(alpha=0.15)
+            # [V40] Adaptive MaskStabilizer
+            # 움직임 감지하여 alpha 동적 조절 (잔상 제거 + 떨림 억제)
+            self.mask_stabilizer = MaskStabilizer(
+                base_alpha=0.12,      # 정지 시: 강한 스무딩
+                fast_alpha=0.85,      # 움직임 시: 즉각 반응
+                diff_threshold=0.04   # 움직임 감지 임계값
+            )
             self.warp_grid_stabilizer = WarpGridStabilizer(
                 base_alpha=0.08,
                 snap_alpha=0.6,
@@ -196,6 +211,9 @@ class BeautyEngine:
             # V36: Warp Grid Based Mask (근본적 재설계)
             self.warp_mask_from_grid_kernel = cp.RawKernel(WARP_MASK_FROM_GRID_KERNEL_CODE, 'warp_mask_from_grid_kernel')
             self.clean_composite_kernel = cp.RawKernel(CLEAN_COMPOSITE_KERNEL_CODE, 'clean_composite_kernel')
+
+            # V40: Skeleton Patch (AI Mask + Torso Mask)
+            self.mask_combine_kernel = cp.RawKernel(MASK_COMBINE_KERNEL_CODE, 'mask_combine_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -525,6 +543,79 @@ class BeautyEngine:
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
+    # V39: Mask-Warp Spatial Alignment
+    # ==========================================================================
+    def _align_mask_to_landmarks(self, mask_gpu, current_body, stabilized_body):
+        """
+        [V39] AI 마스크를 안정화된 랜드마크 위치에 공간적으로 정렬
+
+        핵심: 시간적 지연은 그대로 두고, 공간적으로만 마스크를 이동
+        - AI 마스크: 현재 프레임의 사람 위치
+        - 워핑 그리드: 안정화된 랜드마크 기준 (지연됨)
+        - 이 불일치가 "번개/문신" 현상의 원인
+
+        해결책: 마스크를 워핑 기준(안정화된 랜드마크)에 맞게 이동
+
+        Args:
+            mask_gpu: 현재 프레임의 AI 마스크 (CuPy array, uint8)
+            current_body: 현재 프레임의 바디 랜드마크 (numpy array, Nx2)
+            stabilized_body: 안정화된 바디 랜드마크 (numpy array, Nx2)
+
+        Returns:
+            aligned_mask: 공간 정렬된 마스크 (CuPy array, uint8)
+        """
+        if mask_gpu is None:
+            return mask_gpu
+
+        if current_body is None or stabilized_body is None:
+            return mask_gpu
+
+        # 랜드마크 배열 크기 확인
+        if len(current_body) == 0 or len(stabilized_body) == 0:
+            return mask_gpu
+
+        try:
+            # 1. 현재 랜드마크 중심 계산
+            current_center = np.mean(current_body, axis=0)  # (x, y)
+
+            # 2. 안정화된 랜드마크 중심 계산
+            stable_center = np.mean(stabilized_body, axis=0)  # (x, y)
+
+            # 3. 오프셋 계산 (안정화 중심 - 현재 중심)
+            # 마스크를 현재 위치에서 안정화된 위치로 이동
+            offset_x = stable_center[0] - current_center[0]
+            offset_y = stable_center[1] - current_center[1]
+
+            # 4. 오프셋이 너무 작으면 스킵 (불필요한 연산 방지)
+            MIN_OFFSET = 0.5  # 0.5픽셀 미만은 무시
+            if abs(offset_x) < MIN_OFFSET and abs(offset_y) < MIN_OFFSET:
+                return mask_gpu
+
+            # 5. 오프셋이 너무 크면 제한 (갑작스러운 점프 방지)
+            # 해상도 비례: height * 0.05 (1080p에서 약 54픽셀)
+            h = mask_gpu.shape[0]
+            MAX_OFFSET = h * 0.05
+            offset_x = np.clip(offset_x, -MAX_OFFSET, MAX_OFFSET)
+            offset_y = np.clip(offset_y, -MAX_OFFSET, MAX_OFFSET)
+
+            # 6. 마스크 이동 (CuPy scipy.ndimage.shift 사용)
+            # shift 순서: (y, x) - numpy/cupy 배열 인덱싱 순서
+            aligned_mask = cupyx.scipy.ndimage.shift(
+                mask_gpu.astype(cp.float32),
+                shift=(offset_y, offset_x),
+                order=1,  # 선형 보간
+                mode='constant',
+                cval=0  # 범위 밖은 0
+            )
+
+            return cp.clip(aligned_mask, 0, 255).astype(cp.uint8)
+
+        except Exception as e:
+            # 오류 발생 시 원본 마스크 반환 (안전한 폴백)
+            print(f"[V39 WARNING] Mask alignment failed: {e}")
+            return mask_gpu
+
+    # ==========================================================================
     # V36: Warp Grid Based Mask Generation
     # ==========================================================================
     def _generate_warp_mask_from_grid(self, w, h, sw, sh, scale, threshold=0.5):
@@ -818,8 +909,39 @@ class BeautyEngine:
                 self.forward_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
                 self.forward_mask_dilated_gpu = cp.zeros((h, w), dtype=cp.uint8)
 
-            # 4-2. 원본 마스크 준비 (mask_orig: 사람이 "있었던" 영역)
-            # AI 마스크가 있으면 사용, 없으면 워핑 그리드 기반 마스크 생성
+            # ==============================================================
+            # [V40] Skeleton Patch - AI 마스크 + Torso 마스크 병합
+            # ==============================================================
+            # 전략: Final_Mask = Max(AI_Mask, Torso_Mask)
+            # - AI 마스크: 정밀한 외곽선 (배경 침범 방지)
+            # - Torso 마스크: 내부 구멍 메움 (번개 현상 방지)
+            # ==============================================================
+            if use_bg and mask_gpu is not None and raw_body is not None:
+                # 1. Torso 마스크 생성 (어깨-골반 영역)
+                torso_mask = self.mask_manager.generate_torso_mask(raw_body, w, h)
+
+                if torso_mask is not None:
+                    # 2. GPU 업로드
+                    torso_mask_gpu = cp.asarray(torso_mask)
+
+                    # 3. 병합 버퍼 준비
+                    if self.combined_mask_gpu is None or self.combined_mask_gpu.shape != (h, w):
+                        self.combined_mask_gpu = cp.zeros((h, w), dtype=cp.uint8)
+
+                    # 4. 마스크 병합 (픽셀별 Max)
+                    self.mask_combine_kernel(
+                        grid_dim, block_dim,
+                        (mask_gpu, torso_mask_gpu, self.combined_mask_gpu, w, h)
+                    )
+
+                    # 5. 병합된 마스크를 메인 마스크로 사용
+                    mask_gpu = self.combined_mask_gpu
+
+            # ==============================================================
+            # [V40] 원본 마스크 준비 (mask_orig: 사람이 "있었던" 영역)
+            # - AI 마스크 기반으로 복원 (V38.1 방식)
+            # - Skeleton Patch로 내부 구멍이 메워진 상태
+            # ==============================================================
             if use_bg and mask_gpu is not None:
                 # AI 마스크 경계 블러 처리
                 mask_orig = cupyx.scipy.ndimage.gaussian_filter(
@@ -846,7 +968,7 @@ class BeautyEngine:
             self.mask_dilate_kernel(
                 grid_dim, block_dim,
                 (self.forward_mask_gpu, self.forward_mask_dilated_gpu,
-                 w, h, 2)
+                 w, h, 2)  # [V40] radius 2 (V38.1 복원)
             )
 
             # 4-5. 순방향 마스크 평활화

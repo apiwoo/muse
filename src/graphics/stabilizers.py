@@ -131,15 +131,12 @@ class MaskStabilizer:
 """
 
 
+"""
+[V37.1 Original - Preserved for Rollback]
 class MaskStabilizer:
-    """
-    [V37.1] Mask Temporal Stabilizer - Simple EMA Only.
-
-    [V37.1 변경사항]
-    - Median 합의 제거: 5프레임 지연이 잔상 유발
-    - 단순 EMA만 유지: 즉각적인 마스크 반응성 확보
-    - alpha 0.10 → 0.15: 반응성 향상
-    """
+    # [V37.1] Mask Temporal Stabilizer - Simple EMA Only.
+    # - 고정 alpha EMA 방식
+    # - 문제점: 움직임에 관계없이 동일한 alpha로 잔상 발생
 
     def __init__(self, alpha=0.15):
         self.alpha = alpha
@@ -149,15 +146,74 @@ class MaskStabilizer:
         if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
             self.prev_mask = mask_gpu.astype(cp.float32)
             return mask_gpu
-
-        # [V37.1] 단순 EMA만 적용
         curr_float = mask_gpu.astype(cp.float32)
         stabilized = self.alpha * curr_float + (1.0 - self.alpha) * self.prev_mask
+        self.prev_mask = stabilized
+        return stabilized.astype(cp.uint8)
+
+    def reset(self):
+        self.prev_mask = None
+V37.1 LEGACY */
+"""
+
+
+class MaskStabilizer:
+    """
+    [V40] Adaptive Mask Temporal Stabilizer
+
+    움직임 속도(Diff)에 따라 alpha를 동적으로 조절:
+    - 빠른 움직임: alpha=0.85 (즉각 반응 → 잔상 제거)
+    - 정지 상태: alpha=0.12 (강한 스무딩 → 떨림 억제)
+    """
+
+    def __init__(self, base_alpha=0.12, fast_alpha=0.85, diff_threshold=0.04):
+        """
+        Args:
+            base_alpha: 정지 시 alpha (강한 스무딩) - V40: 0.12
+            fast_alpha: 움직임 시 alpha (즉각 반응) - V40: 0.85
+            diff_threshold: 움직임 감지 임계값 - V40: 0.04
+        """
+        self.base_alpha = base_alpha
+        self.fast_alpha = fast_alpha
+        self.diff_threshold = diff_threshold
+        self.prev_mask = None
+
+    def update(self, mask_gpu):
+        """
+        마스크 안정화 (적응형 EMA)
+
+        Args:
+            mask_gpu: 현재 프레임 마스크 (CuPy array)
+
+        Returns:
+            stabilized_mask: 안정화된 마스크
+        """
+        if self.prev_mask is None or self.prev_mask.shape != mask_gpu.shape:
+            self.prev_mask = mask_gpu.astype(cp.float32)
+            return mask_gpu
+
+        curr_float = mask_gpu.astype(cp.float32)
+
+        # [V39 Adaptive] 움직임 감지
+        diff = cp.mean(cp.abs(curr_float - self.prev_mask)) / 255.0
+        diff_val = float(diff)
+
+        # 동적 alpha 결정
+        if diff_val > self.diff_threshold:
+            # 움직임 발생 → 즉각 반응 (잔상 제거)
+            alpha = self.fast_alpha
+        else:
+            # 정지 상태 → 강한 스무딩 (떨림 억제)
+            alpha = self.base_alpha
+
+        # EMA 적용
+        stabilized = alpha * curr_float + (1.0 - alpha) * self.prev_mask
         self.prev_mask = stabilized
 
         return stabilized.astype(cp.uint8)
 
     def reset(self):
+        """상태 초기화"""
         self.prev_mask = None
 
 

@@ -1156,6 +1156,35 @@ void mask_dilate_kernel(
 
 
 # ==============================================================================
+# [KERNEL V40] Mask Combine (Skeleton Patch)
+# - 두 마스크를 픽셀별 Max로 병합
+# - AI 마스크의 정밀한 외곽선 + Torso 마스크의 내부 채움
+# - Final_Mask = Max(AI_Mask, Torso_Mask)
+# ==============================================================================
+MASK_COMBINE_KERNEL_CODE = r'''
+extern "C" __global__
+void mask_combine_kernel(
+    const unsigned char* mask_a,     // AI 마스크 (정밀한 외곽선)
+    const unsigned char* mask_b,     // Torso 마스크 (내부 채움)
+    unsigned char* dst,              // 출력: 병합된 마스크
+    int width, int height
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+
+    // 픽셀별 최댓값 (Max)
+    unsigned char a = mask_a[idx];
+    unsigned char b = mask_b[idx];
+    dst[idx] = (a > b) ? a : b;
+}
+'''
+
+
+# ==============================================================================
 # [KERNEL 19] Simple Composite (순방향 마스크 기반 합성) - V4 근본 해결
 # - is_alpha_loss 휴리스틱 완전 제거!
 # - 순방향 마스크가 정확한 사람/배경 영역을 결정
@@ -1505,9 +1534,10 @@ void warp_mask_from_grid_kernel(
 '''
 
 # ==============================================================================
-# [KERNEL V38.1] Void Only Fill + Dual-Criteria
+# [KERNEL V39] Void Only Fill + Dual-Criteria + 이중 사람 보호
+# - V39 업데이트: is_person 이중 체크 (m_fwd || m_orig_here)
 # - 핵심: 원본 프레임이 베이스, Void만 배경으로 패치
-# - 사람 보호: is_person (번개 방지)
+# - 사람 보호: is_person (번개 방지) - m_fwd 또는 m_orig_here 중 하나라도 높으면 사람
 # - Void 판정: is_true_void = (!is_valid_source) && (m_orig_here > 0.1)
 # - 원래 배경 영역: 원본 프레임 유지 (bg로 교체 안함!)
 # ==============================================================================
@@ -1565,12 +1595,26 @@ void clean_composite_kernel(
     }
 
     // =========================================================================
-    // [V38.1] 핵심 판정 조건
+    // [V40] 핵심 판정 조건 (Skeleton Patch와 함께 동작)
     // =========================================================================
 
-    // 사람 보호: 순방향 마스크 기반 (번개 방지)
+    // ==============================================================
+    // [V40] 사람 보호 조건 강화 (이중 체크)
+    // ==============================================================
+    // m_fwd: Skeleton Patch로 내부 구멍이 메워진 마스크
+    // m_orig_here: 추가 안전장치 (만일을 위한 이중 체크)
+    // ==============================================================
     const float PERSON_THRESHOLD = 0.3f;
-    bool is_person = (m_fwd > PERSON_THRESHOLD);
+    const float ORIG_PROTECT_THRESHOLD = 0.5f;  // [V40] 원본 마스크 보호 임계값
+
+    // /* V38.1 LEGACY
+    // bool is_person = (m_fwd > PERSON_THRESHOLD);
+    // V38.1 LEGACY */
+
+    // [V40] 이중 체크: 둘 중 하나라도 높으면 사람으로 판정
+    bool is_person_by_fwd = (m_fwd > PERSON_THRESHOLD);
+    bool is_person_by_orig = (m_orig_here > ORIG_PROTECT_THRESHOLD);
+    bool is_person = is_person_by_fwd || is_person_by_orig;
 
     // ★ Void 판정: "원래 사람이 있었는데 현재 유효 소스 없음"
     // - m_orig_here > 0.1: 이 좌표에 원래 사람이 있었음

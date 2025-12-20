@@ -214,3 +214,56 @@ class MaskManager:
             if self._fallback_log_count % 300 == 1:
                 print(f"[HYBRID-DEBUG] Fallback to FaceMesh-only (AI mask unavailable)")
             return face_region
+
+    def generate_torso_mask(self, body_landmarks, w, h):
+        """
+        [V40] Skeleton Patch - 몸통 영역 마스크 생성
+
+        ViTPose 랜드마크의 어깨-골반을 연결한 사각형 영역을 채워서
+        AI 마스크의 내부 구멍을 메우는 데 사용.
+
+        Args:
+            body_landmarks: ViTPose 결과 [(x, y, conf), ...] 또는 [(x, y), ...]
+            w, h: 이미지 크기
+
+        Returns:
+            torso_mask: 몸통 영역 마스크 (np.ndarray, uint8) 또는 None
+        """
+        if body_landmarks is None:
+            return None
+
+        # body_landmarks가 .get()을 가진 객체인 경우 처리
+        if hasattr(body_landmarks, 'get'):
+            body_landmarks = body_landmarks.get()
+
+        if len(body_landmarks) < 13:
+            return None
+
+        # 랜드마크 인덱스: 5=왼쪽어깨, 6=오른쪽어깨, 11=왼쪽골반, 12=오른쪽골반
+        indices = [5, 6, 12, 11]  # 시계방향 사각형
+        points = []
+
+        for idx in indices:
+            if idx >= len(body_landmarks):
+                return None
+
+            pt = body_landmarks[idx]
+
+            # confidence 체크 (3번째 값이 있는 경우)
+            if len(pt) >= 3:
+                if pt[2] < 0.3:  # 너무 낮으면 스킵
+                    return None
+
+            points.append([int(pt[0]), int(pt[1])])
+
+        # 빈 마스크 생성
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        # 폴리곤 채우기
+        pts = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.fillPoly(mask, [pts], 255)
+
+        # 경계 부드럽게 (가우시안 블러)
+        mask = cv2.GaussianBlur(mask, (15, 15), 0)
+
+        return mask
