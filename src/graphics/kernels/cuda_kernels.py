@@ -2078,23 +2078,24 @@ void simple_void_fill_kernel(
     float bg_r = (float)bg[idx_rgb + 2];
 
     // 임계값 정의
-    const float CERTAIN_BG = 0.05f;      // [V44.5] 0.1 → 0.05 (번개 완전 차단)
-    const float CERTAIN_PERSON = 0.3f;   // 이 초과면 확실히 사람
-    const float ORIGIN_THRESHOLD = 0.2f; // 원래 사람이었는지
+    // [V47] 번개 현상 방어를 위해 임계값 대폭 낮춤
+    const float CERTAIN_BG = 0.02f;       // [V47] 0.05 → 0.02 (진짜 완전한 배경만)
+    const float CERTAIN_PERSON = 0.10f;   // [V47] 0.3 → 0.10 (10%만 넘어도 사람)
+    const float ORIGIN_THRESHOLD = 0.10f; // [V47] 0.2 → 0.10 (원래 사람이었는지)
 
     float out_b, out_g, out_r;
 
     if (mask_at_warped > CERTAIN_PERSON) {
-        // ★ CASE 1: 워핑된 위치가 확실히 사람 (30% 초과)
-        // → 무조건 전경 출력
+        // ★ CASE 1: 워핑된 위치가 확실히 사람 (10% 초과)
+        // → 무조건 전경 출력 (번개 현상 차단)
         out_b = fg_b;
         out_g = fg_g;
         out_r = fg_r;
     }
     else if (mask_at_warped < CERTAIN_BG && mask_here > ORIGIN_THRESHOLD && is_slimming_edge) {
         // ★ CASE 2: 진짜 Void!
-        // 조건 1: 워핑된 위치가 확실히 배경 (10% 미만)
-        // 조건 2: 원래 이 자리에 사람이 있었음 (20% 초과)
+        // 조건 1: 워핑된 위치가 확실히 배경 (2% 미만)
+        // 조건 2: 원래 이 자리에 사람이 있었음 (10% 초과)
         // 조건 3: 슬리밍으로 인한 변위 있음
         // → 경계 체크 불필요! 바로 배경 출력
         out_b = bg_b;

@@ -1,9 +1,9 @@
 # Project MUSE - beauty_engine.py
-# V46.2: 허리/골반 검증 로직 정상화
-# - 수정: margin = 0.0 (정확히 화면 내부만)
-# - 수정: min_conf = 0.3 (원래대로)
-# - 유지: original_kpts = raw_body (confidence 정보 포함)
-# - 유지: 어깨 너비 기반 반경 상한선 (morph_logic.py와 연동)
+# V47: 배경 왜곡 차단 & 번개 현상 방어
+# - 신규: Erosion 기반 마스크 수축 (iterations=2, sigma=1.5)
+# - 신규: 커널 임계값 조정 (CERTAIN_PERSON 0.3→0.10, CERTAIN_BG 0.05→0.02)
+# - 유지: bypass=True (Stabilizer 비활성화)
+# - 유지: FrameSyncBuffer 비활성화
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -62,43 +62,36 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V46.2 허리/골반 검증 로직 정상화
+# [메인 클래스] BeautyEngine - V47 배경 왜곡 차단 & 번개 현상 방어
 # ==============================================================================
 class BeautyEngine:
     """
-    V46.2 Beauty Processing Engine - 허리/골반 검증 로직 정상화
+    V47 Beauty Processing Engine - 배경 왜곡 차단 & 번개 현상 방어
 
-    Key Changes (V46.2):
-    - 검증 로직 정상화:
-      * margin = 0.0 (정확히 화면 내부만)
-      * min_conf = 0.3 (원래대로)
-      * V46.1의 -0.1 margin이 너무 엄격해서 정상 보정도 차단됨
+    Key Changes (V47):
+    - Erosion 기반 배경 왜곡 차단:
+      * binary_erosion(iterations=2)로 마스크 2픽셀 수축
+      * gaussian_filter(sigma=1.5)로 경계 부드럽게
+      * 배경 픽셀에 워핑 변위 0 적용
 
-    Preserved from V46.1:
-    - original_kpts = raw_body (confidence 정보 포함)
+    - 커널 임계값 조정 (번개 현상 방어):
+      * CERTAIN_PERSON: 0.3 → 0.10 (10%만 넘어도 사람 판정)
+      * CERTAIN_BG: 0.05 → 0.02 (진짜 완전한 배경만)
+      * ORIGIN_THRESHOLD: 0.2 → 0.10
 
-    Preserved from V46:
-    - 어깨 너비 기반 반경 상한선 (morph_logic.py)
+    Preserved from V46.2:
+    - 화면 밖 keypoint 검증 (margin=0, min_conf=0.3)
 
-    Preserved from V45.1:
-    - FrameSyncBuffer 비활성화 (가변 지연으로 떨림 악화)
-    - is_slimming_enabled 조건 (hip_widen 제외, ribcage_slim 포함)
+    Preserved from V44-V45.1:
+    - Stabilizer bypass=True (프레임 독립 처리)
+    - FrameSyncBuffer 비활성화
+    - Simple Void Fill Kernel
 
-    Preserved from V44:
-    - Simple Void Fill Kernel: 3단계 무결성 판정
-    - Stabilizer bypass=True
-
-    Preserved from V40:
-    - Skeleton Patch: AI 마스크 + Torso 마스크 병합
-
-    Preserved from V34:
-    - Grid Modulation: 배경 영역 워핑 차단
-
-    Result: 정상 보정 작동 + 화면 밖 keypoint 차단
+    Result: 배경 휘어짐 없음 + 번개 현상 없음
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V46.2 Validation Normalized")
+        print("[BEAUTY] [BeautyEngine] V47 Erosion + Threshold Defense")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -982,10 +975,25 @@ class BeautyEngine:
                         order=1
                     ).astype(cp.uint8)
 
-                    # [V37] 경계 안정화 강화 (4.0은 인물 외곽 잘림 우려로 3.0 선택)
-                    mask_small_blurred = cupyx.scipy.ndimage.gaussian_filter(
-                        mask_small_gpu.astype(cp.float32), sigma=3.0
-                    ).astype(cp.uint8)
+                    # ==============================================================
+                    # [V47] Erosion 기반 배경 왜곡 차단
+                    # - 마스크를 2픽셀 수축하여 워핑 영향권을 사람 안쪽으로 제한
+                    # - 배경 픽셀에는 워핑 변위가 0이 되어 물리적으로 왜곡 불가능
+                    # ==============================================================
+                    # 1단계: 마스크 이진화
+                    mask_float = mask_small_gpu.astype(cp.float32) / 255.0
+                    mask_binary = (mask_float > 0.5).astype(cp.float32)
+
+                    # 2단계: Binary Erosion으로 2픽셀 수축
+                    mask_eroded = cupyx.scipy.ndimage.binary_erosion(
+                        mask_binary.astype(cp.bool_), iterations=2
+                    ).astype(cp.float32)
+
+                    # 3단계: 약한 Gaussian blur로 경계 부드럽게
+                    mask_smoothed = cupyx.scipy.ndimage.gaussian_filter(mask_eroded, sigma=1.5)
+
+                    # 4단계: uint8로 변환
+                    mask_for_modulation = (mask_smoothed * 255).astype(cp.uint8)
 
                     # 그리드 모듈레이션 적용
                     small_block_dim = (16, 16)
@@ -994,7 +1002,7 @@ class BeautyEngine:
 
                     self.modulate_displacement_kernel(
                         small_grid_dim, small_block_dim,
-                        (self.gpu_dx, self.gpu_dy, mask_small_blurred, sw, sh)
+                        (self.gpu_dx, self.gpu_dy, mask_for_modulation, sw, sh)
                     )
 
             # ==================================================================
