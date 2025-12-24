@@ -26,29 +26,24 @@ except ImportError:
 
 # Import Kernels & Logic
 from graphics.kernels.cuda_kernels import (
-    WARP_KERNEL_CODE, COMPOSITE_KERNEL_CODE, SKIN_SMOOTH_KERNEL_CODE,
-    BILATERAL_SMOOTH_KERNEL_CODE, GPU_RESIZE_KERNEL_CODE,
-    GPU_MASK_RESIZE_KERNEL_CODE, FINAL_BLEND_KERNEL_CODE,
-    # V4: Forward Mask based Composite
-    FORWARD_WARP_MASK_KERNEL_CODE, MASK_DILATE_KERNEL_CODE, SIMPLE_COMPOSITE_KERNEL_CODE,
-    # V5: Void Fill Composite (동기화된 트리플 레이어)
-    VOID_FILL_COMPOSITE_KERNEL_CODE,
-    # V29: High-Fidelity Skin Smoothing (Guided Filter + LAB Color Space)
-    GUIDED_FILTER_KERNEL_CODE, FAST_SKIN_SMOOTH_KERNEL_CODE, LAB_SKIN_SMOOTH_KERNEL_CODE,
-    # V31: Dual-Pass Smooth Kernel (Wide/Fine 합성)
-    DUAL_PASS_SMOOTH_KERNEL_CODE,
-    # V34: Background Warp Prevention & Clean 2-Layer Composite
-    MODULATE_DISPLACEMENT_KERNEL_CODE, LAYERED_COMPOSITE_KERNEL_CODE,
-    # V36: Warp Grid Based Mask (근본적 재설계)
-    WARP_MASK_FROM_GRID_KERNEL_CODE, CLEAN_COMPOSITE_KERNEL_CODE,
-    # V40: Skeleton Patch (AI Mask + Torso Mask)
+    # Core Warping
+    WARP_KERNEL_CODE,
+    MODULATE_DISPLACEMENT_KERNEL_CODE,
+    # Mask Processing
+    FORWARD_WARP_MASK_KERNEL_CODE,
+    MASK_DILATE_KERNEL_CODE,
     MASK_COMBINE_KERNEL_CODE,
-    # V41: Logical Void Fill (Time-Locked Sync)
-    LOGICAL_VOID_FILL_KERNEL_CODE,
-    # V43: Inverse Warp Validity (번개 현상 근본 해결)
-    INVERSE_WARP_VALIDITY_KERNEL_CODE,
+    WARP_MASK_FROM_GRID_KERNEL_CODE,
+    # Skin Smoothing
+    GUIDED_FILTER_KERNEL_CODE,
+    FAST_SKIN_SMOOTH_KERNEL_CODE,
+    DUAL_PASS_SMOOTH_KERNEL_CODE,
+    # Utilities
+    GPU_RESIZE_KERNEL_CODE,
+    GPU_MASK_RESIZE_KERNEL_CODE,
+    FINAL_BLEND_KERNEL_CODE,
     # V44: Simple Void Fill (Frame-Independent)
-    SIMPLE_VOID_FILL_KERNEL_CODE
+    SIMPLE_VOID_FILL_KERNEL_CODE,
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -191,58 +186,31 @@ class BeautyEngine:
             # [V33] Frame Sync Buffer for AI latency compensation
             self.frame_sync_buffer = FrameSyncBuffer(max_size=3)
             self.stream = cp.cuda.Stream(non_blocking=True)
-            # Core kernels (warping, compositing)
-            self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
-            self.composite_kernel = cp.RawKernel(COMPOSITE_KERNEL_CODE, 'composite_kernel')
-            self.skin_kernel = cp.RawKernel(SKIN_SMOOTH_KERNEL_CODE, 'skin_smooth_kernel')
 
-            # YY-Style kernels (bilateral smoothing) - Legacy
-            self.bilateral_kernel = cp.RawKernel(BILATERAL_SMOOTH_KERNEL_CODE, 'bilateral_smooth_kernel')
+            # Core kernels (warping)
+            self.warp_kernel = cp.RawKernel(WARP_KERNEL_CODE, 'warp_kernel')
+
+            # Utility kernels
             self.resize_kernel = cp.RawKernel(GPU_RESIZE_KERNEL_CODE, 'gpu_resize_kernel')
             self.mask_resize_kernel = cp.RawKernel(GPU_MASK_RESIZE_KERNEL_CODE, 'gpu_mask_resize_kernel')
             self.blend_kernel = cp.RawKernel(FINAL_BLEND_KERNEL_CODE, 'final_blend_kernel')
 
-            # V29: High-Fidelity kernels (Guided Filter + LAB Color Space)
+            # Skin smoothing kernels
             self.guided_filter_kernel = cp.RawKernel(GUIDED_FILTER_KERNEL_CODE, 'guided_filter_kernel')
             self.freq_separation_kernel = cp.RawKernel(FAST_SKIN_SMOOTH_KERNEL_CODE, 'fast_skin_smooth_kernel')
-            self.lab_smooth_kernel = cp.RawKernel(LAB_SKIN_SMOOTH_KERNEL_CODE, 'lab_skin_smooth_kernel')
-
-            # V31: Dual-Pass Smooth kernel (Wide/Fine 합성)
             self.dual_pass_smooth_kernel = cp.RawKernel(DUAL_PASS_SMOOTH_KERNEL_CODE, 'dual_pass_smooth_kernel')
 
-            # V4: Forward Mask based Composite (순방향 마스크 기반 합성)
+            # Mask processing kernels
             self.forward_warp_mask_kernel = cp.RawKernel(FORWARD_WARP_MASK_KERNEL_CODE, 'forward_warp_mask_kernel')
             self.mask_dilate_kernel = cp.RawKernel(MASK_DILATE_KERNEL_CODE, 'mask_dilate_kernel')
-            self.simple_composite_kernel = cp.RawKernel(SIMPLE_COMPOSITE_KERNEL_CODE, 'simple_composite_kernel')
-
-            # V28.0: Void Fill Composite (동기화된 트리플 레이어)
-            self.void_fill_composite_kernel = cp.RawKernel(VOID_FILL_COMPOSITE_KERNEL_CODE, 'void_fill_composite_kernel')
-
-            # V34: Background Warp Prevention & Clean 2-Layer Composite
-            self.modulate_displacement_kernel = cp.RawKernel(MODULATE_DISPLACEMENT_KERNEL_CODE, 'modulate_displacement_kernel')
-            self.layered_composite_kernel = cp.RawKernel(LAYERED_COMPOSITE_KERNEL_CODE, 'layered_composite_kernel')
-
-            # V36: Warp Grid Based Mask (근본적 재설계)
-            self.warp_mask_from_grid_kernel = cp.RawKernel(WARP_MASK_FROM_GRID_KERNEL_CODE, 'warp_mask_from_grid_kernel')
-            self.clean_composite_kernel = cp.RawKernel(CLEAN_COMPOSITE_KERNEL_CODE, 'clean_composite_kernel')
-
-            # V40: Skeleton Patch (AI Mask + Torso Mask)
             self.mask_combine_kernel = cp.RawKernel(MASK_COMBINE_KERNEL_CODE, 'mask_combine_kernel')
+            self.warp_mask_from_grid_kernel = cp.RawKernel(WARP_MASK_FROM_GRID_KERNEL_CODE, 'warp_mask_from_grid_kernel')
 
-            # V41: Logical Void Fill (Time-Locked Sync)
-            self.logical_void_fill_kernel = cp.RawKernel(LOGICAL_VOID_FILL_KERNEL_CODE, 'logical_void_fill_kernel')
-
-            # V43: Inverse Warp Validity (번개 현상 근본 해결)
-            self.inverse_warp_validity_kernel = cp.RawKernel(
-                INVERSE_WARP_VALIDITY_KERNEL_CODE,
-                'inverse_warp_validity_kernel'
-            )
+            # V34: Background Warp Prevention
+            self.modulate_displacement_kernel = cp.RawKernel(MODULATE_DISPLACEMENT_KERNEL_CODE, 'modulate_displacement_kernel')
 
             # V44: Simple Void Fill (Frame-Independent)
-            self.simple_void_fill_kernel = cp.RawKernel(
-                SIMPLE_VOID_FILL_KERNEL_CODE,
-                'simple_void_fill_kernel'
-            )
+            self.simple_void_fill_kernel = cp.RawKernel(SIMPLE_VOID_FILL_KERNEL_CODE, 'simple_void_fill_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -252,18 +220,24 @@ class BeautyEngine:
         print("   [INIT] Warming up CUDA Kernels...")
         try:
             h, w = 64, 64
+            sh, sw = 16, 16
             dummy_src = cp.zeros((h, w, 3), dtype=cp.uint8)
             dummy_dst = cp.zeros_like(dummy_src)
-            dummy_exclusion = cp.zeros(15, dtype=cp.float32)
+            dummy_mask = cp.zeros((h, w), dtype=cp.uint8)
+            dummy_dx = cp.zeros((sh, sw), dtype=cp.float32)
+            dummy_dy = cp.zeros((sh, sw), dtype=cp.float32)
 
-            # Legacy kernel warmup
-            self.skin_kernel(
-                (2, 2), (32, 32),
-                (dummy_src, dummy_dst, w, h, cp.float32(0.5),
-                 cp.float32(32), cp.float32(32), cp.float32(10),
-                 cp.float32(128), cp.float32(128), cp.float32(128),
-                 cp.float32(0.0),
-                 dummy_exclusion)
+            # Warmup warp kernel
+            self.warp_kernel(
+                (2, 2), (16, 16),
+                (dummy_dx, dummy_dy, cp.zeros(7, dtype=cp.float32), 1, sw, sh)
+            )
+
+            # Warmup void fill kernel
+            self.simple_void_fill_kernel(
+                (4, 4), (16, 16),
+                (dummy_src, dummy_src, dummy_mask, dummy_dst,
+                 dummy_dx, dummy_dy, w, h, sw, sh, 4, 0)
             )
 
             cp.cuda.Stream.null.synchronize()
@@ -360,34 +334,6 @@ class BeautyEngine:
                     data['gpu'] = cp.asarray(rz)
                 else:
                     data['gpu'] = cp.zeros_like(tmpl)
-
-    # ==========================================================================
-    # Exclusion Zones (레거시 호환용 - 원형 기반)
-    # ==========================================================================
-    def _calculate_exclusion_zones(self, lm):
-        """Legacy circular exclusion zones for backward compatibility"""
-        zones = []
-        target_keys = ['EYE_L', 'EYE_R', 'BROW_L', 'BROW_R', 'LIPS']
-
-        for key in target_keys:
-            if key in FaceMesh.FACE_INDICES:
-                indices = FaceMesh.FACE_INDICES[key]
-                pts = lm[indices]
-
-                center = np.mean(pts, axis=0)
-                cx, cy = center[0], center[1]
-
-                dists = np.sqrt(np.sum((pts - center)**2, axis=1))
-                max_dist = np.max(dists)
-
-                padding = 0.9
-                radius = max_dist * padding
-
-                zones.extend([cx, cy, radius])
-            else:
-                zones.extend([0, 0, 0])
-
-        return np.array(zones, dtype=np.float32)
 
     # ==========================================================================
     # V31: Dual-Pass High-Fidelity Skin Smoothing
