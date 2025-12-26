@@ -928,15 +928,16 @@ class BeautyEngine:
                     # ==============================================================
                     # 1단계: 마스크 이진화
                     mask_float = mask_small_gpu.astype(cp.float32) / 255.0
-                    mask_binary = (mask_float > 0.5).astype(cp.float32)
+                    mask_binary = (mask_float > 0.5)
 
-                    # 2단계: Binary Erosion으로 2픽셀 수축
-                    mask_eroded = cupyx.scipy.ndimage.binary_erosion(
-                        mask_binary.astype(cp.bool_), iterations=2
-                    ).astype(cp.float32)
+                    # 2단계: Binary Erosion으로 2픽셀 수축 (CuPy 호환성: 수동 2회 호출)
+                    mask_eroded = cupyx.scipy.ndimage.binary_erosion(mask_binary)
+                    mask_eroded = cupyx.scipy.ndimage.binary_erosion(mask_eroded)
 
                     # 3단계: 약한 Gaussian blur로 경계 부드럽게
-                    mask_smoothed = cupyx.scipy.ndimage.gaussian_filter(mask_eroded, sigma=1.5)
+                    mask_smoothed = cupyx.scipy.ndimage.gaussian_filter(
+                        mask_eroded.astype(cp.float32), sigma=1.5
+                    )
 
                     # 4단계: uint8로 변환
                     mask_for_modulation = (mask_smoothed * 255).astype(cp.uint8)
