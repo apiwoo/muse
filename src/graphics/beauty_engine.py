@@ -1058,16 +1058,6 @@ class BeautyEngine:
                  w, h, sw, sh, scale, use_bg)
             )
 
-            # [V43 LEGACY] 롤백이 필요한 경우 아래 코드로 교체:
-            # self.inverse_warp_validity_kernel(
-            #     grid_dim, block_dim,
-            #     (source_for_warp, self.bg_gpu,
-            #      mask_orig,
-            #      result_gpu,
-            #      self.gpu_dx, self.gpu_dy,
-            #      w, h, sw, sh, scale, use_bg)
-            # )
-
             # ==================================================================
             # [Debug Visualization]
             # ==================================================================
