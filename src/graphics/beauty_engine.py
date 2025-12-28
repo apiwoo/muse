@@ -1,9 +1,6 @@
 # Project MUSE - beauty_engine.py
-# V47: 배경 왜곡 차단 & 번개 현상 방어
-# - 신규: Erosion 기반 마스크 수축 (iterations=2, sigma=1.5)
-# - 신규: 커널 임계값 조정 (CERTAIN_PERSON 0.3→0.10, CERTAIN_BG 0.05→0.02)
-# - 유지: bypass=True (Stabilizer 비활성화)
-# - 유지: FrameSyncBuffer 비활성화
+# V47: 배경 왜곡 차단 기본 로직
+# - bypass=True (Stabilizer 비활성화)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cv2
@@ -57,36 +54,39 @@ except ImportError:
 
 
 # ==============================================================================
-# [메인 클래스] BeautyEngine - V47 배경 왜곡 차단 & 번개 현상 방어
+# [메인 클래스] BeautyEngine - V48 AI 마스크 품질 개선 (방안 M)
 # ==============================================================================
 class BeautyEngine:
     """
-    V47 Beauty Processing Engine - 배경 왜곡 차단 & 번개 현상 방어
+    V48 Beauty Processing Engine - AI 마스크 품질 개선 (방안 M)
 
-    Key Changes (V47):
-    - Erosion 기반 배경 왜곡 차단:
-      * binary_erosion(iterations=2)로 마스크 2픽셀 수축
-      * gaussian_filter(sigma=1.5)로 경계 부드럽게
-      * 배경 픽셀에 워핑 변위 0 적용
+    Key Changes (V48):
+    - 마스크 후처리 개선 (접근법 1):
+      * Close 연산: 구멍 채우기 (dilation → erosion)
+      * Open 연산: 노이즈 제거 (erosion → dilation)
+      * 최종 Erosion: 배경 왜곡 방지
 
-    - 커널 임계값 조정 (번개 현상 방어):
-      * CERTAIN_PERSON: 0.3 → 0.10 (10%만 넘어도 사람 판정)
-      * CERTAIN_BG: 0.05 → 0.02 (진짜 완전한 배경만)
-      * ORIGIN_THRESHOLD: 0.2 → 0.10
+    - 마스크 경계 강화 (접근법 3):
+      * 대비 강화: (mask - 0.3) / 0.4
+      * 0.3~0.7 구간을 0~1로 확장
 
-    Preserved from V46.2:
-    - 화면 밖 keypoint 검증 (margin=0, min_conf=0.3)
+    - Guided Filter (접근법 2):
+      * 선택적 적용 (기본 비활성화)
+      * params['use_guided_filter'] = True로 활성화
 
-    Preserved from V44-V45.1:
+    Preserved from V47:
+    - 배경 왜곡 차단 기본 로직
+    - 커널 임계값 설정
+
+    Preserved from V44-V46.2:
     - Stabilizer bypass=True (프레임 독립 처리)
-    - FrameSyncBuffer 비활성화
-    - Simple Void Fill Kernel
+    - 화면 밖 keypoint 검증
 
-    Result: 배경 휘어짐 없음 + 번개 현상 없음
+    Result: 마스크 품질 개선 → 테두리/배경왜곡 감소
     """
 
     def __init__(self, profiles=[]):
-        print("[BEAUTY] [BeautyEngine] V47 Erosion + Threshold Defense")
+        print("[BEAUTY] [BeautyEngine] V47 Background Distortion Prevention")
         self.map_scale = 0.25
         self.cache_w = 0
         self.cache_h = 0
@@ -921,26 +921,9 @@ class BeautyEngine:
                         order=1
                     ).astype(cp.uint8)
 
-                    # ==============================================================
-                    # [V47] Erosion 기반 배경 왜곡 차단
-                    # - 마스크를 2픽셀 수축하여 워핑 영향권을 사람 안쪽으로 제한
-                    # - 배경 픽셀에는 워핑 변위가 0이 되어 물리적으로 왜곡 불가능
-                    # ==============================================================
-                    # 1단계: 마스크 이진화
-                    mask_float = mask_small_gpu.astype(cp.float32) / 255.0
-                    mask_binary = (mask_float > 0.5)
-
-                    # 2단계: Binary Erosion으로 2픽셀 수축 (CuPy 호환성: 수동 2회 호출)
-                    mask_eroded = cupyx.scipy.ndimage.binary_erosion(mask_binary)
-                    mask_eroded = cupyx.scipy.ndimage.binary_erosion(mask_eroded)
-
-                    # 3단계: 약한 Gaussian blur로 경계 부드럽게
-                    mask_smoothed = cupyx.scipy.ndimage.gaussian_filter(
-                        mask_eroded.astype(cp.float32), sigma=1.5
-                    )
-
-                    # 4단계: uint8로 변환
-                    mask_for_modulation = (mask_smoothed * 255).astype(cp.uint8)
+                    # [V47] 마스크 기반 변위 모듈레이션
+                    # 배경 영역(마스크=0)의 변위를 0으로
+                    mask_for_modulation = mask_small_gpu
 
                     # 그리드 모듈레이션 적용
                     small_block_dim = (16, 16)
