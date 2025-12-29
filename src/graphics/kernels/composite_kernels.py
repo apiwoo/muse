@@ -3,17 +3,17 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # ==============================================================================
-# [KERNEL V-FINAL3] Simple Void Fill (Dynamic Threshold)
+# [KERNEL V-FINAL4] Simple Void Fill (Binary Threshold)
 # ==============================================================================
-# 번개 현상 해결 (수정판):
-# - 문제: 변위가 워핑 포인트(턱, 허리) 주변에만 존재
-# - 이전 오류: "변위 없음 = Void"로 판정 → 사람 전체가 배경으로 대체됨
-# - 해결: mask_at_warped 기반 로직 복원 + 변위 있을 때 임계값 낮춤
+# 따라온 배경 완전 제거:
+# - 문제: 워핑 시 사람 경계에 배경 픽셀이 따라 들어옴
+# - 원인: 소스 좌표(u,v)가 배경을 가리키는데도 샘플링됨
+# - 해결: Binary 판정 (0.5 임계값) - 소스가 배경이면 절대 샘플링 안함
 #
 # 핵심 로직:
-# - 변위 있는 영역: mask_at_warped > 0.02 이면 사람 (관대하게 → 번개 방지)
-# - 변위 없는 영역: mask_at_warped > 0.1 이면 사람 (기존대로)
-# - Void: mask_at_warped <= threshold AND mask_here > 0.1 → 배경으로 채움
+# - 소스 좌표 마스크 > 0.5 → 확실히 사람 → 워핑 픽셀 사용
+# - 소스 마스크 <= 0.5 AND 현재 마스크 > 0.5 → Void → 배경으로 채움
+# - 둘 다 배경 → 원본 픽셀 유지
 # ==============================================================================
 SIMPLE_VOID_FILL_KERNEL_CODE = r'''
 extern "C" __global__
@@ -66,79 +66,60 @@ void simple_void_fill_kernel(
     }
 
     // =========================================================================
-    // [V-FINAL3] 동적 임계값 기반 사람 판정
+    // [V-FINAL4] Binary 판정 기반 사람/배경 구분
     // =========================================================================
-    // 핵심 통찰:
-    // 1. 변위 없는 영역: u=x, v=y → mask_at_warped = mask_here
-    //    → Void 조건 (mask_at_warped <= th AND mask_here > th) 불가능
-    //    → 사람/배경이 올바르게 유지됨
+    // 핵심 원칙:
+    // - 소스 좌표 (u,v)의 마스크가 "사람"이 아니면 절대 샘플링하지 않음
+    // - Binary 판정: 마스크 > 0.5 이면 사람, 아니면 배경
+    // - 숫자 조절 없이 Yes/No 확실하게 구분
     //
-    // 2. 변위 있는 영역: 워핑 포인트(턱, 허리) 주변
-    //    → AI 마스크가 부정확할 수 있음 → 번개 발생 가능
-    //    → 임계값을 낮춰서 (0.02) 관대하게 사람 판정 → 번개 방지
-    //
-    // 3. 진짜 Void: 변위 있음 + mask_at_warped < 0.02 + mask_here > 0.1
-    //    → 워핑된 좌표가 완전히 배경 → 배경으로 채움
+    // 따라온 배경 해결 원리:
+    // - 기존: 마스크 > 0.1이면 사람으로 판정 → 경계 픽셀이 배경 샘플링
+    // - 수정: 마스크 > 0.5인 경우만 사람 → 경계에서 배경 차단
     // =========================================================================
 
-    const float VOID_THRESHOLD = 0.1f;          // Void 판정용 기본 임계값
-    const float SAFE_PERSON_THRESHOLD = 0.02f;  // 변위 있을 때 사용 (번개 방지)
-    const float DISPLACEMENT_MIN = 0.5f;        // 0.5픽셀 이상이면 "변위 있음"
-
-    // 변위 크기 계산
-    float disp_magnitude = sqrtf(shift_x * shift_x + shift_y * shift_y);
-    bool has_displacement = (disp_magnitude > DISPLACEMENT_MIN);
+    // Binary 판정 임계값 (0.5 = 확실한 사람/배경 구분)
+    const float BINARY_THRESHOLD = 0.5f;
 
     // 마스크 값 조회
-    float mask_at_warped = 0.0f;
-    if (u >= 0 && u < width && v >= 0 && v < height) {
-        mask_at_warped = (float)mask[v * width + u] / 255.0f;
+    float mask_at_source = 0.0f;
+    bool source_in_bounds = (u >= 0 && u < width && v >= 0 && v < height);
+    if (source_in_bounds) {
+        mask_at_source = (float)mask[v * width + u] / 255.0f;
     }
     float mask_here = (float)mask[idx] / 255.0f;
 
-    // 동적 임계값: 변위가 있으면 더 관대하게 사람 판정 (번개 방지)
-    float person_threshold = has_displacement ? SAFE_PERSON_THRESHOLD : VOID_THRESHOLD;
+    // Binary 판정: Yes or No (숫자 조절 없음)
+    bool source_is_person = (source_in_bounds && mask_at_source > BINARY_THRESHOLD);
+    bool here_is_person = (mask_here > BINARY_THRESHOLD);
 
-    // 워핑 좌표 유효성
-    bool warp_in_bounds = (u >= 0 && u < width && v >= 0 && v < height);
-
-    // 3단계 픽셀 결정
-    if (warp_in_bounds && mask_at_warped > person_threshold) {
+    if (source_is_person) {
         // =========================================================
-        // ★ CASE 1: 사람 영역 → 워핑된 픽셀 출력
+        // ★ CASE 1: 소스 좌표가 확실히 "사람"
         // =========================================================
-        // 변위 있는 영역: mask_at_warped > 0.02 (관대하게)
-        // 변위 없는 영역: mask_at_warped > 0.1 (기존대로)
-        //
-        // 변위 없는 영역에서는 u=x, v=y이므로:
-        // mask_at_warped = mask_here → 사람은 사람, 배경은 배경으로 유지
+        // 소스 마스크 > 0.5 → 확실히 사람 픽셀 → 안전하게 샘플링
+        // 따라온 배경 불가능 (배경은 마스크 <= 0.5)
         int warped_idx_rgb = (v * width + u) * 3;
         dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
         dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
         dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
     }
-    else if (mask_here > VOID_THRESHOLD) {
+    else if (here_is_person) {
         // =========================================================
-        // ★ CASE 2: Void → 배경으로 채움
+        // ★ CASE 2: 소스는 배경, 현재 위치는 사람 → Void
         // =========================================================
-        // 조건: mask_at_warped <= threshold (사람 아님)
-        //       mask_here > 0.1 (원래 사람이었음)
-        //
-        // 변위 없는 영역에서는 이 조건이 성립할 수 없음:
-        // mask_at_warped = mask_here이므로,
-        // mask_here > 0.1 → mask_at_warped > 0.1 → CASE 1로 감
-        //
-        // 오직 변위 있는 영역에서만 Void 발생:
-        // 슬리밍으로 사람이 밀려나면서 빈 공간 생김
+        // 소스 마스크 <= 0.5 (배경) → 샘플링하지 않음!
+        // 현재 마스크 > 0.5 (사람) → 슬리밍으로 비어진 공간
+        // 배경으로 채움 → 따라온 배경 차단!
         dst[idx_rgb + 0] = bg[idx_rgb + 0];
         dst[idx_rgb + 1] = bg[idx_rgb + 1];
         dst[idx_rgb + 2] = bg[idx_rgb + 2];
     }
     else {
         // =========================================================
-        // ★ CASE 3: 배경 → 원본 유지
+        // ★ CASE 3: 배경 영역 → 원본 유지
         // =========================================================
-        // 조건: mask_at_warped <= threshold AND mask_here <= 0.1
+        // 소스 마스크 <= 0.5 AND 현재 마스크 <= 0.5
         // 원래 배경이었던 영역 → 현재 좌표(x,y)의 원본 픽셀 유지
         // 배경 왜곡 0%
         dst[idx_rgb + 0] = src[idx_rgb + 0];
