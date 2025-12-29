@@ -1017,10 +1017,11 @@ class BeautyEngine:
             )
 
             # 4-4. 마스크 홀 채우기 (Dilate) - [V41 LEGACY]
+            # [V48-E] radius 2 복원 - 임계값 0.3과 조합
             self.mask_dilate_kernel(
                 grid_dim, block_dim,
                 (self.forward_mask_gpu, self.forward_mask_dilated_gpu,
-                 w, h, 2)  # [V40] radius 2 (V38.1 복원)
+                 w, h, 2)  # radius 2: 배경 따라오기 방지
             )
 
             # 4-5. 순방향 마스크 평활화 - [V41 LEGACY] 롤백용으로 유지

@@ -199,7 +199,8 @@ void forward_mask_void_fill_kernel(
     float mask_orig = (float)mask[idx] / 255.0f;
     float mask_fwd = (float)forward_mask[idx] / 255.0f;
 
-    if (mask_fwd > 0.5f) {
+    // [V48-E] 임계값 0.3 - 빠른 동작 번개 방지
+    if (mask_fwd > 0.3f) {
         // =========================================================
         // CASE 1: 워핑 후에도 사람 영역 → 워핑 픽셀 사용
         // =========================================================
