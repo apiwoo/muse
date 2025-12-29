@@ -13,6 +13,7 @@ __all__ = [
     'WARP_MASK_FROM_GRID_KERNEL_CODE',
     # Composite kernels
     'SIMPLE_VOID_FILL_KERNEL_CODE',
+    'FORWARD_MASK_VOID_FILL_KERNEL_CODE',
     # Skin kernels
     'GUIDED_FILTER_KERNEL_CODE',
     'FAST_SKIN_SMOOTH_KERNEL_CODE',
@@ -40,6 +41,7 @@ from graphics.kernels.warp_kernels import (
 # ==============================================================================
 from graphics.kernels.composite_kernels import (
     SIMPLE_VOID_FILL_KERNEL_CODE,
+    FORWARD_MASK_VOID_FILL_KERNEL_CODE,
 )
 
 # ==============================================================================

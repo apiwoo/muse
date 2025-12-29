@@ -41,6 +41,8 @@ from graphics.kernels.cuda_kernels import (
     FINAL_BLEND_KERNEL_CODE,
     # V44: Simple Void Fill (Frame-Independent)
     SIMPLE_VOID_FILL_KERNEL_CODE,
+    # V-FINAL5: Forward Mask Void Fill (순방향 마스크 기반)
+    FORWARD_MASK_VOID_FILL_KERNEL_CODE,
 )
 from graphics.processors.morph_logic import MorphLogic
 
@@ -211,6 +213,9 @@ class BeautyEngine:
 
             # V44: Simple Void Fill (Frame-Independent)
             self.simple_void_fill_kernel = cp.RawKernel(SIMPLE_VOID_FILL_KERNEL_CODE, 'simple_void_fill_kernel')
+
+            # V-FINAL5: Forward Mask Void Fill (순방향 마스크 기반)
+            self.forward_mask_void_fill_kernel = cp.RawKernel(FORWARD_MASK_VOID_FILL_KERNEL_CODE, 'forward_mask_void_fill_kernel')
 
             self._warmup_kernels()
             self._load_all_backgrounds(profiles)
@@ -1025,24 +1030,35 @@ class BeautyEngine:
             _ = mask_fwd  # [V41] Suppress unused variable warning (kept for rollback)
 
             # ==============================================================
-            # [V44] Simple Void Fill - 프레임 독립 합성
-            # - 핵심: 프레임과 마스크가 100% 동일 시점
-            # - 3단계 무결성 판정:
-            #   * CASE 1: mask_at_warped > 0.4 → 전경 출력 (번개 차단)
-            #   * CASE 2: mask_at_origin > 0.2 → 배경 출력 (Void 채움)
-            #   * CASE 3: 그 외 → 원본 유지 (왜곡 차단)
+            # [V-FINAL5] Forward Mask Void Fill - 순방향 마스크 기반 합성
+            # - 핵심: forward_mask로 워핑 후 사람 영역 정확히 판정
+            # - 조건 분기:
+            #   * CASE 1: forward_mask > 0.5 → 워핑 픽셀 사용 (사람)
+            #   * CASE 2: mask_orig > 0.5 AND forward_mask <= 0.5 → 배경 (Void)
+            #   * CASE 3: 둘 다 배경 → 원본 유지
             # ==============================================================
             result_gpu = cp.empty_like(frame_gpu)
 
-            # [V44] Simple Void Fill - 프레임 독립 처리
-            self.simple_void_fill_kernel(
-                grid_dim, block_dim,
-                (source_for_warp, self.bg_gpu,
-                 mask_orig,
-                 result_gpu,
-                 self.gpu_dx, self.gpu_dy,
-                 w, h, sw, sh, scale, use_bg)
-            )
+            if use_bg:
+                # [V-FINAL5] Forward Mask 기반 Void 판정
+                self.forward_mask_void_fill_kernel(
+                    grid_dim, block_dim,
+                    (source_for_warp, self.bg_gpu,
+                     mask_orig, self.forward_mask_dilated_gpu,
+                     result_gpu,
+                     self.gpu_dx, self.gpu_dy,
+                     w, h, sw, sh, scale, 1)
+                )
+            else:
+                # 배경 미사용 시: 단순 워핑만 (기존 커널)
+                self.simple_void_fill_kernel(
+                    grid_dim, block_dim,
+                    (source_for_warp, self.bg_gpu,
+                     mask_orig,
+                     result_gpu,
+                     self.gpu_dx, self.gpu_dy,
+                     w, h, sw, sh, scale, 0)
+                )
 
             # ==================================================================
             # [Debug Visualization]

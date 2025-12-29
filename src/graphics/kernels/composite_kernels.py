@@ -131,6 +131,111 @@ void simple_void_fill_kernel(
 
 
 # ==============================================================================
+# [KERNEL V-FINAL5] Forward Mask Void Fill (순방향 마스크 기반 Void 판정)
+# ==============================================================================
+# 핵심 아이디어:
+# - forward_mask: 마스크를 순방향 워핑한 결과 (워핑 후 사람 위치)
+# - mask_orig: 워핑 전 사람 위치
+# - Void = mask_orig > 0.5 AND forward_mask <= 0.5
+#
+# 조건 분기:
+# - forward_mask > 0.5: 워핑 후에도 사람 → 워핑 픽셀 사용
+# - forward_mask <= 0.5 AND mask_orig > 0.5: Void → 배경 사용
+# - 둘 다 배경: 원본 유지
+#
+# 장점:
+# - 정확한 Void 경계 판정 (격자 패턴 없음)
+# - 기존 방식의 mask[u,v] 판정 한계 극복
+# ==============================================================================
+FORWARD_MASK_VOID_FILL_KERNEL_CODE = r'''
+extern "C" __global__
+void forward_mask_void_fill_kernel(
+    const unsigned char* src,
+    const unsigned char* bg,
+    const unsigned char* mask,
+    const unsigned char* forward_mask,
+    unsigned char* dst,
+    const float* dx_small,
+    const float* dy_small,
+    int width, int height,
+    int small_width, int small_height,
+    int scale,
+    int use_bg
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    int idx = y * width + x;
+    int idx_rgb = idx * 3;
+
+    int sx = x / scale;
+    if (sx >= small_width) sx = small_width - 1;
+    int sy = y / scale;
+    if (sy >= small_height) sy = small_height - 1;
+    int s_idx = sy * small_width + sx;
+
+    float shift_x = dx_small[s_idx] * (float)scale;
+    float shift_y = dy_small[s_idx] * (float)scale;
+
+    int u = (int)(x + shift_x);
+    int v = (int)(y + shift_y);
+
+    if (!use_bg) {
+        if (u >= 0 && u < width && v >= 0 && v < height) {
+            int warped_idx_rgb = (v * width + u) * 3;
+            dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
+            dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
+            dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
+        } else {
+            dst[idx_rgb + 0] = src[idx_rgb + 0];
+            dst[idx_rgb + 1] = src[idx_rgb + 1];
+            dst[idx_rgb + 2] = src[idx_rgb + 2];
+        }
+        return;
+    }
+
+    float mask_orig = (float)mask[idx] / 255.0f;
+    float mask_fwd = (float)forward_mask[idx] / 255.0f;
+
+    if (mask_fwd > 0.5f) {
+        // =========================================================
+        // CASE 1: 워핑 후에도 사람 영역 → 워핑 픽셀 사용
+        // =========================================================
+        if (u >= 0 && u < width && v >= 0 && v < height) {
+            int warped_idx_rgb = (v * width + u) * 3;
+            dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
+            dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
+            dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
+        } else {
+            dst[idx_rgb + 0] = src[idx_rgb + 0];
+            dst[idx_rgb + 1] = src[idx_rgb + 1];
+            dst[idx_rgb + 2] = src[idx_rgb + 2];
+        }
+    }
+    else if (mask_orig > 0.5f) {
+        // =========================================================
+        // CASE 2: Void 영역 (워핑 전 사람, 워핑 후 빔)
+        // → 배경으로 채움
+        // =========================================================
+        dst[idx_rgb + 0] = bg[idx_rgb + 0];
+        dst[idx_rgb + 1] = bg[idx_rgb + 1];
+        dst[idx_rgb + 2] = bg[idx_rgb + 2];
+    }
+    else {
+        // =========================================================
+        // CASE 3: 배경 영역 → 원본 유지
+        // =========================================================
+        dst[idx_rgb + 0] = src[idx_rgb + 0];
+        dst[idx_rgb + 1] = src[idx_rgb + 1];
+        dst[idx_rgb + 2] = src[idx_rgb + 2];
+    }
+}
+'''
+
+
+# ==============================================================================
 # [KERNEL V48] Forward Warp (순방향 워핑) - 방안 N
 # ==============================================================================
 # 핵심: 사람 영역만 이동, 배경은 절대 워핑되지 않음
