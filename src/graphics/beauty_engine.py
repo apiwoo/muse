@@ -795,7 +795,10 @@ class BeautyEngine:
             )
             # 주의: hip_widen은 의도적으로 제외됨 (확장은 Void를 만들지 않음)
 
-            if self.has_bg and mask is not None and bg_stable and is_slimming_enabled:
+            # [V-FINAL] 배경 합성 조건 수정
+            # - bg_stable 조건 제거 (프레임 독립 처리이므로 불필요)
+            # - is_slimming_enabled 조건 유지 (슬리밍 기능 ON일 때만 배경 합성)
+            if self.has_bg and mask is not None and is_slimming_enabled:
                 if hasattr(mask, 'device'):
                     mask_gpu = mask
                 else:
@@ -1061,6 +1064,42 @@ class BeautyEngine:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                 result_gpu = cp.asarray(debug_img)
+
+            # [DEBUG] MODNet 마스크 경계 시각화
+            if params.get('show_mask_boundary', False):
+                try:
+                    # GPU -> CPU 변환
+                    if hasattr(result_gpu, 'get'):
+                        debug_img = result_gpu.get()
+                    else:
+                        debug_img = cp.asnumpy(result_gpu)
+
+                    # 마스크 CPU 변환
+                    if mask_gpu is not None:
+                        if hasattr(mask_gpu, 'get'):
+                            mask_cpu = mask_gpu.get()
+                        else:
+                            mask_cpu = cp.asnumpy(mask_gpu)
+
+                        # float 마스크를 uint8로 변환
+                        if mask_cpu.dtype == np.float32 or mask_cpu.dtype == np.float64:
+                            mask_uint8 = (mask_cpu * 255).astype(np.uint8)
+                        else:
+                            mask_uint8 = mask_cpu.astype(np.uint8)
+
+                        # 임계값으로 이진화 (0.5 = 128)
+                        _, binary_mask = cv2.threshold(mask_uint8, 128, 255, cv2.THRESH_BINARY)
+
+                        # 경계선 추출
+                        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                        # 빨간색 얇은 선으로 경계 그리기 (BGR: 0, 0, 255)
+                        cv2.drawContours(debug_img, contours, -1, (0, 0, 255), 1)
+
+                    # CPU -> GPU 변환
+                    result_gpu = cp.asarray(debug_img)
+                except Exception as e:
+                    print(f"[DEBUG] Mask boundary visualization failed: {e}")
 
             # Return result
             if is_gpu_input:

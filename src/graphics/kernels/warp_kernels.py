@@ -57,7 +57,12 @@ void warp_kernel(
 '''
 
 # ==============================================================================
-# [KERNEL 1.5] Displacement Grid Modulation (V34 - Background Warp Prevention)
+# [KERNEL 1.5] Displacement Grid Modulation (V-FINAL - Binary Mask)
+# ==============================================================================
+# 핵심 변경: 연속 alpha → Binary alpha (0 또는 1)
+# - 기존: 마스크 값을 그대로 alpha로 사용 (0.0~1.0 연속값)
+# - 수정: 임계값 0.3 기준으로 Binary 변환 (0 또는 1)
+# - 효과: 배경 영역의 변위가 완전히 0이 되어 왜곡 원천 차단
 # ==============================================================================
 MODULATE_DISPLACEMENT_KERNEL_CODE = r'''
 extern "C" __global__
@@ -74,10 +79,17 @@ void modulate_displacement_kernel(
 
     int idx = y * small_width + x;
 
-    // 마스크 값을 0.0 ~ 1.0 범위로 변환
-    float alpha = (float)mask[idx] / 255.0f;
+    // [V-FINAL] Binary 마스크 적용
+    // - 임계값 0.3 기준으로 사람/배경 이진 분류
+    // - AI 마스크의 배경 영역은 대부분 0.0~0.2
+    // - 마스크 경계 영역은 0.2~0.5
+    // - 사람 영역은 0.5~1.0
+    // - 0.3은 배경과 경계를 구분하는 안전한 임계값
+    float mask_val = (float)mask[idx] / 255.0f;
+    float alpha = (mask_val > 0.3f) ? 1.0f : 0.0f;
 
-    // 변위 그리드에 마스크를 곱함
+    // 변위 그리드에 Binary alpha를 곱함
+    // 배경 영역(alpha=0)은 변위가 완전히 0
     dx[idx] *= alpha;
     dy[idx] *= alpha;
 }

@@ -193,11 +193,17 @@ class BeautyWorker(QThread):
 
             # [V6] 배경 안정성 확인 및 슬리밍 사용 여부 체크
             bg_is_stable = self.bg_manager.is_background_stable()
-            any_slimming = (
+            # [V-FINAL] 슬리밍 활성화 플래그 (Void 발생 기능만)
+            # - face_v: 턱깎기 (수축 → Void 발생)
+            # - waist_slim: 허리줄이기 (수축 → Void 발생)
+            # - ribcage_slim: 갈비뼈줄이기 (수축 → Void 발생)
+            # - shoulder_narrow: 어깨좁히기 (수축 → Void 발생)
+            # - hip_widen 제외: 확장은 Void 미발생
+            is_slimming_active = (
+                current_params.get('face_v', 0.0) > 0.0 or
                 current_params.get('waist_slim', 0.0) > 0.0 or
-                current_params.get('shoulder_narrow', 0.0) > 0.0 or
                 current_params.get('ribcage_slim', 0.0) > 0.0 or
-                current_params.get('hip_widen', 0.0) > 0.0
+                current_params.get('shoulder_narrow', 0.0) > 0.0
             )
 
             t_beauty_start = time.perf_counter()
@@ -223,7 +229,7 @@ class BeautyWorker(QThread):
             final_output = frame_out_gpu
 
             # [V6] 배경 미캡처 + 슬리밍 활성화 시 경고 표시
-            if not bg_is_stable and any_slimming:
+            if not bg_is_stable and is_slimming_active:
                 try:
                     if hasattr(final_output, 'get'):
                         warn_frame = final_output.get()

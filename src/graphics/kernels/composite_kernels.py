@@ -3,17 +3,24 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 
 # ==============================================================================
-# [KERNEL V44] Simple Void Fill (Frame-Independent)
+# [KERNEL V-FINAL3] Simple Void Fill (Dynamic Threshold)
 # ==============================================================================
-# 핵심: 프레임과 마스크가 100% 동일 시점 (시간 불일치 불가능)
-# 단순 3단계 If-Else로 번개/잔상/왜곡 동시 해결
+# 번개 현상 해결 (수정판):
+# - 문제: 변위가 워핑 포인트(턱, 허리) 주변에만 존재
+# - 이전 오류: "변위 없음 = Void"로 판정 → 사람 전체가 배경으로 대체됨
+# - 해결: mask_at_warped 기반 로직 복원 + 변위 있을 때 임계값 낮춤
+#
+# 핵심 로직:
+# - 변위 있는 영역: mask_at_warped > 0.02 이면 사람 (관대하게 → 번개 방지)
+# - 변위 없는 영역: mask_at_warped > 0.1 이면 사람 (기존대로)
+# - Void: mask_at_warped <= threshold AND mask_here > 0.1 → 배경으로 채움
 # ==============================================================================
 SIMPLE_VOID_FILL_KERNEL_CODE = r'''
 extern "C" __global__
 void simple_void_fill_kernel(
     const unsigned char* src,        // 현재 프레임 (피부보정 적용됨)
     const unsigned char* bg,         // 정적 배경 (Clean Plate)
-    const unsigned char* mask,       // 현재 프레임의 마스크 (동일 시점)
+    const unsigned char* mask,       // 현재 프레임의 마스크
     unsigned char* dst,              // 출력
     const float* dx_small,           // 역방향 워핑 그리드
     const float* dy_small,
@@ -59,82 +66,85 @@ void simple_void_fill_kernel(
     }
 
     // =========================================================================
-    // [V44.4] Hybrid Void Detection
+    // [V-FINAL3] 동적 임계값 기반 사람 판정
     // =========================================================================
-    // 핵심: mask_at_warped 값에 따라 3단계 분류
-    // - 확실히 배경 (< 0.02): 경계 체크 없이 바로 배경 (Void 채움)
-    // - 애매함 (0.02 ~ 0.10): 안전하게 전경 (번개 방지)
-    // - 확실히 사람 (> 0.10): 무조건 전경
+    // 핵심 통찰:
+    // 1. 변위 없는 영역: u=x, v=y → mask_at_warped = mask_here
+    //    → Void 조건 (mask_at_warped <= th AND mask_here > th) 불가능
+    //    → 사람/배경이 올바르게 유지됨
+    //
+    // 2. 변위 있는 영역: 워핑 포인트(턱, 허리) 주변
+    //    → AI 마스크가 부정확할 수 있음 → 번개 발생 가능
+    //    → 임계값을 낮춰서 (0.02) 관대하게 사람 판정 → 번개 방지
+    //
+    // 3. 진짜 Void: 변위 있음 + mask_at_warped < 0.02 + mask_here > 0.1
+    //    → 워핑된 좌표가 완전히 배경 → 배경으로 채움
     // =========================================================================
 
-    // 현재 좌표의 마스크
-    float mask_here = (float)mask[idx] / 255.0f;
+    const float VOID_THRESHOLD = 0.1f;          // Void 판정용 기본 임계값
+    const float SAFE_PERSON_THRESHOLD = 0.02f;  // 변위 있을 때 사용 (번개 방지)
+    const float DISPLACEMENT_MIN = 0.5f;        // 0.5픽셀 이상이면 "변위 있음"
 
-    // 워핑된 좌표의 마스크
+    // 변위 크기 계산
+    float disp_magnitude = sqrtf(shift_x * shift_x + shift_y * shift_y);
+    bool has_displacement = (disp_magnitude > DISPLACEMENT_MIN);
+
+    // 마스크 값 조회
     float mask_at_warped = 0.0f;
     if (u >= 0 && u < width && v >= 0 && v < height) {
         mask_at_warped = (float)mask[v * width + u] / 255.0f;
     }
+    float mask_here = (float)mask[idx] / 255.0f;
 
-    // 워핑 변위 (슬리밍 영향 확인)
-    float warp_magnitude = sqrtf(shift_x * shift_x + shift_y * shift_y);
-    bool is_slimming_edge = (warp_magnitude > 1.0f);
+    // 동적 임계값: 변위가 있으면 더 관대하게 사람 판정 (번개 방지)
+    float person_threshold = has_displacement ? SAFE_PERSON_THRESHOLD : VOID_THRESHOLD;
 
-    // 픽셀 준비
-    float fg_b, fg_g, fg_r;
-    if (u >= 0 && u < width && v >= 0 && v < height) {
+    // 워핑 좌표 유효성
+    bool warp_in_bounds = (u >= 0 && u < width && v >= 0 && v < height);
+
+    // 3단계 픽셀 결정
+    if (warp_in_bounds && mask_at_warped > person_threshold) {
+        // =========================================================
+        // ★ CASE 1: 사람 영역 → 워핑된 픽셀 출력
+        // =========================================================
+        // 변위 있는 영역: mask_at_warped > 0.02 (관대하게)
+        // 변위 없는 영역: mask_at_warped > 0.1 (기존대로)
+        //
+        // 변위 없는 영역에서는 u=x, v=y이므로:
+        // mask_at_warped = mask_here → 사람은 사람, 배경은 배경으로 유지
         int warped_idx_rgb = (v * width + u) * 3;
-        fg_b = (float)src[warped_idx_rgb + 0];
-        fg_g = (float)src[warped_idx_rgb + 1];
-        fg_r = (float)src[warped_idx_rgb + 2];
-    } else {
-        fg_b = (float)src[idx_rgb + 0];
-        fg_g = (float)src[idx_rgb + 1];
-        fg_r = (float)src[idx_rgb + 2];
+        dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
+        dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
+        dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
     }
-
-    float bg_b = (float)bg[idx_rgb + 0];
-    float bg_g = (float)bg[idx_rgb + 1];
-    float bg_r = (float)bg[idx_rgb + 2];
-
-    // 임계값 정의
-    // [V47] 번개 현상 방어를 위해 임계값 대폭 낮춤
-    const float CERTAIN_BG = 0.02f;       // [V47] 0.05 → 0.02 (진짜 완전한 배경만)
-    const float CERTAIN_PERSON = 0.10f;   // [V47] 0.3 → 0.10 (10%만 넘어도 사람)
-    const float ORIGIN_THRESHOLD = 0.10f; // [V47] 0.2 → 0.10 (원래 사람이었는지)
-
-    float out_b, out_g, out_r;
-
-    if (mask_at_warped > CERTAIN_PERSON) {
-        // ★ CASE 1: 워핑된 위치가 확실히 사람 (10% 초과)
-        // → 무조건 전경 출력 (번개 현상 차단)
-        out_b = fg_b;
-        out_g = fg_g;
-        out_r = fg_r;
-    }
-    else if (mask_at_warped < CERTAIN_BG && mask_here > ORIGIN_THRESHOLD && is_slimming_edge) {
-        // ★ CASE 2: 진짜 Void!
-        // 조건 1: 워핑된 위치가 확실히 배경 (2% 미만)
-        // 조건 2: 원래 이 자리에 사람이 있었음 (10% 초과)
-        // 조건 3: 슬리밍으로 인한 변위 있음
-        // → 경계 체크 불필요! 바로 배경 출력
-        out_b = bg_b;
-        out_g = bg_g;
-        out_r = bg_r;
+    else if (mask_here > VOID_THRESHOLD) {
+        // =========================================================
+        // ★ CASE 2: Void → 배경으로 채움
+        // =========================================================
+        // 조건: mask_at_warped <= threshold (사람 아님)
+        //       mask_here > 0.1 (원래 사람이었음)
+        //
+        // 변위 없는 영역에서는 이 조건이 성립할 수 없음:
+        // mask_at_warped = mask_here이므로,
+        // mask_here > 0.1 → mask_at_warped > 0.1 → CASE 1로 감
+        //
+        // 오직 변위 있는 영역에서만 Void 발생:
+        // 슬리밍으로 사람이 밀려나면서 빈 공간 생김
+        dst[idx_rgb + 0] = bg[idx_rgb + 0];
+        dst[idx_rgb + 1] = bg[idx_rgb + 1];
+        dst[idx_rgb + 2] = bg[idx_rgb + 2];
     }
     else {
-        // ★ CASE 3: 그 외 모든 경우
-        // - mask_at_warped = 0.02 ~ 0.10 (애매함) → 안전하게 전경
-        // - AI 마스크 결함 → 전경으로 번개 방지
-        // - 원래 배경 (mask_here < 0.10) → 전경 (워핑된 원본)
-        out_b = fg_b;
-        out_g = fg_g;
-        out_r = fg_r;
+        // =========================================================
+        // ★ CASE 3: 배경 → 원본 유지
+        // =========================================================
+        // 조건: mask_at_warped <= threshold AND mask_here <= 0.1
+        // 원래 배경이었던 영역 → 현재 좌표(x,y)의 원본 픽셀 유지
+        // 배경 왜곡 0%
+        dst[idx_rgb + 0] = src[idx_rgb + 0];
+        dst[idx_rgb + 1] = src[idx_rgb + 1];
+        dst[idx_rgb + 2] = src[idx_rgb + 2];
     }
-
-    dst[idx_rgb + 0] = (unsigned char)out_b;
-    dst[idx_rgb + 1] = (unsigned char)out_g;
-    dst[idx_rgb + 2] = (unsigned char)out_r;
 }
 '''
 
