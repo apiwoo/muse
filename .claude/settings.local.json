@@ -3,7 +3,13 @@
     "allow": [
       "Bash(dir:*)",
       "Bash(python:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\n[V-FINAL4] Binary 판정으로 따라온 배경 완전 제거\n\n- 임계값: 동적\\(0.02~0.1\\) → 고정 0.5 \\(Binary\\)\n- 소스 마스크 > 0.5 → 사람, 아니면 → 배경\n- 소스가 배경이면 절대 샘플링 안함 → 따라온 배경 차단\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\n[V-FINAL5] 순방향 마스크 기반 Void 판정\n\n- forward_mask: 마스크를 순방향 워핑한 결과 \\(워핑 후 사람 위치\\)\n- mask_orig: 워핑 전 사람 위치\n- Void = mask_orig > 0.5 AND forward_mask <= 0.5\n\n조건 분기:\n- forward_mask > 0.5 → 워핑 픽셀 사용 \\(사람\\)\n- forward_mask <= 0.5 AND mask_orig > 0.5 → 배경 \\(Void\\)\n- 둘 다 배경 → 원본 유지\n\n기존 mask[u,v] 판정의 한계 극복 → 정확한 Void 경계\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "Bash(git restore:*)"
     ]
   }
 }

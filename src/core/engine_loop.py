@@ -30,6 +30,7 @@ except ImportError:
 class BeautyWorker(QThread):
     frame_processed = Signal(object)
     slider_sync_requested = Signal(dict)
+    bgStatusChanged = Signal(bool)  # [V5.0] 배경 로드/캡처 상태 변경 시 emit
 
     def __init__(self, start_profile="default", run_mode="STANDARD"): 
         super().__init__()
@@ -188,11 +189,20 @@ class BeautyWorker(QThread):
             with QMutexLocker(self.param_mutex):
                 current_params = self.params.copy()
 
-            clean_bg = self.bg_manager.get_background()
-            self.beauty_engine.bg_gpu = clean_bg
+            # [V5.1] 배경 설정: 정적 배경이 있으면 사용, 없으면 현재 프레임 사용
+            bg_is_stable = self.bg_manager.is_background_stable()
+            if bg_is_stable:
+                clean_bg = self.bg_manager.get_background()
+                self.beauty_engine.bg_gpu = clean_bg
+            else:
+                # 배경 없음: 현재 프레임을 배경으로 사용 (검은 화면 방지)
+                # get_background()와 동일한 uint8 타입으로 변환
+                if hasattr(frame_gpu, 'astype'):
+                    self.beauty_engine.bg_gpu = frame_gpu.astype(cp.uint8)
+                else:
+                    self.beauty_engine.bg_gpu = cp.asarray(frame_gpu).astype(cp.uint8)
 
             # [V6] 배경 안정성 확인 및 슬리밍 사용 여부 체크
-            bg_is_stable = self.bg_manager.is_background_stable()
             # [V-FINAL] 슬리밍 활성화 플래그 (Void 발생 기능만)
             # - face_v: 턱깎기 (수축 → Void 발생)
             # - waist_slim: 허리줄이기 (수축 → Void 발생)
@@ -363,19 +373,21 @@ class BeautyWorker(QThread):
 
     def _execute_bg_capture(self, frame_gpu):
         if frame_gpu is None: return
-        
+
         if hasattr(frame_gpu, 'get'):
             frame_bgr = frame_gpu.get()
         else:
             frame_bgr = frame_gpu
-            
+
         profile_path = self.profile_mgr.get_profile_path(self.current_profile_name)
         save_path = os.path.join(profile_path, "background.jpg")
-        
+
         try:
             cv2.imwrite(save_path, frame_bgr)
             print(f"[BG] Saved background to: {save_path}")
             self.bg_manager.load_static_background(frame_bgr)
+            self.bg_manager.set_file_path(save_path)  # [V5.0] 파일 경로 설정
+            self.bgStatusChanged.emit(True)  # [V5.0] UI에 배경 있음 알림
         except Exception as e:
             print(f"[ERROR] Failed to save background: {e}")
 
@@ -414,13 +426,15 @@ class BeautyWorker(QThread):
         bg_path = os.path.join(self.root_dir, "recorded_data", "personal_data", profile_name, "background.jpg")
         if os.path.exists(bg_path):
             self.bg_manager.load_static_background(bg_path)
+            self.bgStatusChanged.emit(True)  # [V5.0] UI에 배경 있음 알림
         else:
             print(f"[WARNING] No background.jpg. Press 'B' to capture.")
-            self.bg_manager.is_static_loaded = False 
-        
+            self.bg_manager.is_static_loaded = False
+            self.bgStatusChanged.emit(False)  # [V5.0] UI에 배경 없음 알림
+
         self.beauty_engine.set_profile(profile_name)
         config = self.profile_mgr.get_config(profile_name)
-        
+
         with QMutexLocker(self.param_mutex):
             self.params = config.get("params", {})
             self.slider_sync_requested.emit(self.params)

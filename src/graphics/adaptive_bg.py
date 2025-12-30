@@ -1,50 +1,59 @@
 # Project MUSE - adaptive_bg.py
-# V3.8: Smart Fast-Update for Definite Backgrounds (Ghosting Killer)
+# V5.2: MODNet-Based Background Update with Temporal + Spatial Verification
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cupy as cp
-# [New] For spatial filtering (neighbor check)
-import cupyx.scipy.ndimage 
+import cupyx.scipy.ndimage
 import cv2
 import numpy as np
 import os
+import threading
 
 class AdaptiveBackground:
     def __init__(self, width=1920, height=1080):
         self.w = width
         self.h = height
-        self.bg_buffer = None # Float32
-        
-        # [Config] Learning Rates
-        self.base_learning_rate = 0.005 # 기본(느린) 업데이트 속도
-        self.fast_learning_rate = 0.1   # [New] 확실한 배경일 때의 빠른 속도
-        
-        # [Critical] Difference Penalty
-        # 변화가 클수록 업데이트를 억제하는 계수 (사람 보호용)
-        self.diff_penalty = 10.0 
-        
+        self.bg_buffer = None  # Float32
+
         self.is_static_loaded = False
+
+        # [V5.0] 파일 자동 저장 설정
+        self.bg_file_path = None
+        self.update_counter = 0
+        self.file_save_interval = 600  # 약 20초마다 파일 저장 (30fps 기준)
+
+        # [V5.2] 연속 프레임 검증 + 공간 마진
+        self.temporal_counter = None  # (H, W) 각 픽셀의 연속 배경 프레임 수
+        self.TEMPORAL_THRESHOLD = 15  # 15프레임 연속 배경이어야 업데이트 (0.5초)
+        self.ALPHA_THRESHOLD = 0.005  # alpha < 0.005 = 확실한 배경
+        self.SPATIAL_SIZE = 7         # 7x7 이웃 검사
 
     def load_static_background(self, bg_source):
         frame_bgr = None
         if isinstance(bg_source, str):
             if os.path.exists(bg_source):
                 frame_bgr = cv2.imread(bg_source)
+                self.bg_file_path = bg_source  # [V5.0] 파일 경로 저장
                 print(f"[BG] Loaded static background from: {bg_source}")
             else:
                 print(f"[BG] Background file not found: {bg_source}")
                 return False
         elif isinstance(bg_source, np.ndarray):
             frame_bgr = bg_source
-        
+
         if frame_bgr is not None:
             if frame_bgr.shape[1] != self.w or frame_bgr.shape[0] != self.h:
                 frame_bgr = cv2.resize(frame_bgr, (self.w, self.h))
             self.bg_buffer = cp.asarray(frame_bgr).astype(cp.float32)
             self.is_static_loaded = True
-            print("[BG] Static Background Locked. Auto-update disabled.")
+            self.temporal_counter = None  # [V5.1] 리셋
+            print("[BG] Static Background Loaded. Real-time update enabled for BG areas.")
             return True
         return False
+
+    def set_file_path(self, path):
+        """[V5.0] 배경 파일 경로 설정"""
+        self.bg_file_path = path
 
     def reset(self, frame_gpu):
         if frame_gpu is None: return
@@ -56,59 +65,88 @@ class AdaptiveBackground:
 
     def update(self, frame_gpu, person_alpha):
         """
-        [Corrected Update Logic V3.8]
-        1. Static Lock: 캡처된 배경이 있다면 절대 업데이트하지 않음.
-        2. [New] Spatial Safety Check:
-           - 주변 픽셀(7x7)이 모두 배경이라면 -> "확실한 배경" -> Fast Update (잔상 제거)
-           - 주변에 사람이 있다면 -> "경계 영역" -> Slow Update (스탬핑 방지)
+        [V5.2] MODNet 기반 배경 업데이트 (Temporal + Spatial 검증)
+
+        원칙:
+        1. 공간 검증: 7x7 이웃 중 최대 alpha가 임계값 미만이어야 함
+        2. 시간 검증: N프레임 연속으로 배경이어야 업데이트
+        3. 1프레임이라도 사람이면 카운터 리셋
         """
         if self.bg_buffer is None or frame_gpu is None:
-            if frame_gpu is not None: self.reset(frame_gpu)
+            if frame_gpu is not None:
+                self.reset(frame_gpu)
             return
 
-        # [Rule 1] Static Background Lock
-        # 사용자가 직접 찍은 배경은 신성불가침 영역으로 둡니다.
-        if self.is_static_loaded:
+        # Static 배경이 없으면 업데이트 안 함
+        if not self.is_static_loaded:
             return
 
-        current_frame_float = frame_gpu.astype(cp.float32)
+        h, w = frame_gpu.shape[:2]
 
-        # 1. Pixel Difference (0.0 ~ 1.0)
-        # 현재 화면과 저장된 배경의 차이 계산
-        diff = cp.abs(current_frame_float - self.bg_buffer)
-        diff_mean = cp.mean(diff, axis=2, keepdims=True)
-        diff_factor = diff_mean / 255.0
+        # 1. temporal_counter 초기화
+        if self.temporal_counter is None or self.temporal_counter.shape != (h, w):
+            self.temporal_counter = cp.zeros((h, w), dtype=cp.uint8)
 
-        # 2. Spatial Analysis (Neighbor Check)
-        # "주변 셀이 전부 배경이면 확실히 배경이다"
-        # alpha_2d: (H, W)
+        # 2. 알파 마스크 2D 변환
         alpha_2d = person_alpha
-        if alpha_2d.ndim == 3: alpha_2d = alpha_2d.squeeze()
-        
-        # 주변 7x7 영역 내의 '최대 알파값'을 찾습니다.
-        # 이 값이 0에 가깝다면, 주변 7x7 픽셀 모두가 배경이라는 뜻입니다.
-        neighbor_max_alpha = cupyx.scipy.ndimage.maximum_filter(alpha_2d, size=7)
-        neighbor_max_alpha = neighbor_max_alpha[..., None] # (H, W, 1)
+        if alpha_2d.ndim == 3:
+            alpha_2d = alpha_2d.squeeze()
 
-        # [Condition] Definite Background
-        # 주변에 살(Body)이 전혀 감지되지 않음 (Threshold 0.05)
-        is_definite_bg = (neighbor_max_alpha < 0.05).astype(cp.float32)
+        # 3. 공간 검증: 7x7 이웃 중 최대 alpha 계산
+        # 주변에 사람이 있으면 업데이트 안 함 (잔상 방지)
+        neighbor_max_alpha = cupyx.scipy.ndimage.maximum_filter(
+            alpha_2d, size=self.SPATIAL_SIZE
+        )
 
-        # 3. Dynamic Learning Rate Calculation
-        # Case A: 확실한 배경 (is_definite_bg == 1.0)
-        # -> Fast Rate 적용. Penalty 무시. (잔상 즉시 지움)
-        # Case B: 불확실한 경계 (is_definite_bg == 0.0)
-        # -> Slow Rate 적용. Penalty 적용. (사람 보호)
-        
-        # Slow Logic (Inverse Diff)
-        conservative_rate = self.base_learning_rate / (1.0 + diff_factor * self.diff_penalty)
-        
-        # Mix Rates
-        final_rate = is_definite_bg * self.fast_learning_rate + \
-                     (1.0 - is_definite_bg) * conservative_rate
-        
-        # 4. Apply Update
-        self.bg_buffer = self.bg_buffer * (1.0 - final_rate) + current_frame_float * final_rate
+        # 4. 배경 영역 판정 (공간 + alpha 임계값)
+        # 본인 픽셀 AND 주변 7x7 모두 배경이어야 함
+        is_bg_now = (neighbor_max_alpha < self.ALPHA_THRESHOLD)
+
+        # 5. temporal_counter 업데이트
+        # 배경인 픽셀: counter += 1 (최대 255)
+        # 사람인 픽셀: counter = 0 (즉시 리셋)
+        self.temporal_counter = cp.where(
+            is_bg_now,
+            cp.minimum(self.temporal_counter + 1, 255).astype(cp.uint8),
+            cp.uint8(0)
+        )
+
+        # 6. N프레임 연속 배경인 픽셀만 업데이트
+        is_safe_to_update = (self.temporal_counter >= self.TEMPORAL_THRESHOLD)
+        update_mask = is_safe_to_update[..., None]  # (H, W, 1)
+
+        # 7. 배경 업데이트 (안전한 영역만)
+        current_float = frame_gpu.astype(cp.float32)
+        self.bg_buffer = cp.where(update_mask, current_float, self.bg_buffer)
+
+        # 8. 주기적 파일 저장
+        if self.bg_file_path:
+            self.update_counter += 1
+            if self.update_counter >= self.file_save_interval:
+                self.update_counter = 0
+                self._save_background_async()
+
+    def _save_background_async(self):
+        """[V5.0] 배경 버퍼를 파일에 비동기 저장"""
+        if self.bg_buffer is None or self.bg_file_path is None:
+            return
+
+        try:
+            bg_copy = self.bg_buffer.get().astype(np.uint8)
+        except Exception as e:
+            print(f"[BG] Failed to copy buffer: {e}")
+            return
+
+        def save_worker(img, path):
+            try:
+                cv2.imwrite(path, img)
+                print(f"[BG] Auto-saved background to: {path}")
+            except Exception as e:
+                print(f"[BG] Failed to save: {e}")
+
+        t = threading.Thread(target=save_worker, args=(bg_copy, self.bg_file_path))
+        t.daemon = True
+        t.start()
 
     def is_background_stable(self):
         """

@@ -6,7 +6,7 @@
 # (C) 2025 MUSE Corp. All rights reserved.
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGroupBox, QLabel, QCheckBox, QFrame, QScrollArea, QHBoxLayout
+    QWidget, QVBoxLayout, QGroupBox, QLabel, QCheckBox, QFrame, QScrollArea, QHBoxLayout, QPushButton
 )
 from PySide6.QtCore import Signal, Qt
 from ui.controls.sliders import ModernSlider
@@ -18,6 +18,7 @@ class BeautyPanel(QWidget):
     V25.0: 고급 피부 설정 및 색상 그레이딩 추가
     """
     paramChanged = Signal(dict)
+    bgCaptureRequested = Signal()  # [V5.0] 배경 저장 버튼 클릭 시 emit
 
     def __init__(self):
         super().__init__()
@@ -101,6 +102,9 @@ class BeautyPanel(QWidget):
             'color_tint': 0.0           # 틴트 (-1 Green ~ 1 Magenta)
         }
 
+        # [V5.0] 배경 상태
+        self.has_background = False
+
         self._init_ui()
 
     def _init_ui(self):
@@ -135,6 +139,51 @@ class BeautyPanel(QWidget):
         content_layout.setSpacing(20)
 
         # =====================================================================
+        # [V5.0] 배경 필수 안내 영역
+        # =====================================================================
+        self.bg_required_frame = QFrame()
+        self.bg_required_frame.setStyleSheet("""
+            QFrame {
+                background-color: #2D2D2D;
+                border: 2px solid #FF5252;
+                border-radius: 8px;
+                padding: 15px;
+            }
+        """)
+        bg_layout = QVBoxLayout(self.bg_required_frame)
+        bg_layout.setSpacing(10)
+
+        bg_title = QLabel("⚠️ 배경 저장 필요")
+        bg_title.setStyleSheet("color: #FF5252; font-size: 14px; font-weight: bold; border: none;")
+        bg_layout.addWidget(bg_title)
+
+        bg_desc = QLabel("배경을 저장해야 보정이 활성화됩니다.\n카메라 화면에서 벗어난 채로 배경을 저장해주세요.")
+        bg_desc.setStyleSheet("color: #AAAAAA; font-size: 12px; border: none;")
+        bg_desc.setWordWrap(True)
+        bg_layout.addWidget(bg_desc)
+
+        self.btn_capture_bg = QPushButton("📷 배경 저장하기 (단축키: B)")
+        self.btn_capture_bg.setStyleSheet("""
+            QPushButton {
+                background-color: #00ADB5;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 12px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #00CED6;
+            }
+        """)
+        self.btn_capture_bg.setCursor(Qt.PointingHandCursor)
+        self.btn_capture_bg.clicked.connect(lambda: self.bgCaptureRequested.emit())
+        bg_layout.addWidget(self.btn_capture_bg)
+
+        content_layout.addWidget(self.bg_required_frame)
+
+        # =====================================================================
         # Group 1: Face Shape (기존 유지)
         # =====================================================================
         face_group = QGroupBox("얼굴 윤곽 (Face Shape)")
@@ -159,6 +208,7 @@ class BeautyPanel(QWidget):
         f_inner.addWidget(self.slider_head)
 
         face_group.setLayout(f_inner)
+        self.face_group = face_group  # [V5.0] 참조 저장
         content_layout.addWidget(face_group)
 
         # =====================================================================
@@ -187,6 +237,7 @@ class BeautyPanel(QWidget):
         b_inner.addWidget(self.slider_ribcage)
 
         body_group.setLayout(b_inner)
+        self.body_group = body_group  # [V5.0] 참조 저장
         content_layout.addWidget(body_group)
 
         # =====================================================================
@@ -247,6 +298,9 @@ class BeautyPanel(QWidget):
         main_layout.addWidget(scroll)
 
         self.setLayout(main_layout)
+
+        # [V5.0] 초기 상태: 배경 없음 → 워핑 비활성화
+        self.set_background_status(False)
 
     # =========================================================================
     # Parameter Update Methods
@@ -349,3 +403,34 @@ class BeautyPanel(QWidget):
     def get_current_params(self):
         """Return current parameter dictionary"""
         return self.current_params.copy()
+
+    def set_background_status(self, has_bg: bool):
+        """
+        [V5.0] 배경 상태에 따라 UI 활성화/비활성화
+
+        Args:
+            has_bg: True면 배경 있음 (워핑 활성화), False면 없음 (비활성화)
+        """
+        self.has_background = has_bg
+
+        # 안내 영역 표시/숨김
+        self.bg_required_frame.setVisible(not has_bg)
+
+        # 워핑 관련 그룹 활성화/비활성화
+        self.face_group.setEnabled(has_bg)
+        self.body_group.setEnabled(has_bg)
+
+        # 비활성화 시 슬라이더 값 0으로 리셋
+        if not has_bg:
+            self.slider_chin.set_value(0)
+            self.slider_eye.set_value(0)
+            self.slider_nose.set_value(0)
+            self.slider_waist.set_value(0)
+            self.slider_hip.set_value(0)
+            self.slider_shoulder.set_value(0)
+            self.slider_ribcage.set_value(0)
+            self.current_params.update({
+                'face_v': 0, 'eye_scale': 0, 'nose_slim': 0,
+                'head_scale': 0, 'waist_slim': 0, 'hip_widen': 0,
+                'shoulder_narrow': 0, 'ribcage_slim': 0
+            })

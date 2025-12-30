@@ -2,6 +2,8 @@
 # Created for Mode A (Visual Supremacy)
 # (C) 2025 MUSE Corp. All rights reserved.
 
+import os
+
 from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QDockWidget, QLabel
 from PySide6.QtCore import Qt, Signal
 
@@ -56,15 +58,30 @@ class MainWindow(QMainWindow):
         Worker(로직) -> Signal -> UI(메인쓰레드)
         UI(조작) -> Signal -> Worker(로직)
         """
+        # [V5.0] 엔진 시작 전에 배경 존재 여부 먼저 확인 (깜빡임 방지)
+        bg_path = os.path.join(
+            worker.root_dir, "recorded_data", "personal_data",
+            worker.current_profile_name, "background.jpg"
+        )
+        has_bg = os.path.exists(bg_path)
+        self.beauty_panel.set_background_status(has_bg)
+        print(f"[INIT] Background pre-check: {has_bg} ({bg_path})")
+
         # 1. 영상 수신: Worker가 프레임을 보내면 Viewport에 그림
         worker.frame_processed.connect(self.viewport.update_image)
 
         # 2. 파라미터 송신: UI 슬라이더가 변하면 Worker에 전달
         self.beauty_panel.paramChanged.connect(worker.update_params)
-        
+
         # 3. [New] 배경 리셋 신호 연결
         self.request_bg_reset.connect(worker.reset_background)
-        
+
+        # 4. [V5.0] 배경 상태 시그널 연결
+        worker.bgStatusChanged.connect(self.beauty_panel.set_background_status)
+
+        # 5. [V5.0] 배경 캡처 버튼 -> Worker 배경 리셋
+        self.beauty_panel.bgCaptureRequested.connect(worker.reset_background)
+
         print("[LINK] [MainWindow] UI와 Worker 스레드 연결 완료")
 
     def keyPressEvent(self, event):
