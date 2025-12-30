@@ -182,7 +182,7 @@ class BeautyWorker(QThread):
             t_ai_end = time.perf_counter()
             
             if alpha_matte is not None:
-                self.bg_manager.update(frame_gpu, alpha_matte)
+                self.bg_manager.update(frame_gpu, alpha_matte, faces=faces, keypoints=keypoints)
             else:
                 self.bg_manager.reset(frame_gpu)
 

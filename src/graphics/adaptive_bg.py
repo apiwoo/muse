@@ -1,5 +1,5 @@
 # Project MUSE - adaptive_bg.py
-# V5.2: MODNet-Based Background Update with Temporal + Spatial Verification
+# V6: MODNet + FaceMesh + ViTPose + 배경유사도 4중 검증 배경 업데이트
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import cupy as cp
@@ -14,6 +14,7 @@ class AdaptiveBackground:
         self.w = width
         self.h = height
         self.bg_buffer = None  # Float32
+        self.last_frame = None  # [V6] 마지막 프레임 저장 (검은화면 방지용)
 
         self.is_static_loaded = False
 
@@ -27,6 +28,24 @@ class AdaptiveBackground:
         self.TEMPORAL_THRESHOLD = 15  # 15프레임 연속 배경이어야 업데이트 (0.5초)
         self.ALPHA_THRESHOLD = 0.005  # alpha < 0.005 = 확실한 배경
         self.SPATIAL_SIZE = 7         # 7x7 이웃 검사
+
+        # [V6] 랜드마크 기반 사람 판단 설정
+        self.LANDMARK_RADIUS_FACE = 15   # FaceMesh 포인트 주변 반경 (픽셀)
+        self.LANDMARK_RADIUS_BODY = 40   # ViTPose 포인트 주변 반경 (픽셀)
+        self.BODY_CONF_THRESHOLD = 0.3   # ViTPose 신뢰도 임계값
+
+        # FaceMesh FACE_OVAL 인덱스 (36개 포인트로 얼굴 외곽 정의)
+        self.FACE_OVAL_INDICES = [
+            10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+            397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+            172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+        ]
+
+        # [V6] 배경 유사도 검사 설정
+        self.BG_SIMILARITY_THRESHOLD = 25.0  # 픽셀당 색상 차이 허용치 (0~255 스케일)
+        # 값이 작을수록 엄격 (배경 업데이트 어려움)
+        # 값이 클수록 느슨 (배경 업데이트 쉬움)
+        # 권장: 20~30 (조명 변화 허용하면서 사람/물체 구분)
 
     def load_static_background(self, bg_source):
         frame_bgr = None
@@ -57,25 +76,129 @@ class AdaptiveBackground:
 
     def reset(self, frame_gpu):
         if frame_gpu is None: return
+
+        # [V6] 항상 마지막 프레임 저장 (검은화면 방지)
+        self.last_frame = frame_gpu.astype(cp.float32)
+
         # 정적 배경이 로드되어 있다면 리셋하지 않음 (보호)
         if self.is_static_loaded: return
-        
+
         self.bg_buffer = frame_gpu.astype(cp.float32)
         print("[BG] Background Buffer Reset (Initialized with Live Frame)")
 
-    def update(self, frame_gpu, person_alpha):
+    def _generate_landmark_mask(self, h, w, faces, keypoints):
         """
-        [V5.2] MODNet 기반 배경 업데이트 (Temporal + Spatial 검증)
+        [V6] FaceMesh/ViTPose 좌표 기반 사람 영역 마스크 생성
 
-        원칙:
-        1. 공간 검증: 7x7 이웃 중 최대 alpha가 임계값 미만이어야 함
-        2. 시간 검증: N프레임 연속으로 배경이어야 업데이트
-        3. 1프레임이라도 사람이면 카운터 리셋
+        원칙: 랜드마크가 검출된 좌표 주변은 반드시 사람 영역
+        - FaceMesh: 얼굴 영역 보호
+        - ViTPose: 신체 영역 보호
+
+        Returns:
+            CuPy array (h, w), 값 0.0(배경) 또는 1.0(사람)
+        """
+        # CPU에서 마스크 생성 (OpenCV 사용)
+        mask_cpu = np.zeros((h, w), dtype=np.float32)
+
+        # 1. FaceMesh 처리
+        if faces is not None and len(faces) > 0:
+            for face in faces:
+                if not hasattr(face, 'landmarks'):
+                    continue
+                landmarks = face.landmarks  # (478, 2)
+
+                # 1-1. 각 랜드마크 주변 원형 영역
+                for pt in landmarks:
+                    x, y = int(pt[0]), int(pt[1])
+                    if 0 <= x < w and 0 <= y < h:
+                        cv2.circle(mask_cpu, (x, y), self.LANDMARK_RADIUS_FACE, 1.0, -1)
+
+                # 1-2. FACE_OVAL로 얼굴 전체 영역 채우기
+                if len(landmarks) >= 468:  # 전체 랜드마크가 있는 경우만
+                    oval_pts = landmarks[self.FACE_OVAL_INDICES].astype(np.int32)
+                    cv2.fillConvexPoly(mask_cpu, oval_pts, 1.0)
+
+        # 2. ViTPose 처리
+        if keypoints is not None and len(keypoints) >= 13:
+            # 2-1. 각 키포인트 주변 원형 영역
+            for kp in keypoints:
+                x, y, conf = kp[0], kp[1], kp[2]
+                if conf > self.BODY_CONF_THRESHOLD:
+                    ix, iy = int(x), int(y)
+                    if 0 <= ix < w and 0 <= iy < h:
+                        cv2.circle(mask_cpu, (ix, iy), self.LANDMARK_RADIUS_BODY, 1.0, -1)
+
+            # 2-2. 몸통 영역 (어깨-골반) convex hull로 채우기
+            # COCO 인덱스: 5=L_Shoulder, 6=R_Shoulder, 11=L_Hip, 12=R_Hip
+            torso_indices = [5, 6, 12, 11]  # 시계방향 순서
+            torso_pts = []
+            for idx in torso_indices:
+                if idx < len(keypoints) and keypoints[idx][2] > self.BODY_CONF_THRESHOLD:
+                    torso_pts.append([int(keypoints[idx][0]), int(keypoints[idx][1])])
+
+            if len(torso_pts) >= 3:  # 최소 3점 이상이어야 폴리곤 가능
+                torso_pts = np.array(torso_pts, dtype=np.int32)
+                cv2.fillConvexPoly(mask_cpu, torso_pts, 1.0)
+
+        # GPU로 업로드
+        return cp.asarray(mask_cpu)
+
+    def _compute_bg_similarity_mask(self, frame_gpu):
+        """
+        [V6] 배경 유사도 기반 마스크 생성
+
+        원칙: 기존 배경과 현재 프레임이 다르면 무언가 있다는 의미
+        - 유사함 (차이 < 임계값): 배경 업데이트 허용
+        - 다름 (차이 >= 임계값): 배경 업데이트 불허
+
+        Args:
+            frame_gpu: 현재 프레임 (CuPy, uint8 또는 float32)
+
+        Returns:
+            CuPy array (h, w), True=유사(배경), False=다름(사람/물체)
+        """
+        if self.bg_buffer is None:
+            # 배경 버퍼가 없으면 모두 유사하다고 판단 (업데이트 허용)
+            h, w = frame_gpu.shape[:2]
+            return cp.ones((h, w), dtype=cp.bool_)
+
+        # 현재 프레임을 float32로 변환
+        current_float = frame_gpu.astype(cp.float32)
+
+        # 픽셀별 색상 차이 계산 (L1 거리, 채널 평균)
+        # bg_buffer는 이미 float32
+        diff = cp.abs(current_float - self.bg_buffer)  # (H, W, 3)
+        diff_mean = cp.mean(diff, axis=2)  # (H, W) 채널 평균
+
+        # 유사도 판정: 차이가 임계값 미만이면 유사
+        is_similar = (diff_mean < self.BG_SIMILARITY_THRESHOLD)
+
+        return is_similar
+
+    def update(self, frame_gpu, person_alpha, faces=None, keypoints=None):
+        """
+        [V6] 배경 업데이트 (4중 검증)
+
+        검증 1: MODNet - person_alpha가 임계값 미만
+        검증 2: FaceMesh - 얼굴 랜드마크 주변 아님
+        검증 3: ViTPose - 신체 키포인트 주변 아님
+        검증 4: 배경유사도 - 기존 배경과 색상이 유사함
+
+        4가지 모두 통과해야 배경 업데이트 허용
+
+        Args:
+            frame_gpu: 현재 프레임 (CuPy)
+            person_alpha: MODNet 사람 마스크 (CuPy, 0.0~1.0)
+            faces: FaceMesh 결과 리스트 (각 요소는 .landmarks 속성)
+            keypoints: ViTPose 결과 (17, 3) [x, y, conf]
         """
         if self.bg_buffer is None or frame_gpu is None:
             if frame_gpu is not None:
                 self.reset(frame_gpu)
             return
+
+        # [V6] 항상 마지막 프레임 저장 (검은화면 방지)
+        self.last_frame = frame_gpu.astype(cp.float32)
 
         # Static 배경이 없으면 업데이트 안 함
         if not self.is_static_loaded:
@@ -92,17 +215,33 @@ class AdaptiveBackground:
         if alpha_2d.ndim == 3:
             alpha_2d = alpha_2d.squeeze()
 
+        # ================================================================
+        # [검증 1] MODNet 기반 배경 판정
+        # ================================================================
         # 3. 공간 검증: 7x7 이웃 중 최대 alpha 계산
-        # 주변에 사람이 있으면 업데이트 안 함 (잔상 방지)
         neighbor_max_alpha = cupyx.scipy.ndimage.maximum_filter(
             alpha_2d, size=self.SPATIAL_SIZE
         )
+        is_bg_by_modnet = (neighbor_max_alpha < self.ALPHA_THRESHOLD)
 
-        # 4. 배경 영역 판정 (공간 + alpha 임계값)
-        # 본인 픽셀 AND 주변 7x7 모두 배경이어야 함
-        is_bg_now = (neighbor_max_alpha < self.ALPHA_THRESHOLD)
+        # ================================================================
+        # [검증 2+3] 랜드마크 기반 사람 영역 판정
+        # ================================================================
+        landmark_mask = self._generate_landmark_mask(h, w, faces, keypoints)
+        is_person_by_landmark = (landmark_mask > 0.5)
+        is_bg_by_landmark = ~is_person_by_landmark
 
-        # 5. temporal_counter 업데이트
+        # ================================================================
+        # [검증 4] 배경 유사도 기반 판정
+        # ================================================================
+        is_similar_to_bg = self._compute_bg_similarity_mask(frame_gpu)
+
+        # ================================================================
+        # [최종 판정] 4중 검증 AND 연산
+        # ================================================================
+        is_bg_now = is_bg_by_modnet & is_bg_by_landmark & is_similar_to_bg
+
+        # 7. temporal_counter 업데이트
         # 배경인 픽셀: counter += 1 (최대 255)
         # 사람인 픽셀: counter = 0 (즉시 리셋)
         self.temporal_counter = cp.where(
@@ -111,15 +250,15 @@ class AdaptiveBackground:
             cp.uint8(0)
         )
 
-        # 6. N프레임 연속 배경인 픽셀만 업데이트
+        # 8. N프레임 연속 배경인 픽셀만 업데이트
         is_safe_to_update = (self.temporal_counter >= self.TEMPORAL_THRESHOLD)
         update_mask = is_safe_to_update[..., None]  # (H, W, 1)
 
-        # 7. 배경 업데이트 (안전한 영역만)
+        # 9. 배경 업데이트 (안전한 영역만)
         current_float = frame_gpu.astype(cp.float32)
         self.bg_buffer = cp.where(update_mask, current_float, self.bg_buffer)
 
-        # 8. 주기적 파일 저장
+        # 10. 주기적 파일 저장
         if self.bg_file_path:
             self.update_counter += 1
             if self.update_counter >= self.file_save_interval:
@@ -159,5 +298,8 @@ class AdaptiveBackground:
 
     def get_background(self):
         if self.bg_buffer is None:
+            # [V6] 마지막 프레임으로 fallback (검은화면 방지)
+            if self.last_frame is not None:
+                return self.last_frame.astype(cp.uint8)
             return cp.zeros((self.h, self.w, 3), dtype=cp.uint8)
         return self.bg_buffer.astype(cp.uint8)
