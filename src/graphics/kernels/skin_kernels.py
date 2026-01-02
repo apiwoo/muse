@@ -262,7 +262,7 @@ void dual_pass_smooth_kernel(
 
 
 # ==============================================================================
-# [KERNEL 32] Teeth Whitening (LAB Color Space)
+# [KERNEL 32] Teeth Whitening (V4: Simplified Brightness-Based)
 # ==============================================================================
 TEETH_WHITEN_KERNEL_CODE = r'''
 extern "C" __global__
@@ -281,10 +281,10 @@ void teeth_whiten_kernel(
     int idx = y * width + x;
     int idx3 = idx * 3;
 
-    // Mask value (0.0-1.0)
+    // 마스크 값
     float mask_val = (float)mask[idx] / 255.0f;
 
-    // Skip if mask is too low
+    // 마스크 외부는 원본 복사
     if (mask_val < 0.01f) {
         dst[idx3 + 0] = src[idx3 + 0];
         dst[idx3 + 1] = src[idx3 + 1];
@@ -292,50 +292,40 @@ void teeth_whiten_kernel(
         return;
     }
 
-    // Read BGR values
+    // 원본 BGR 읽기
     float b = (float)src[idx3 + 0];
     float g = (float)src[idx3 + 1];
     float r = (float)src[idx3 + 2];
 
-    // Convert BGR to YCbCr (approximate LAB)
-    // Y = luminance, Cb = blue-yellow, Cr = red-green
+    // 밝기 계산
     float Y = 0.299f * r + 0.587f * g + 0.114f * b;
-    float Cb = 128.0f + 0.5f * b - 0.169f * r - 0.331f * g;
-    float Cr = 128.0f + 0.5f * r - 0.419f * g - 0.081f * b;
 
-    // Teeth detection conditions:
-    // 1. Y >= 100 (bright pixels only - exclude tongue/dark areas)
-    // 2. Cr < 140 (exclude red lips)
-    if (Y < 100.0f || Cr >= 140.0f) {
-        dst[idx3 + 0] = src[idx3 + 0];
-        dst[idx3 + 1] = src[idx3 + 1];
-        dst[idx3 + 2] = src[idx3 + 2];
-        return;
-    }
+    // 밝기 기반 가중치 (밝을수록 강하게)
+    // 80 이하: 효과 없음 (입 안 어두운 부분)
+    // 80~200: 점진적 증가
+    // 200 이상: 최대 효과
+    float bright_factor = (Y - 80.0f) / 120.0f;
+    bright_factor = fmaxf(0.0f, fminf(1.0f, bright_factor));
 
-    // Whitening operations:
-    // 1. Increase luminance (Y)
-    float Y_new = Y + (255.0f - Y) * strength * 0.4f;
+    // 최종 블렌딩 강도
+    float blend = strength * mask_val * bright_factor;
 
-    // 2. Reduce yellow tint (Cb towards 128)
-    float Cb_new = 128.0f + (Cb - 128.0f) * (1.0f - strength * 0.7f);
+    // 단순 화이트닝: 밝기 증가 + 노란기 감소
+    float boost = blend * 40.0f;
+    float yellow_fix = blend * 25.0f;
 
-    // 3. Slightly reduce red tint (Cr towards 128)
-    float Cr_new = 128.0f + (Cr - 128.0f) * (1.0f - strength * 0.3f);
+    float r_new = r + boost;
+    float g_new = g + boost;
+    float b_new = b + boost + yellow_fix;
 
-    // Convert YCbCr back to BGR
-    float r_new = Y_new + 1.402f * (Cr_new - 128.0f);
-    float g_new = Y_new - 0.344f * (Cb_new - 128.0f) - 0.714f * (Cr_new - 128.0f);
-    float b_new = Y_new + 1.772f * (Cb_new - 128.0f);
+    // 클램핑
+    r_new = fminf(255.0f, r_new);
+    g_new = fminf(255.0f, g_new);
+    b_new = fminf(255.0f, b_new);
 
-    // Blend with original based on mask
-    float final_b = b * (1.0f - mask_val) + b_new * mask_val;
-    float final_g = g * (1.0f - mask_val) + g_new * mask_val;
-    float final_r = r * (1.0f - mask_val) + r_new * mask_val;
-
-    // Clamp and store
-    dst[idx3 + 0] = (unsigned char)fminf(fmaxf(final_b, 0.0f), 255.0f);
-    dst[idx3 + 1] = (unsigned char)fminf(fmaxf(final_g, 0.0f), 255.0f);
-    dst[idx3 + 2] = (unsigned char)fminf(fmaxf(final_r, 0.0f), 255.0f);
+    // 저장
+    dst[idx3 + 0] = (unsigned char)b_new;
+    dst[idx3 + 1] = (unsigned char)g_new;
+    dst[idx3 + 2] = (unsigned char)r_new;
 }
 '''

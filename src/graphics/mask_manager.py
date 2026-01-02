@@ -297,11 +297,10 @@ class MaskManager:
 
     def generate_teeth_mask(self, landmarks, w, h):
         """
-        [치아 미백] 입술 안쪽 폴리곤 기반 치아 영역 마스크 생성
+        [치아 미백] 입술 안쪽 폴리곤 기반 치아 영역 마스크 생성 (0.7배 축소)
 
-        LIPS_INNER_POLY는 입이 벌어졌을 때 치아가 보이는 영역과 일치.
-        이 마스크는 CUDA 커널에서 밝기/색상 조건과 함께 사용되어
-        입술(붉은색)과 혀(어두움)를 자동 제외함.
+        LIPS_INNER_POLY를 0.7배 축소하여 입술 테두리가 확실히 제외되도록 함.
+        입술 안쪽 중앙 부분만 마스크에 포함됨.
 
         Args:
             landmarks: Face landmarks array (numpy)
@@ -320,14 +319,27 @@ class MaskManager:
         # 빈 마스크 생성
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # 입술 안쪽 폴리곤 좌표 추출
-        pts = landmarks[self.LIPS_INNER_INDICES].astype(np.int32)
+        # 입술 안쪽 폴리곤 좌표 추출 (float로 변환)
+        pts = landmarks[self.LIPS_INNER_INDICES].astype(np.float32)
+
+        # 폴리곤 중심점 계산
+        center = np.mean(pts, axis=0)
+
+        # 중심점 기준 0.7배 축소 (입술 테두리 확실히 제외)
+        shrunk_pts = center + (pts - center) * 0.7
+
+        # 이미지 경계 클램핑
+        shrunk_pts[:, 0] = np.clip(shrunk_pts[:, 0], 0, w - 1)
+        shrunk_pts[:, 1] = np.clip(shrunk_pts[:, 1], 0, h - 1)
+
+        # int32로 변환
+        shrunk_pts = shrunk_pts.astype(np.int32)
 
         # 폴리곤 채우기
-        cv2.fillPoly(mask, [pts], 255)
+        cv2.fillPoly(mask, [shrunk_pts], 255)
 
-        # 경계 부드럽게 (가우시안 블러)
-        mask = cv2.GaussianBlur(mask, (7, 7), 3)
+        # 경계 부드럽게 (약한 가우시안 블러)
+        mask = cv2.GaussianBlur(mask, (5, 5), 2)
 
         # GPU 변환
         if HAS_CUDA:
