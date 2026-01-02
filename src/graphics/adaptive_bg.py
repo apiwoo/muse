@@ -14,6 +14,7 @@ class AdaptiveBackground:
         self.w = width
         self.h = height
         self.bg_buffer = None  # Float32
+        self.original_static_bg = None  # [V8] 원본 정적 배경 (오염 방지용)
         self.last_frame = None  # [V6] 마지막 프레임 저장 (검은화면 방지용)
 
         self.is_static_loaded = False
@@ -27,7 +28,12 @@ class AdaptiveBackground:
         self.temporal_counter = None  # (H, W) 각 픽셀의 연속 배경 프레임 수
         self.TEMPORAL_THRESHOLD = 15  # 15프레임 연속 배경이어야 업데이트 (0.5초)
         self.ALPHA_THRESHOLD = 0.005  # alpha < 0.005 = 확실한 배경
-        self.SPATIAL_SIZE = 7         # 7x7 이웃 검사
+        self.SPATIAL_SIZE = 15        # [V8] 15x15 이웃 검사 (안전 마진 확대)
+
+        # [V7] Historical Person Mask 누적 시스템
+        self.HISTORY_FRAMES = 60      # 최근 60프레임 히스토리 (약 2초)
+        self.person_mask_history = None  # 순환 버퍼, shape: (HISTORY_FRAMES, H, W)
+        self.history_index = 0        # 순환 버퍼 현재 인덱스
 
         # [V6] 랜드마크 기반 사람 판단 설정
         self.LANDMARK_RADIUS_FACE = 15   # FaceMesh 포인트 주변 반경 (픽셀)
@@ -42,10 +48,14 @@ class AdaptiveBackground:
         ]
 
         # [V6] 배경 유사도 검사 설정
-        self.BG_SIMILARITY_THRESHOLD = 25.0  # 픽셀당 색상 차이 허용치 (0~255 스케일)
+        self.BG_SIMILARITY_THRESHOLD = 20.0  # [V8] 원본 기준 비교로 임계값 하향 (25→20)
         # 값이 작을수록 엄격 (배경 업데이트 어려움)
         # 값이 클수록 느슨 (배경 업데이트 쉬움)
         # 권장: 20~30 (조명 변화 허용하면서 사람/물체 구분)
+
+        # [V9] 프레임 간 움직임 감지 설정
+        self.MOTION_THRESHOLD = 5.0  # 이전 프레임과의 픽셀 차이 허용치
+        self.prev_frame_for_motion = None  # 이전 프레임 저장용
 
     def load_static_background(self, bg_source):
         frame_bgr = None
@@ -64,8 +74,13 @@ class AdaptiveBackground:
             if frame_bgr.shape[1] != self.w or frame_bgr.shape[0] != self.h:
                 frame_bgr = cv2.resize(frame_bgr, (self.w, self.h))
             self.bg_buffer = cp.asarray(frame_bgr).astype(cp.float32)
+            self.original_static_bg = self.bg_buffer.copy()  # [V8] 원본 백업
             self.is_static_loaded = True
             self.temporal_counter = None  # [V5.1] 리셋
+            self.prev_frame_for_motion = None  # [V9] 움직임 감지용 리셋
+            # [V7] 히스토리 버퍼 리셋
+            self.person_mask_history = None
+            self.history_index = 0
             print("[BG] Static Background Loaded. Real-time update enabled for BG areas.")
             return True
         return False
@@ -84,6 +99,13 @@ class AdaptiveBackground:
         if self.is_static_loaded: return
 
         self.bg_buffer = frame_gpu.astype(cp.float32)
+        # [V7] 히스토리 버퍼 리셋
+        self.person_mask_history = None
+        self.history_index = 0
+        # [V8] 원본 정적 배경 리셋
+        self.original_static_bg = None
+        # [V9] 움직임 감지용 이전 프레임 리셋
+        self.prev_frame_for_motion = None
         print("[BG] Background Buffer Reset (Initialized with Live Frame)")
 
     def _generate_landmark_mask(self, h, w, faces, keypoints):
@@ -145,11 +167,13 @@ class AdaptiveBackground:
 
     def _compute_bg_similarity_mask(self, frame_gpu):
         """
-        [V6] 배경 유사도 기반 마스크 생성
+        [V8] 배경 유사도 기반 마스크 생성 (원본 정적 배경 기준)
 
-        원칙: 기존 배경과 현재 프레임이 다르면 무언가 있다는 의미
+        원칙: 원본 정적 배경과 현재 프레임이 다르면 무언가 있다는 의미
         - 유사함 (차이 < 임계값): 배경 업데이트 허용
         - 다름 (차이 >= 임계값): 배경 업데이트 불허
+
+        [V8 변경] bg_buffer 대신 original_static_bg와 비교하여 오염 악순환 방지
 
         Args:
             frame_gpu: 현재 프레임 (CuPy, uint8 또는 float32)
@@ -157,8 +181,8 @@ class AdaptiveBackground:
         Returns:
             CuPy array (h, w), True=유사(배경), False=다름(사람/물체)
         """
-        if self.bg_buffer is None:
-            # 배경 버퍼가 없으면 모두 유사하다고 판단 (업데이트 허용)
+        if self.original_static_bg is None:
+            # 원본 정적 배경이 없으면 모두 유사하다고 판단 (업데이트 허용)
             h, w = frame_gpu.shape[:2]
             return cp.ones((h, w), dtype=cp.bool_)
 
@@ -166,14 +190,47 @@ class AdaptiveBackground:
         current_float = frame_gpu.astype(cp.float32)
 
         # 픽셀별 색상 차이 계산 (L1 거리, 채널 평균)
-        # bg_buffer는 이미 float32
-        diff = cp.abs(current_float - self.bg_buffer)  # (H, W, 3)
+        # [V8] 원본 정적 배경과 비교 (bg_buffer가 아닌 original_static_bg)
+        diff = cp.abs(current_float - self.original_static_bg)  # (H, W, 3)
         diff_mean = cp.mean(diff, axis=2)  # (H, W) 채널 평균
 
         # 유사도 판정: 차이가 임계값 미만이면 유사
         is_similar = (diff_mean < self.BG_SIMILARITY_THRESHOLD)
 
         return is_similar
+
+    def _compute_motion_mask(self, frame_gpu):
+        """
+        [V9] 프레임 간 움직임 감지 마스크 생성
+
+        원칙: 이전 프레임과 현재 프레임이 동일해야 배경 업데이트 허용
+        - 정지 상태 (차이 < 임계값): True (업데이트 허용)
+        - 움직임 있음 (차이 >= 임계값): False (업데이트 금지)
+
+        Args:
+            frame_gpu: 현재 프레임 (CuPy, uint8 또는 float32)
+
+        Returns:
+            CuPy array (h, w), True=정지(업데이트 허용), False=움직임(업데이트 금지)
+        """
+        h, w = frame_gpu.shape[:2]
+        current_float = frame_gpu.astype(cp.float32)
+
+        if self.prev_frame_for_motion is None:
+            self.prev_frame_for_motion = current_float.copy()
+            return cp.ones((h, w), dtype=cp.bool_)
+
+        # 픽셀별 색상 차이 계산 (L1 거리, 채널 평균)
+        diff = cp.abs(current_float - self.prev_frame_for_motion)
+        diff_mean = cp.mean(diff, axis=2)
+
+        # 정지 상태 판정: 차이가 임계값 미만이면 정지
+        is_static = (diff_mean < self.MOTION_THRESHOLD)
+
+        # 현재 프레임을 다음 비교를 위해 저장
+        self.prev_frame_for_motion = current_float.copy()
+
+        return is_static
 
     def update(self, frame_gpu, person_alpha, faces=None, keypoints=None):
         """
@@ -210,6 +267,11 @@ class AdaptiveBackground:
         if self.temporal_counter is None or self.temporal_counter.shape != (h, w):
             self.temporal_counter = cp.zeros((h, w), dtype=cp.uint8)
 
+        # 1-1. [V7] person_mask_history 초기화
+        if self.person_mask_history is None or self.person_mask_history.shape[1:] != (h, w):
+            self.person_mask_history = cp.zeros((self.HISTORY_FRAMES, h, w), dtype=cp.uint8)
+            self.history_index = 0
+
         # 2. 알파 마스크 2D 변환
         alpha_2d = person_alpha
         if alpha_2d.ndim == 3:
@@ -225,6 +287,20 @@ class AdaptiveBackground:
         is_bg_by_modnet = (neighbor_max_alpha < self.ALPHA_THRESHOLD)
 
         # ================================================================
+        # [V7] Historical Person Mask 누적 시스템
+        # ================================================================
+        # Step A: 현재 프레임의 사람 영역을 이진 마스크로 변환
+        # 임계값 0.1은 경계부까지 포함하기 위해 ALPHA_THRESHOLD(0.005)보다 높게 설정
+        current_person_mask = (alpha_2d >= 0.1).astype(cp.uint8)
+
+        # Step B: 순환 버퍼에 현재 마스크 저장
+        self.person_mask_history[self.history_index] = current_person_mask
+        self.history_index = (self.history_index + 1) % self.HISTORY_FRAMES
+
+        # Step C: 누적 마스크 계산 (최근 60프레임 중 한 번이라도 사람이었던 픽셀)
+        accumulated_person_mask = cp.any(self.person_mask_history, axis=0)
+
+        # ================================================================
         # [검증 2+3] 랜드마크 기반 사람 영역 판정
         # ================================================================
         landmark_mask = self._generate_landmark_mask(h, w, faces, keypoints)
@@ -237,15 +313,27 @@ class AdaptiveBackground:
         is_similar_to_bg = self._compute_bg_similarity_mask(frame_gpu)
 
         # ================================================================
-        # [최종 판정] 4중 검증 AND 연산
+        # [검증 5] 프레임 간 움직임 감지 (V9)
         # ================================================================
-        is_bg_now = is_bg_by_modnet & is_bg_by_landmark & is_similar_to_bg
+        is_static = self._compute_motion_mask(frame_gpu)
+
+        # ================================================================
+        # [최종 판정] 5중 검증 AND 연산
+        # ================================================================
+        is_bg_now = is_bg_by_modnet & is_bg_by_landmark & is_similar_to_bg & is_static
+
+        # ================================================================
+        # [V7] Historical Person Mask 조건 적용
+        # ================================================================
+        # 최근 60프레임 중 한 번이라도 사람이었던 영역은 배경 업데이트 불허
+        is_person_recently = accumulated_person_mask
+        is_truly_safe = is_bg_now & (~is_person_recently)
 
         # 7. temporal_counter 업데이트
-        # 배경인 픽셀: counter += 1 (최대 255)
-        # 사람인 픽셀: counter = 0 (즉시 리셋)
+        # 안전한 픽셀: counter += 1 (최대 255)
+        # 위험한 픽셀 (최근 사람 있었음): counter = 0 (즉시 리셋)
         self.temporal_counter = cp.where(
-            is_bg_now,
+            is_truly_safe,
             cp.minimum(self.temporal_counter + 1, 255).astype(cp.uint8),
             cp.uint8(0)
         )
