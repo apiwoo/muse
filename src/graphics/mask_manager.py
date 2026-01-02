@@ -37,6 +37,12 @@ class MaskManager:
     FACE_OVAL_INDICES = FaceMesh.FACE_INDICES.get("FACE_OVAL", [])
     FOREHEAD_INDICES = FaceMesh.FACE_INDICES.get("FOREHEAD", [])
 
+    # [V50] 이마 상단 인덱스 (FACE_OVAL 배열 내 위치)
+    # FACE_OVAL 총 36개 포인트 중 이마 상단 라인을 형성하는 9개 인덱스
+    # 0-4: 우측 이마 (10, 338, 297, 332, 284)
+    # 32-35: 좌측 이마 (54, 103, 67, 109)
+    FOREHEAD_TOP_INDICES_IN_OVAL = [0, 1, 2, 3, 4, 32, 33, 34, 35]
+
     # Exclusion zones
     EYE_L_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_L_POLY", [])
     EYE_R_INDICES = FaceMesh.POLYGON_INDICES.get("EYE_R_POLY", [])
@@ -74,8 +80,28 @@ class MaskManager:
 
         mask = self.mask_cpu
 
-        # 1. Fill face oval
-        face_pts = landmarks[self.FACE_OVAL_INDICES].astype(np.int32)
+        # 1. Fill face oval with forehead extension
+        # [V50] 이마 영역 확장 - FaceMesh 한계 보완
+        face_pts = landmarks[self.FACE_OVAL_INDICES].astype(np.float32).copy()
+
+        # 얼굴 높이 계산 (이마 상단 ~ 턱 끝)
+        forehead_pt = landmarks[10]  # 이마 중앙
+        chin_pt = landmarks[152]     # 턱 끝
+        face_height = chin_pt[1] - forehead_pt[1]
+
+        if face_height > 1:
+            # 이마 확장 비율 (얼굴 높이의 25%)
+            forehead_extension_ratio = 0.25
+            offset_y = -face_height * forehead_extension_ratio
+
+            # 이마 상단 인덱스들에만 오프셋 적용
+            for idx in self.FOREHEAD_TOP_INDICES_IN_OVAL:
+                if idx < len(face_pts):
+                    face_pts[idx, 1] += offset_y
+                    # 화면 밖으로 나가지 않도록 클리핑
+                    face_pts[idx, 1] = max(0, face_pts[idx, 1])
+
+        face_pts = face_pts.astype(np.int32)
         cv2.fillPoly(mask, [face_pts], 255)
 
         # 2-4. Exclude features only if requested (legacy mode)
