@@ -800,10 +800,11 @@ class BeautyEngine:
             )
             # 주의: hip_widen은 의도적으로 제외됨 (확장은 Void를 만들지 않음)
 
-            # [V-FINAL] 배경 합성 조건 수정
-            # - bg_stable 조건 제거 (프레임 독립 처리이므로 불필요)
+            # [V-FIX] 배경 합성 조건 복원
+            # - bg_stable 조건 복원: 정적 배경이 준비된 경우에만 void fill 활성화
+            # - 정적 배경 없이 슬리밍 시 검은색 일렁임 현상 방지
             # - is_slimming_enabled 조건 유지 (슬리밍 기능 ON일 때만 배경 합성)
-            if self.has_bg and mask is not None and is_slimming_enabled:
+            if self.has_bg and mask is not None and is_slimming_enabled and bg_stable:
                 if hasattr(mask, 'device'):
                     mask_gpu = mask
                 else:

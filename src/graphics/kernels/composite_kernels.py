@@ -170,6 +170,7 @@ void forward_mask_void_fill_kernel(
     int idx = y * width + x;
     int idx_rgb = idx * 3;
 
+    // 워핑 그리드 좌표 계산
     int sx = x / scale;
     if (sx >= small_width) sx = small_width - 1;
     int sy = y / scale;
@@ -182,6 +183,7 @@ void forward_mask_void_fill_kernel(
     int u = (int)(x + shift_x);
     int v = (int)(y + shift_y);
 
+    // 배경 미사용 시: 단순 워핑만
     if (!use_bg) {
         if (u >= 0 && u < width && v >= 0 && v < height) {
             int warped_idx_rgb = (v * width + u) * 3;
@@ -196,42 +198,63 @@ void forward_mask_void_fill_kernel(
         return;
     }
 
-    float mask_orig = (float)mask[idx] / 255.0f;
-    float mask_fwd = (float)forward_mask[idx] / 255.0f;
+    // =========================================================================
+    // [V-FINAL6] Soft Edge Blending
+    // =========================================================================
+    // 핵심: 경계 영역에서 부드러운 블렌딩으로 테두리 아티팩트 제거
+    // - LOW_THRESH(0.3) 이하: 배경/원본 100%
+    // - HIGH_THRESH(0.7) 이상: 워핑 픽셀 100%
+    // - 중간 영역: smoothstep으로 점진적 블렌딩
+    // =========================================================================
 
-    // [V48-E] 임계값 0.3 - 빠른 동작 번개 방지
-    if (mask_fwd > 0.3f) {
-        // =========================================================
-        // CASE 1: 워핑 후에도 사람 영역 → 워핑 픽셀 사용
-        // =========================================================
-        if (u >= 0 && u < width && v >= 0 && v < height) {
-            int warped_idx_rgb = (v * width + u) * 3;
-            dst[idx_rgb + 0] = src[warped_idx_rgb + 0];
-            dst[idx_rgb + 1] = src[warped_idx_rgb + 1];
-            dst[idx_rgb + 2] = src[warped_idx_rgb + 2];
-        } else {
-            dst[idx_rgb + 0] = src[idx_rgb + 0];
-            dst[idx_rgb + 1] = src[idx_rgb + 1];
-            dst[idx_rgb + 2] = src[idx_rgb + 2];
-        }
+    float fwd_val = (float)forward_mask[idx] / 255.0f;
+    float orig_val = (float)mask[idx] / 255.0f;
+
+    // Soft transition zone 파라미터
+    const float LOW_THRESH = 0.2f;   // 0.3 → 0.2 (더 부드러운 경계)
+    const float HIGH_THRESH = 0.7f;
+
+    // blend_alpha 계산 (smoothstep)
+    float t = (fwd_val - LOW_THRESH) / (HIGH_THRESH - LOW_THRESH);
+    t = fmaxf(0.0f, fminf(1.0f, t));
+    float blend_alpha = t * t * (3.0f - 2.0f * t);
+
+    // 워핑 픽셀 샘플링
+    float warped_r, warped_g, warped_b;
+    if (u >= 0 && u < width && v >= 0 && v < height) {
+        int warped_idx_rgb = (v * width + u) * 3;
+        warped_b = (float)src[warped_idx_rgb + 0];
+        warped_g = (float)src[warped_idx_rgb + 1];
+        warped_r = (float)src[warped_idx_rgb + 2];
+    } else {
+        // 범위 벗어나면 현재 위치 픽셀 사용
+        warped_b = (float)src[idx_rgb + 0];
+        warped_g = (float)src[idx_rgb + 1];
+        warped_r = (float)src[idx_rgb + 2];
     }
-    else if (mask_orig > 0.5f) {
-        // =========================================================
-        // CASE 2: Void 영역 (워핑 전 사람, 워핑 후 빔)
-        // → 배경으로 채움
-        // =========================================================
-        dst[idx_rgb + 0] = bg[idx_rgb + 0];
-        dst[idx_rgb + 1] = bg[idx_rgb + 1];
-        dst[idx_rgb + 2] = bg[idx_rgb + 2];
+
+    // 배경/원본 픽셀 결정
+    float base_r, base_g, base_b;
+    if (orig_val > 0.3f && fwd_val <= 0.5f) {
+        // Void 영역: 원래 사람이 있었지만 워핑 후 비어진 곳 -> 배경 사용
+        base_b = (float)bg[idx_rgb + 0];
+        base_g = (float)bg[idx_rgb + 1];
+        base_r = (float)bg[idx_rgb + 2];
+    } else {
+        // 원래 배경 영역 -> 원본 프레임 유지
+        base_b = (float)src[idx_rgb + 0];
+        base_g = (float)src[idx_rgb + 1];
+        base_r = (float)src[idx_rgb + 2];
     }
-    else {
-        // =========================================================
-        // CASE 3: 배경 영역 → 원본 유지
-        // =========================================================
-        dst[idx_rgb + 0] = src[idx_rgb + 0];
-        dst[idx_rgb + 1] = src[idx_rgb + 1];
-        dst[idx_rgb + 2] = src[idx_rgb + 2];
-    }
+
+    // 블렌딩 적용
+    float final_b = warped_b * blend_alpha + base_b * (1.0f - blend_alpha);
+    float final_g = warped_g * blend_alpha + base_g * (1.0f - blend_alpha);
+    float final_r = warped_r * blend_alpha + base_r * (1.0f - blend_alpha);
+
+    dst[idx_rgb + 0] = (unsigned char)fminf(fmaxf(final_b, 0.0f), 255.0f);
+    dst[idx_rgb + 1] = (unsigned char)fminf(fmaxf(final_g, 0.0f), 255.0f);
+    dst[idx_rgb + 2] = (unsigned char)fminf(fmaxf(final_r, 0.0f), 255.0f);
 }
 '''
 
