@@ -99,7 +99,8 @@ class BeautyPanel(QWidget):
 
             # 색상 조정
             'color_temperature': 0.0,   # 색온도 (-1 Cool ~ 1 Warm)
-            'color_tint': 0.0           # 틴트 (-1 Green ~ 1 Magenta)
+            'color_tint': 0.0,          # 틴트 (-1 Green ~ 1 Magenta)
+            'teeth_whiten': 0.0         # 치아 미백 (0 ~ 1)
         }
 
         # [V5.0] 배경 상태
@@ -256,6 +257,11 @@ class BeautyPanel(QWidget):
         self.slider_tone.valueChanged.connect(self._update_tone)
         s_inner.addWidget(self.slider_tone)
 
+        # Teeth Whitening Slider
+        self.slider_teeth = ModernSlider("치아 미백", 0.0)
+        self.slider_teeth.valueChanged.connect(lambda v: self._update_param('teeth_whiten', v))
+        s_inner.addWidget(self.slider_teeth)
+
         skin_group.setLayout(s_inner)
         content_layout.addWidget(skin_group)
 
@@ -339,7 +345,7 @@ class BeautyPanel(QWidget):
             self.slider_eye, self.slider_chin, self.slider_nose,
             self.slider_head, self.slider_shoulder, self.slider_ribcage,
             self.slider_waist, self.slider_hip, self.slider_skin, self.slider_tone,
-            self.slider_temp, self.slider_tint
+            self.slider_teeth, self.slider_temp, self.slider_tint
         ]
         for s in sliders:
             s.blockSignals(True)
@@ -367,6 +373,9 @@ class BeautyPanel(QWidget):
 
         if 'skin_smooth' in params:
             self.slider_skin.set_value(params['skin_smooth'])
+
+        if 'teeth_whiten' in params:
+            self.slider_teeth.set_value(params['teeth_whiten'])
 
         if 'skin_tone' in params:
             # Logic -1.0~1.0 -> UI 0.0~1.0

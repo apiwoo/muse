@@ -35,6 +35,7 @@ from graphics.kernels.cuda_kernels import (
     GUIDED_FILTER_KERNEL_CODE,
     FAST_SKIN_SMOOTH_KERNEL_CODE,
     DUAL_PASS_SMOOTH_KERNEL_CODE,
+    TEETH_WHITEN_KERNEL_CODE,
     # Utilities
     GPU_RESIZE_KERNEL_CODE,
     GPU_MASK_RESIZE_KERNEL_CODE,
@@ -201,6 +202,7 @@ class BeautyEngine:
             self.guided_filter_kernel = cp.RawKernel(GUIDED_FILTER_KERNEL_CODE, 'guided_filter_kernel')
             self.freq_separation_kernel = cp.RawKernel(FAST_SKIN_SMOOTH_KERNEL_CODE, 'fast_skin_smooth_kernel')
             self.dual_pass_smooth_kernel = cp.RawKernel(DUAL_PASS_SMOOTH_KERNEL_CODE, 'dual_pass_smooth_kernel')
+            self.teeth_whiten_kernel = cp.RawKernel(TEETH_WHITEN_KERNEL_CODE, 'teeth_whiten_kernel')
 
             # Mask processing kernels
             self.forward_warp_mask_kernel = cp.RawKernel(FORWARD_WARP_MASK_KERNEL_CODE, 'forward_warp_mask_kernel')
@@ -523,6 +525,62 @@ class BeautyEngine:
         return frame_gpu, skin_mask_gpu
 
     # ==========================================================================
+    # Teeth Whitening Processing
+    # ==========================================================================
+    def _process_teeth_whitening(self, frame_gpu, landmarks, params):
+        """
+        [치아 미백] LIPS_INNER_POLY 기반 치아 영역 화이트닝
+
+        CUDA 커널에서 LAB 색공간 변환 후:
+        - 밝기(Y) 증가: 치아를 밝게
+        - 노란기(Cb) 감소: 누런 색상 제거
+        - 붉은기(Cr) 약간 감소: 자연스러운 톤
+
+        입술(붉은색)과 혀(어두움)는 밝기/색상 조건으로 자동 제외.
+
+        Args:
+            frame_gpu: 입력 이미지 (CuPy GPU array, BGR)
+            landmarks: 얼굴 랜드마크 (numpy array)
+            params: 파라미터 딕셔너리 (teeth_whiten 포함)
+
+        Returns:
+            결과 이미지 (CuPy GPU array)
+        """
+        strength = params.get('teeth_whiten', 0.0)
+
+        # 강도가 너무 낮으면 스킵
+        if strength < 0.01:
+            return frame_gpu
+
+        h, w = frame_gpu.shape[:2]
+
+        # 치아 마스크 생성
+        teeth_mask = self.mask_manager.generate_teeth_mask(landmarks, w, h)
+
+        if teeth_mask is None:
+            return frame_gpu
+
+        # 결과 버퍼 생성
+        result_gpu = cp.empty_like(frame_gpu)
+
+        # 그리드/블록 차원 계산
+        block_dim = (16, 16)
+        grid_dim = ((w + 15) // 16, (h + 15) // 16)
+
+        # 치아 화이트닝 커널 호출
+        try:
+            self.teeth_whiten_kernel(
+                grid_dim, block_dim,
+                (frame_gpu, teeth_mask, result_gpu,
+                 cp.int32(w), cp.int32(h), cp.float32(strength))
+            )
+        except Exception as e:
+            print(f"[TEETH] Whitening kernel failed: {e}")
+            return frame_gpu
+
+        return result_gpu
+
+    # ==========================================================================
     # V45.1: Body Keypoint Validation
     # ==========================================================================
     def _are_keypoints_valid(self, kpts, indices, w, h, min_conf=0.3):
@@ -832,6 +890,12 @@ class BeautyEngine:
                 source_for_warp, skin_mask_debug = self._process_skin_yy_style(
                     synced_frame, stable_face, params
                 )
+
+                # Teeth Whitening (치아 미백)
+                if params.get('teeth_whiten', 0) > 0.01:
+                    source_for_warp = self._process_teeth_whitening(
+                        source_for_warp, stable_face, params
+                    )
 
             # ==================================================================
             # [Step 2] Morph Logic (기존 100% 유지)

@@ -18,6 +18,7 @@ __all__ = [
     'GUIDED_FILTER_KERNEL_CODE',
     'FAST_SKIN_SMOOTH_KERNEL_CODE',
     'DUAL_PASS_SMOOTH_KERNEL_CODE',
+    'TEETH_WHITEN_KERNEL_CODE',
     # Utils kernels
     'GPU_RESIZE_KERNEL_CODE',
     'GPU_MASK_RESIZE_KERNEL_CODE',
@@ -51,6 +52,7 @@ from graphics.kernels.skin_kernels import (
     GUIDED_FILTER_KERNEL_CODE,
     FAST_SKIN_SMOOTH_KERNEL_CODE,
     DUAL_PASS_SMOOTH_KERNEL_CODE,
+    TEETH_WHITEN_KERNEL_CODE,
 )
 
 # ==============================================================================

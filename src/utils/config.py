@@ -56,6 +56,7 @@ class ProfileManager:
                 # 색상 조정
                 'color_temperature': 0.0,   # 색온도: -1.0(Cool/Blue) ~ 1.0(Warm/Yellow)
                 'color_tint': 0.0,          # 틴트: -1.0(Green) ~ 1.0(Magenta)
+                'teeth_whiten': 0.0,        # 치아 미백: 0.0 ~ 1.0
             }
         }
 

@@ -49,6 +49,7 @@ class MaskManager:
     BROW_L_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_L_POLY", [])
     BROW_R_INDICES = FaceMesh.POLYGON_INDICES.get("BROW_R_POLY", [])
     LIPS_INDICES = FaceMesh.POLYGON_INDICES.get("LIPS_OUTER_POLY", [])
+    LIPS_INNER_INDICES = FaceMesh.POLYGON_INDICES.get("LIPS_INNER_POLY", [])
 
     def __init__(self):
         """Initialize mask manager with empty cache."""
@@ -292,4 +293,43 @@ class MaskManager:
         # 경계 부드럽게 (가우시안 블러)
         mask = cv2.GaussianBlur(mask, (15, 15), 0)
 
+        return mask
+
+    def generate_teeth_mask(self, landmarks, w, h):
+        """
+        [치아 미백] 입술 안쪽 폴리곤 기반 치아 영역 마스크 생성
+
+        LIPS_INNER_POLY는 입이 벌어졌을 때 치아가 보이는 영역과 일치.
+        이 마스크는 CUDA 커널에서 밝기/색상 조건과 함께 사용되어
+        입술(붉은색)과 혀(어두움)를 자동 제외함.
+
+        Args:
+            landmarks: Face landmarks array (numpy)
+            w, h: Image dimensions
+
+        Returns:
+            teeth_mask: 치아 영역 마스크 (CuPy GPU array 또는 numpy array)
+                       None if landmarks/indices unavailable
+        """
+        if landmarks is None:
+            return None
+
+        if len(self.LIPS_INNER_INDICES) == 0:
+            return None
+
+        # 빈 마스크 생성
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        # 입술 안쪽 폴리곤 좌표 추출
+        pts = landmarks[self.LIPS_INNER_INDICES].astype(np.int32)
+
+        # 폴리곤 채우기
+        cv2.fillPoly(mask, [pts], 255)
+
+        # 경계 부드럽게 (가우시안 블러)
+        mask = cv2.GaussianBlur(mask, (7, 7), 3)
+
+        # GPU 변환
+        if HAS_CUDA:
+            return cp.asarray(mask)
         return mask
