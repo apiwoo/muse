@@ -1,148 +1,248 @@
 # Project MUSE - widgets.py
 # Reusable Dialogs and Widgets
 
+import sys
+import os
 import ctypes
+
+# src 경로 추가 (titlebar, frameless_base 사용)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QWidget
 )
 from PySide6.QtCore import Qt
 
-class ProfileActionDialog(QDialog):
+from ui.titlebar import DialogTitleBar
+from ui.frameless_base import FramelessMixin
+
+class ProfileActionDialog(FramelessMixin, QDialog):
     """
     [Custom Dialog] 기존 프로파일 선택 시 작업 유형 선택
     """
     def __init__(self, profile_name, parent=None):
         super().__init__(parent)
+
+        # [Custom Titlebar] Frameless 다이얼로그 설정
+        self.setup_frameless_dialog()
+
         self.setWindowTitle("작업 유형 선택")
-        self.resize(500, 350)
+        self.resize(500, 400)
+        # [Discord Style] 색상 팔레트
         self.setStyleSheet("""
             QDialog {
-                background-color: #0A0A0A;
+                background-color: #313338;
+                font-family: 'Inter', 'Pretendard', 'Segoe UI', sans-serif;
             }
             QLabel {
-                color: white;
+                color: #dbdee1;
                 font-size: 14px;
             }
             QPushButton {
-                border-radius: 12px;
-                padding: 16px;
+                border-radius: 4px;
+                padding: 14px;
                 font-weight: 600;
-                font-size: 15px;
+                font-size: 14px;
                 border: none;
             }
         """)
-        
-        # Win32 Dark Mode for Dialog
-        self._apply_dark_title_bar()
-        
-        layout = QVBoxLayout(self)
-        layout.setSpacing(15)
-        layout.setContentsMargins(30, 30, 30, 30)
-        
+
+        # [Custom Titlebar] 전체 컨테이너
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # 1. 커스텀 타이틀바
+        self.titlebar = DialogTitleBar(self, title="작업 유형 선택")
+        outer_layout.addWidget(self.titlebar)
+
+        # 2. 컨텐츠 영역
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #1e1f22;")
+        layout = QVBoxLayout(content_widget)
+        layout.setSpacing(12)
+        layout.setContentsMargins(24, 24, 24, 24)
+
         # 안내 문구
-        lbl_title = QLabel(f"프로파일 [{profile_name}]")
+        lbl_title = QLabel(f"프로파일: {profile_name}")
         lbl_title.setAlignment(Qt.AlignCenter)
-        lbl_title.setStyleSheet("font-size: 20px; font-weight: 600; color: #00D4DB; margin-bottom: 8px; letter-spacing: 0.5px;")
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: 600; color: #dbdee1; margin-bottom: 4px;")
         layout.addWidget(lbl_title)
-        
+
         lbl_desc = QLabel("어떤 작업을 진행하시겠습니까?")
         lbl_desc.setAlignment(Qt.AlignCenter)
-        lbl_desc.setStyleSheet("color: rgba(255, 255, 255, 0.5); margin-bottom: 24px;")
+        lbl_desc.setStyleSheet("color: #949ba4; margin-bottom: 16px; font-size: 13px;")
         layout.addWidget(lbl_desc)
-        
-        # 버튼 1: Append
-        self.btn_append = QPushButton("이어서 학습 (Append)\n[데이터 추가 + 유지]")
+
+        # 버튼 1: Append (Discord Blue)
+        self.btn_append = QPushButton("이어서 학습 (Append)\n데이터 추가 + 유지")
         self.btn_append.setCursor(Qt.PointingHandCursor)
-        self.btn_append.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2196F3, stop:1 #42A5F5); color: white;")
-        
-        # 버튼 2: Reset
-        self.btn_reset = QPushButton("처음부터 다시 (Reset)\n[기존 데이터 삭제]")
+        self.btn_append.setStyleSheet("""
+            QPushButton {
+                background-color: #5865f2;
+                border: 1px solid #6875f5;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #4752c4;
+            }
+        """)
+
+        # 버튼 2: Reset (Discord Red)
+        self.btn_reset = QPushButton("처음부터 다시 (Reset)\n기존 데이터 삭제")
         self.btn_reset.setCursor(Qt.PointingHandCursor)
-        self.btn_reset.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E53935, stop:1 #F44336); color: white;")
-        
+        self.btn_reset.setStyleSheet("""
+            QPushButton {
+                background-color: #da373c;
+                border: 1px solid #e5484d;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #c62f33;
+            }
+        """)
+
         # 버튼 3: Cancel
         self.btn_cancel = QPushButton("취소")
         self.btn_cancel.setCursor(Qt.PointingHandCursor)
-        self.btn_cancel.setStyleSheet("background-color: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.6);")
-        
+        self.btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: #4e5058;
+                border: 1px solid #5c5f66;
+                color: #ffffff;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #5c5f66;
+            }
+        """)
+
         layout.addWidget(self.btn_append)
         layout.addWidget(self.btn_reset)
-        layout.addSpacing(10)
+        layout.addSpacing(8)
         layout.addWidget(self.btn_cancel)
-        
+
         self.btn_append.clicked.connect(lambda: self.done(1))
         self.btn_reset.clicked.connect(lambda: self.done(2))
         self.btn_cancel.clicked.connect(lambda: self.done(0))
 
-    def _apply_dark_title_bar(self):
-        """다이얼로그에도 다크바 적용"""
-        try:
-            hwnd = int(self.winId())
-            # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)
-        except: pass
+        # [Custom Titlebar] 컨텐츠 영역을 외부 레이아웃에 추가
+        outer_layout.addWidget(content_widget, stretch=1)
 
-class NewProfileDialog(QDialog):
+    # [Legacy] 아래 메서드는 커스텀 타이틀바로 대체됨 (참고용으로 주석 처리)
+    # def _apply_dark_title_bar(self):
+    #     """다이얼로그에도 다크바 적용"""
+    #     try:
+    #         hwnd = int(self.winId())
+    #         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)
+    #     except: pass
+
+
+class NewProfileDialog(FramelessMixin, QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # [Custom Titlebar] Frameless 다이얼로그 설정
+        self.setup_frameless_dialog()
+
         self.setWindowTitle("새 프로파일")
-        self.resize(400, 180)
+        self.resize(400, 220)
+        # [Discord Style] 색상 팔레트
         self.setStyleSheet("""
             QDialog {
-                background-color: #0A0A0A;
+                background-color: #313338;
+                font-family: 'Inter', 'Pretendard', 'Segoe UI', sans-serif;
             }
             QLabel {
-                color: white;
-                font-size: 14px;
+                color: #949ba4;
+                font-size: 13px;
             }
             QLineEdit {
-                padding: 12px;
-                border-radius: 10px;
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                background: rgba(255, 255, 255, 0.04);
-                color: white;
+                padding: 10px;
+                border-radius: 4px;
+                border: none;
+                background: #383a40;
+                color: #dbdee1;
                 font-size: 14px;
             }
             QLineEdit:focus {
-                border: 1px solid #00D4DB;
+                outline: 2px solid #5865f2;
             }
             QPushButton {
-                padding: 12px;
-                border-radius: 10px;
+                padding: 10px;
+                border-radius: 4px;
                 font-weight: 600;
+                border: none;
             }
         """)
-        
-        # Win32 Dark Mode
-        self._apply_dark_title_bar()
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(15)
-        
+
+        # [Custom Titlebar] 전체 컨테이너
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # 1. 커스텀 타이틀바
+        self.titlebar = DialogTitleBar(self, title="새 프로파일")
+        outer_layout.addWidget(self.titlebar)
+
+        # 2. 컨텐츠 영역
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: #1e1f22;")
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
         layout.addWidget(QLabel("새 프로파일 이름 입력 (예: side_cam)"))
-        
+
         self.input_name = QLineEdit()
         layout.addWidget(self.input_name)
-        
+
         btn_box = QHBoxLayout()
+        btn_box.setSpacing(8)
+
         btn_ok = QPushButton("확인")
-        btn_ok.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00D4DB, stop:1 #7B61FF); color: white; border: none;")
+        btn_ok.setStyleSheet("""
+            QPushButton {
+                background-color: #5865f2;
+                border: 1px solid #6875f5;
+                color: white;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #4752c4;
+            }
+        """)
         btn_ok.clicked.connect(self.accept)
-        
+
         btn_cancel = QPushButton("취소")
-        btn_cancel.setStyleSheet("background-color: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.6); border: none;")
+        btn_cancel.setStyleSheet("""
+            QPushButton {
+                background-color: #4e5058;
+                border: 1px solid #5c5f66;
+                color: #ffffff;
+                border-radius: 6px;
+            }
+            QPushButton:hover {
+                background-color: #5c5f66;
+            }
+        """)
         btn_cancel.clicked.connect(self.reject)
-        
+
         btn_box.addWidget(btn_ok)
         btn_box.addWidget(btn_cancel)
         layout.addLayout(btn_box)
 
+        # [Custom Titlebar] 컨텐츠 영역을 외부 레이아웃에 추가
+        outer_layout.addWidget(content_widget, stretch=1)
+
     def get_name(self):
         return self.input_name.text().strip()
 
-    def _apply_dark_title_bar(self):
-        try:
-            hwnd = int(self.winId())
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)
-        except: pass
+    # [Legacy] 아래 메서드는 커스텀 타이틀바로 대체됨 (참고용으로 주석 처리)
+    # def _apply_dark_title_bar(self):
+    #     try:
+    #         hwnd = int(self.winId())
+    #         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)
+    #     except: pass

@@ -9,7 +9,11 @@
       "Bash(git push:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\n[V-FINAL5] 순방향 마스크 기반 Void 판정\n\n- forward_mask: 마스크를 순방향 워핑한 결과 \\(워핑 후 사람 위치\\)\n- mask_orig: 워핑 전 사람 위치\n- Void = mask_orig > 0.5 AND forward_mask <= 0.5\n\n조건 분기:\n- forward_mask > 0.5 → 워핑 픽셀 사용 \\(사람\\)\n- forward_mask <= 0.5 AND mask_orig > 0.5 → 배경 \\(Void\\)\n- 둘 다 배경 → 원본 유지\n\n기존 mask[u,v] 판정의 한계 극복 → 정확한 Void 경계\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git commit:*)",
-      "Bash(git restore:*)"
+      "Bash(git restore:*)",
+      "Bash(timeout /t 5 /nobreak)",
+      "Bash(ping:*)",
+      "Bash(del \"c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\src\\\\ui\\\\home_menu.py\")",
+      "Bash(del \"c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\nul\")"
     ]
   }
 }

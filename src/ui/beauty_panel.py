@@ -39,13 +39,15 @@ class BeautyPanel(QWidget):
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 16px;
-                padding: 0 8px;
+                left: 14px;
+                padding: 2px 10px;
                 color: #00D4DB;
-                font-size: 10px;
+                font-size: 11px;
                 font-weight: 600;
-                letter-spacing: 1.5px;
+                letter-spacing: 1px;
                 text-transform: uppercase;
+                background: #0A0A0A;
+                border-radius: 4px;
             }
             QCheckBox {
                 color: rgba(255, 255, 255, 0.6);
@@ -71,16 +73,20 @@ class BeautyPanel(QWidget):
             }
             QScrollBar:vertical {
                 border: none;
-                background: transparent;
-                width: 6px;
-                margin: 0;
+                background: rgba(255, 255, 255, 0.06);
+                width: 10px;
+                margin: 4px 2px 4px 0;
+                border-radius: 5px;
             }
             QScrollBar::handle:vertical {
-                background: rgba(255, 255, 255, 0.08);
-                min-height: 30px;
-                border-radius: 3px;
+                background: rgba(0, 212, 219, 0.4);
+                min-height: 40px;
+                border-radius: 5px;
             }
             QScrollBar::handle:vertical:hover {
+                background: rgba(0, 212, 219, 0.7);
+            }
+            QScrollBar::handle:vertical:pressed {
                 background: #00D4DB;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -88,7 +94,9 @@ class BeautyPanel(QWidget):
             }
         """)
 
-        self.setFixedWidth(360)
+        # [UI 개선] 유연한 너비로 변경 - DPI/폰트 변화 대응
+        self.setMinimumWidth(300)
+        self.setMaximumWidth(380)
 
         # Parameters
         self.current_params = {
@@ -119,19 +127,20 @@ class BeautyPanel(QWidget):
         main_layout.setSpacing(0)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 1. Header Area
+        # 1. Header Area (간소화된 버전)
         header = QFrame()
-        header.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #151515, stop:1 #0A0A0A); padding: 28px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.04);")
-        h_layout = QVBoxLayout(header)
+        header.setStyleSheet("background: #101010; padding: 12px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.06);")
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.title_label = QLabel("MUSE 뷰티 엔진")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 3px; color: #FFFFFF; text-transform: uppercase;")
-        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label = QLabel("MUSE")
+        self.title_label.setStyleSheet("font-size: 12px; font-weight: 700; letter-spacing: 2px; color: #00D4DB;")
+
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("color: rgba(255, 255, 255, 0.4); font-size: 11px; font-weight: 400;")
+
         h_layout.addWidget(self.title_label)
-
-        self.info_label = QLabel("V25.0 High-Precision Mode")
-        self.info_label.setStyleSheet("color: #00D4DB; font-size: 11px; font-weight: 500; letter-spacing: 0.5px;")
-        self.info_label.setAlignment(Qt.AlignCenter)
+        h_layout.addStretch()
         h_layout.addWidget(self.info_label)
 
         main_layout.addWidget(header)
@@ -139,6 +148,10 @@ class BeautyPanel(QWidget):
         # 2. Scroll Area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        # [UI 개선] 마우스 휠 스크롤 활성화
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFocusPolicy(Qt.StrongFocus)
 
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
@@ -324,7 +337,8 @@ class BeautyPanel(QWidget):
     # External Control
     # =========================================================================
     def set_profile_info(self, profile_name):
-        self.info_label.setText(f"프로파일: {profile_name.upper()} | V25.0")
+        """프로필 정보를 헤더에 간소하게 표시"""
+        self.info_label.setText(f"{profile_name.upper()}")
 
     def update_sliders_from_config(self, params):
         """Load config values into sliders"""

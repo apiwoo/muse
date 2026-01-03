@@ -1,6 +1,5 @@
 # Project MUSE - pages.py
-# Wizard Pages for Studio (OpenGL Integrated + Shared Memory Optimization)
-# Updated: Phase 3 Track Selection (Student vs LoRA)
+# Studio Pages (5-Step Wizard with Auto-Processing)
 # (C) 2025 MUSE Corp.
 
 import os
@@ -11,14 +10,15 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QFrame, QDialog, QMessageBox, QComboBox, QSizePolicy, QProgressBar, QTextEdit,
-    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox, QRadioButton, QButtonGroup
+    QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox, QRadioButton, QButtonGroup,
+    QGridLayout
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QThread, QMutex, QMutexLocker, QSize
 from PySide6.QtGui import QPixmap, QImage, QIcon
 
 from studio.widgets import NewProfileDialog, ProfileActionDialog
 from studio.workers import CameraLoader, PipelineWorker
-from studio.gl_widget import CameraGLWidget  
+from studio.gl_widget import CameraGLWidget
 
 try:
     from pygrabber.dshow_graph import FilterGraph
@@ -26,67 +26,117 @@ try:
 except ImportError:
     HAS_PYGRABBER = False
 
-# ==============================================================================
-# [PAGE 1] Profile Selection (No Change)
-# ==============================================================================
-class Page1_ProfileSelect(QWidget):
-    profile_confirmed = Signal(str, str)
 
-    def __init__(self, personal_data_dir):
-        super().__init__()
+# ==============================================================================
+# BASE CLASS for all step pages
+# ==============================================================================
+class StudioPageBase(QWidget):
+    """Base class for all studio step pages"""
+    step_completed = Signal()
+    request_settings = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._is_active = False
+        self._is_completed = False
+
+    def activate(self):
+        """Called when page becomes visible"""
+        self._is_active = True
+
+    def deactivate(self):
+        """Called when leaving this page"""
+        self._is_active = False
+
+    def is_completed(self) -> bool:
+        """Check if step completion conditions are met"""
+        return self._is_completed
+
+    def mark_completed(self):
+        """Mark step as completed and emit signal"""
+        self._is_completed = True
+        self.step_completed.emit()
+
+
+# ==============================================================================
+# [STEP 1] Profile Selection
+# ==============================================================================
+class Step1_ProfileSelect(StudioPageBase):
+    """Profile selection page"""
+    profile_selected = Signal(str)  # profile_name
+
+    def __init__(self, personal_data_dir, parent=None):
+        super().__init__(parent)
         self.personal_data_dir = personal_data_dir
-        self.init_ui()
+        self.selected_profile = None
+        self._init_ui()
 
-    def init_ui(self):
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(60, 60, 60, 60)
+        layout.setContentsMargins(60, 40, 60, 40)
         layout.setSpacing(20)
 
-        header_layout = QVBoxLayout()
-        title = QLabel("MUSE 스튜디오에 오신 것을 환영합니다")
-        title.setObjectName("Title")
+        # Header
+        header = QVBoxLayout()
+        title = QLabel("프로필 선택")
+        title.setObjectName("StepTitle")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; color: white;")
         title.setAlignment(Qt.AlignCenter)
-        
-        subtitle = QLabel("나만의 AI 모델을 만들기 위해 프로파일을 선택하세요.")
-        subtitle.setObjectName("Subtitle")
-        subtitle.setAlignment(Qt.AlignCenter)
-        
-        header_layout.addWidget(title)
-        header_layout.addWidget(subtitle)
-        layout.addLayout(header_layout)
 
+        subtitle = QLabel("학습할 프로필을 선택하거나 새로 만드세요")
+        subtitle.setObjectName("StepDescription")
+        subtitle.setStyleSheet("font-size: 14px; color: #949ba4;")
+        subtitle.setAlignment(Qt.AlignCenter)
+
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
+        # Scroll area for profiles
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        
-        self.scroll_content = QWidget()
-        self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setSpacing(15)
-        self.scroll_layout.setAlignment(Qt.AlignTop)
-        
-        scroll.setWidget(self.scroll_content)
-        layout.addWidget(scroll)
+        scroll.setStyleSheet("border: none; background: transparent;")
 
+        self.scroll_content = QWidget()
+        self.scroll_layout = QGridLayout(self.scroll_content)
+        self.scroll_layout.setSpacing(15)
+        self.scroll_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        scroll.setWidget(self.scroll_content)
+        layout.addWidget(scroll, stretch=1)
+
+        # Status label
+        self.lbl_status = QLabel("")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #00D4DB; font-weight: 600;")
+        layout.addWidget(self.lbl_status)
+
+    def activate(self):
+        super().activate()
         self.refresh_profiles()
 
     def refresh_profiles(self):
-        for i in reversed(range(self.scroll_layout.count())): 
-            self.scroll_layout.itemAt(i).widget().setParent(None)
+        # Clear existing
+        for i in reversed(range(self.scroll_layout.count())):
+            widget = self.scroll_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
 
-        btn_new = QPushButton("+  새 프로파일 만들기")
-        btn_new.setProperty("class", "primary") 
-        btn_new.setCursor(Qt.PointingHandCursor)
-        btn_new.clicked.connect(self.on_click_new)
-        self.scroll_layout.addWidget(btn_new)
+        row, col = 0, 0
+        max_cols = 3
 
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("background-color: #333; margin: 20px 0;")
-        self.scroll_layout.addWidget(line)
+        # New profile button
+        btn_new = self._create_profile_card("+", "새 프로필 만들기", is_new=True)
+        btn_new.clicked.connect(self._on_new_profile)
+        self.scroll_layout.addWidget(btn_new, row, col)
+        col += 1
 
+        # Existing profiles
         if os.path.exists(self.personal_data_dir):
-            profiles = sorted([d for d in os.listdir(self.personal_data_dir) 
+            profiles = sorted([d for d in os.listdir(self.personal_data_dir)
                                if os.path.isdir(os.path.join(self.personal_data_dir, d))])
-            
+
+            # Priority sort
             priority = ['front', 'top', 'under']
             sorted_profiles = []
             for p in priority:
@@ -95,106 +145,244 @@ class Page1_ProfileSelect(QWidget):
                     profiles.remove(p)
             sorted_profiles.extend(profiles)
 
-            if sorted_profiles:
-                lbl_exist = QLabel("기존 프로파일 목록")
-                lbl_exist.setStyleSheet("color: #666; font-weight: bold; font-size: 12px; margin-bottom: 5px;")
-                self.scroll_layout.addWidget(lbl_exist)
-
             for p_name in sorted_profiles:
-                btn = QPushButton(f"[DIR]   {p_name.upper()}")
-                btn.setProperty("class", "card")
-                btn.setCursor(Qt.PointingHandCursor)
-                btn.clicked.connect(lambda checked=False, name=p_name: self.on_click_existing(name))
-                self.scroll_layout.addWidget(btn)
+                profile_path = os.path.join(self.personal_data_dir, p_name)
 
-    def on_click_new(self):
+                # Check status
+                has_data = len(glob.glob(os.path.join(profile_path, "train_video_*.mp4"))) > 0
+                has_bg = os.path.exists(os.path.join(profile_path, "background.jpg"))
+
+                status = "준비됨" if (has_data and has_bg) else "설정 필요"
+
+                card = self._create_profile_card(
+                    p_name.upper()[0],
+                    p_name.upper(),
+                    status=status,
+                    selected=(p_name == self.selected_profile)
+                )
+                card.clicked.connect(lambda checked=False, name=p_name: self._on_profile_selected(name))
+                self.scroll_layout.addWidget(card, row, col)
+
+                col += 1
+                if col >= max_cols:
+                    col = 0
+                    row += 1
+
+    def _create_profile_card(self, icon_text, name, status="", is_new=False, selected=False):
+        """Create a profile card widget"""
+        card = QPushButton()
+        card.setFixedSize(200, 150)
+        card.setCursor(Qt.PointingHandCursor)
+
+        if is_new:
+            card.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(88, 101, 242, 0.1);
+                    border: 2px dashed #5865f2;
+                    border-radius: 12px;
+                    color: #5865f2;
+                    font-size: 14px;
+                    font-weight: 600;
+                }
+                QPushButton:hover {
+                    background-color: rgba(88, 101, 242, 0.2);
+                    border-color: #7289da;
+                }
+            """)
+            card.setText(f"{icon_text}\n\n{name}")
+        else:
+            border_color = "#00D4DB" if selected else "rgba(255, 255, 255, 0.1)"
+            bg_color = "rgba(0, 212, 219, 0.1)" if selected else "#2b2d31"
+
+            card.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {bg_color};
+                    border: 2px solid {border_color};
+                    border-radius: 12px;
+                    color: white;
+                    font-size: 14px;
+                    font-weight: 600;
+                    text-align: center;
+                }}
+                QPushButton:hover {{
+                    background-color: #383a40;
+                    border-color: #00D4DB;
+                }}
+            """)
+
+            status_color = "#00D4DB" if status == "준비됨" else "#f0b232"
+            card.setText(f"{icon_text}\n\n{name}\n<span style='color: {status_color}; font-size: 11px;'>{status}</span>")
+
+        return card
+
+    def _on_new_profile(self):
         dlg = NewProfileDialog(self)
         if dlg.exec() == QDialog.Accepted:
             name = dlg.get_name()
             if name:
-                self.profile_confirmed.emit(name, 'reset')
+                # Create directory
+                profile_path = os.path.join(self.personal_data_dir, name)
+                os.makedirs(profile_path, exist_ok=True)
 
-    def on_click_existing(self, name):
-        dlg = ProfileActionDialog(name, self)
-        result = dlg.exec()
-        if result == 1:
-            self.profile_confirmed.emit(name, 'append')
-        elif result == 2:
-            self.profile_confirmed.emit(name, 'reset')
+                self.selected_profile = name
+                self.refresh_profiles()
+                self._update_status()
+
+    def _on_profile_selected(self, name):
+        self.selected_profile = name
+        self.refresh_profiles()
+        self._update_status()
+
+    def _update_status(self):
+        if self.selected_profile:
+            self.lbl_status.setText(f"선택됨: {self.selected_profile.upper()}")
+            self._is_completed = True
+            self.profile_selected.emit(self.selected_profile)
+            self.step_completed.emit()
+        else:
+            self.lbl_status.setText("")
+            self._is_completed = False
+
+    def get_selected_profile(self) -> str:
+        return self.selected_profile
+
 
 # ==============================================================================
-# [PAGE 2] Camera Connection (No Change)
+# [STEP 2] Camera Connection
 # ==============================================================================
-class Page2_CameraConnect(QWidget):
-    camera_ready = Signal(int)
-    go_back = Signal()
-    go_train_direct = Signal() 
+class Step2_CameraConnect(StudioPageBase):
+    """Camera connection page with auto-connect"""
+    camera_ready = Signal(int)  # camera_index
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.connected_camera = None
         self.loader_thread = None
-        self.init_ui()
+        self.gl_widget = None
+        self.preview_timer = None
+        self.test_cap = None
+        self._init_ui()
 
-    def init_ui(self):
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(80, 80, 80, 80)
-        layout.setSpacing(30)
-        layout.setAlignment(Qt.AlignCenter)
+        layout.setContentsMargins(60, 40, 60, 40)
+        layout.setSpacing(20)
 
-        self.lbl_title = QLabel("카메라 연결하기")
-        self.lbl_title.setObjectName("Title")
-        self.lbl_title.setAlignment(Qt.AlignCenter)
-        
-        self.lbl_info = QLabel("대상: ???")
-        self.lbl_info.setObjectName("Subtitle")
-        self.lbl_info.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_info)
+        # Header
+        header = QVBoxLayout()
+        title = QLabel("카메라 연결")
+        title.setObjectName("StepTitle")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; color: white;")
+        title.setAlignment(Qt.AlignCenter)
 
-        card = QFrame()
-        card.setStyleSheet("background-color: rgba(255, 255, 255, 0.02); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.04);")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(40, 40, 40, 40)
-        card_layout.setSpacing(20)
+        subtitle = QLabel("학습에 사용할 카메라를 연결합니다")
+        subtitle.setObjectName("StepDescription")
+        subtitle.setStyleSheet("font-size: 14px; color: #949ba4;")
+        subtitle.setAlignment(Qt.AlignCenter)
 
-        hbox = QHBoxLayout()
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
+        # Preview area
+        preview_container = QFrame()
+        preview_container.setStyleSheet("""
+            QFrame {
+                background-color: #0D0D0D;
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.06);
+            }
+        """)
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.gl_widget = CameraGLWidget()
+        self.gl_widget.setMinimumHeight(360)
+        preview_layout.addWidget(self.gl_widget)
+
+        layout.addWidget(preview_container, stretch=1)
+
+        # Status and controls
+        control_area = QHBoxLayout()
+
+        self.lbl_status = QLabel("카메라를 자동으로 연결합니다...")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #949ba4;")
+
+        control_area.addWidget(self.lbl_status)
+        control_area.addStretch()
+
+        # Camera selector (shown if auto-connect fails)
         self.combo_cam = QComboBox()
-        self.combo_cam.setMinimumHeight(50)
-        hbox.addWidget(self.combo_cam, stretch=1)
-        
-        btn_refresh = QPushButton("[RESET]")
-        btn_refresh.setFixedSize(50, 50)
-        btn_refresh.setStyleSheet("background-color: rgba(255, 255, 255, 0.06); color: white; border-radius: 10px; font-size: 18px; border: none;")
-        btn_refresh.clicked.connect(self.refresh_cameras)
-        hbox.addWidget(btn_refresh)
-        card_layout.addLayout(hbox)
+        self.combo_cam.setMinimumWidth(250)
+        self.combo_cam.setVisible(False)
+        control_area.addWidget(self.combo_cam)
 
-        self.btn_connect = QPushButton("카메라 연결")
-        self.btn_connect.setProperty("class", "primary")
-        self.btn_connect.setCursor(Qt.PointingHandCursor)
-        self.btn_connect.clicked.connect(self.connect_camera)
-        card_layout.addWidget(self.btn_connect)
-        
-        layout.addWidget(card)
+        self.btn_connect = QPushButton("연결")
+        self.btn_connect.setStyleSheet("""
+            QPushButton {
+                background-color: #5865f2;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 24px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #4752c4;
+            }
+        """)
+        self.btn_connect.setVisible(False)
+        self.btn_connect.clicked.connect(self._manual_connect)
+        control_area.addWidget(self.btn_connect)
 
-        btn_back = QPushButton("<- 뒤로 가기")
-        btn_back.setStyleSheet("background: transparent; color: rgba(255, 255, 255, 0.4); font-size: 14px; border: none;")
-        btn_back.setCursor(Qt.PointingHandCursor)
-        btn_back.clicked.connect(self.go_back.emit)
-        layout.addWidget(btn_back)
+        layout.addLayout(control_area)
 
-        self.btn_skip = QPushButton("[START] 학습 메뉴로 바로 가기 (Debug)")
-        self.btn_skip.setStyleSheet("background-color: #444; color: #BBB; border: 1px dashed #666; margin-top: 10px; padding: 10px;")
-        self.btn_skip.setCursor(Qt.PointingHandCursor)
-        self.btn_skip.clicked.connect(self.go_train_direct.emit)
-        layout.addWidget(self.btn_skip)
+    def activate(self):
+        super().activate()
+        self._auto_connect()
 
-    def set_target(self, name, mode):
-        self.target_profile = name
-        mode_str = "데이터 추가 (Append)" if mode == 'append' else "초기화 및 새로 만들기"
-        self.lbl_info.setText(f"프로파일: {name.upper()}  |  모드: {mode_str}")
-        self.refresh_cameras()
+    def deactivate(self):
+        super().deactivate()
+        self._stop_preview()
 
-    def refresh_cameras(self):
+    def _auto_connect(self):
+        """Try to auto-connect to default camera"""
+        self.lbl_status.setText("카메라 연결 중...")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #949ba4;")
+
+        # Try camera 0 first
+        self.loader_thread = CameraLoader(0)
+        self.loader_thread.finished.connect(self._on_auto_connected)
+        self.loader_thread.error.connect(self._on_auto_failed)
+        self.loader_thread.start()
+
+    def _on_auto_connected(self, cap, idx):
+        """Auto connection successful"""
+        cap.release()
+        self.connected_camera = idx
+
+        self.lbl_status.setText(f"카메라 연결됨 (장치 {idx})")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #00D4DB; font-weight: 600;")
+
+        # Start preview
+        self._start_preview(idx)
+
+        # Mark completed
+        self._is_completed = True
+        self.camera_ready.emit(idx)
+        self.step_completed.emit()
+
+    def _on_auto_failed(self, msg):
+        """Auto connection failed, show manual selection"""
+        self.lbl_status.setText("자동 연결 실패. 카메라를 선택하세요.")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #f0b232;")
+
+        # Show manual controls
+        self._refresh_camera_list()
+        self.combo_cam.setVisible(True)
+        self.btn_connect.setVisible(True)
+
+    def _refresh_camera_list(self):
         self.combo_cam.clear()
         if HAS_PYGRABBER:
             try:
@@ -203,71 +391,113 @@ class Page2_CameraConnect(QWidget):
                 for i, name in enumerate(devices):
                     self.combo_cam.addItem(f"[{i}] {name}", i)
             except:
-                self.combo_cam.addItem("[ERROR] 카메라 검색 실패")
+                self._add_fallback_cameras()
         else:
-            self.combo_cam.addItem("[WARNING] pygrabber 없음 (ID로 표시)")
-            for i in range(5):
-                self.combo_cam.addItem(f"카메라 장치 {i}", i)
+            self._add_fallback_cameras()
 
-    def connect_camera(self):
+    def _add_fallback_cameras(self):
+        for i in range(5):
+            self.combo_cam.addItem(f"카메라 장치 {i}", i)
+
+    def _manual_connect(self):
         idx = self.combo_cam.currentData()
         if idx is None:
-             if self.combo_cam.count() > 0: idx = self.combo_cam.currentIndex()
-             else: return
+            return
 
         self.btn_connect.setEnabled(False)
-        self.btn_connect.setText("연결 중... [WAIT]")
-        
+        self.btn_connect.setText("연결 중...")
+
         self.loader_thread = CameraLoader(idx)
-        self.loader_thread.finished.connect(self.on_connected)
-        self.loader_thread.error.connect(self.on_error)
+        self.loader_thread.finished.connect(self._on_manual_connected)
+        self.loader_thread.error.connect(self._on_manual_failed)
         self.loader_thread.start()
 
-    def on_connected(self, cap, idx):
+    def _on_manual_connected(self, cap, idx):
         cap.release()
-        
-        self.btn_connect.setText("카메라 연결")
-        self.btn_connect.setEnabled(True)
-        self.camera_ready.emit(idx)
+        self.connected_camera = idx
 
-    def on_error(self, msg):
-        self.btn_connect.setText("카메라 연결")
+        self.lbl_status.setText(f"카메라 연결됨 (장치 {idx})")
+        self.lbl_status.setStyleSheet("font-size: 13px; color: #00D4DB; font-weight: 600;")
+
+        self.combo_cam.setVisible(False)
+        self.btn_connect.setVisible(False)
+
+        self._start_preview(idx)
+
+        self._is_completed = True
+        self.camera_ready.emit(idx)
+        self.step_completed.emit()
+
+    def _on_manual_failed(self, msg):
         self.btn_connect.setEnabled(True)
+        self.btn_connect.setText("연결")
         QMessageBox.warning(self, "연결 오류", msg)
 
-# ==============================================================================
-# [PAGE 3] Data Collection (No Change)
-# ==============================================================================
+    def _start_preview(self, cam_idx):
+        """Start camera preview"""
+        self.test_cap = cv2.VideoCapture(cam_idx)
+        if self.test_cap.isOpened():
+            self.test_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.test_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
+            self.preview_timer = QTimer()
+            self.preview_timer.timeout.connect(self._update_preview)
+            self.preview_timer.start(33)  # ~30fps
+
+    def _update_preview(self):
+        if self.test_cap and self.test_cap.isOpened():
+            ret, frame = self.test_cap.read()
+            if ret and self.gl_widget:
+                self.gl_widget.render(frame)
+
+    def _stop_preview(self):
+        if self.preview_timer:
+            self.preview_timer.stop()
+            self.preview_timer = None
+
+        if self.test_cap:
+            self.test_cap.release()
+            self.test_cap = None
+
+        if self.gl_widget:
+            self.gl_widget.cleanup()
+
+    def get_camera_index(self) -> int:
+        return self.connected_camera if self.connected_camera is not None else 0
+
+
+# ==============================================================================
+# RecorderWorker (shared between Step3 data recording)
+# ==============================================================================
 class RecorderWorker(QThread):
     time_updated = Signal(float)
     bg_status_updated = Signal(bool)
-    
+
     def __init__(self, cam_index, profile_dir):
         super().__init__()
-        self.cam_index = cam_index 
+        self.cam_index = cam_index
         self.profile_dir = profile_dir
         self.running = True
-        
+
         self.cap = None
         self.m_lock = QMutex()
         self.m_frame = None
-        self.m_frame_id = 0 
-        
+        self.m_frame_id = 0
+
         self.is_recording = False
-        
+
         self.cmd_start_rec = False
         self.cmd_stop_rec = False
         self.req_bg_capture = False
-        
+
         self.video_writer = None
         self.current_start_time = 0
         self.accumulated_time = 0.0
         self.last_reported_int_time = -1
-        
+
         self.split_counter = 0
         self.last_split_time = 0.0
-        self.MAX_SPLIT = 60.0 
+        self.MAX_SPLIT = 60.0
 
     def _calc_existing_duration(self, folder):
         total = 0.0
@@ -278,9 +508,11 @@ class RecorderWorker(QThread):
                 if cap.isOpened():
                     fps = cap.get(cv2.CAP_PROP_FPS)
                     frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                    if fps > 0: total += (frames / fps)
+                    if fps > 0:
+                        total += (frames / fps)
                 cap.release()
-            except: pass
+            except:
+                pass
         return total
 
     def start_recording(self):
@@ -295,10 +527,10 @@ class RecorderWorker(QThread):
     def _start_segment(self, w, h, fps):
         if self.video_writer:
             self.video_writer.release()
-        
+
         timestamp = int(time.time())
         path = os.path.join(self.profile_dir, f"train_video_{timestamp}_{self.split_counter:02d}.mp4")
-        
+
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         self.video_writer = cv2.VideoWriter(path, fourcc, fps, (w, h))
         self.last_split_time = time.time()
@@ -306,10 +538,10 @@ class RecorderWorker(QThread):
 
     def run(self):
         self.accumulated_time = self._calc_existing_duration(self.profile_dir)
-        
+
         print(f"[CAM] [Worker] Opening Camera {self.cam_index} Native...")
         self.cap = cv2.VideoCapture(self.cam_index)
-        
+
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -318,37 +550,37 @@ class RecorderWorker(QThread):
 
         print("[CAM] [Worker] Capture Loop Started (Thread-Local).")
         while self.running and self.cap.isOpened():
-            ret, frame = self.cap.read() 
-            
+            ret, frame = self.cap.read()
+
             if not ret:
                 self.msleep(5)
                 continue
-            
+
             with QMutexLocker(self.m_lock):
                 self.m_frame = frame
-                self.m_frame_id += 1 
-            
-            # --- BACKGROUND CAPTURE ---
+                self.m_frame_id += 1
+
+            # Background capture
             if self.req_bg_capture:
                 bg_path = os.path.join(self.profile_dir, "background.jpg")
                 os.makedirs(self.profile_dir, exist_ok=True)
                 cv2.imwrite(bg_path, frame)
                 self.bg_status_updated.emit(True)
                 self.req_bg_capture = False
-            
-            # --- RECORDING LOGIC ---
-            
+
+            # Recording logic
             if self.cmd_start_rec:
                 self.cmd_start_rec = False
                 if not self.is_recording:
                     self.is_recording = True
                     self.current_start_time = time.time()
                     self.split_counter = 0
-                    
+
                     h, w = frame.shape[:2]
                     fps = self.cap.get(cv2.CAP_PROP_FPS)
-                    if fps <= 0: fps = 30.0
-                    
+                    if fps <= 0:
+                        fps = 30.0
+
                     os.makedirs(self.profile_dir, exist_ok=True)
                     self._start_segment(w, h, fps)
 
@@ -363,7 +595,7 @@ class RecorderWorker(QThread):
                     print("[CAM] [Worker] Recording stopped.")
 
             if self.is_recording:
-                # [New] Auto Split
+                # Auto split
                 if time.time() - self.last_split_time >= self.MAX_SPLIT:
                     self.split_counter += 1
                     h, w = frame.shape[:2]
@@ -372,17 +604,17 @@ class RecorderWorker(QThread):
 
                 elapsed = time.time() - self.current_start_time
                 total_time = self.accumulated_time + elapsed
-                
+
                 if self.video_writer and self.video_writer.isOpened():
                     try:
                         self.video_writer.write(frame)
                     except Exception as e:
                         print(f"[ERROR] [Worker] Write Error: {e}")
-                
+
                 if int(total_time) > self.last_reported_int_time:
                     self.time_updated.emit(total_time)
                     self.last_reported_int_time = int(total_time)
-            
+
         if self.video_writer:
             self.video_writer.release()
         if self.cap:
@@ -393,67 +625,120 @@ class RecorderWorker(QThread):
         self.running = False
         self.wait()
 
-class Page3_DataCollection(QWidget):
-    go_home = Signal()
-    go_train = Signal()
 
-    def __init__(self, output_dir):
-        super().__init__()
+# ==============================================================================
+# [STEP 3] Data Recording
+# ==============================================================================
+class Step3_DataRecording(StudioPageBase):
+    """Data recording page"""
+
+    def __init__(self, output_dir, parent=None):
+        super().__init__(parent)
         self.output_dir = output_dir
         self.recorder_thread = None
         self.current_profile_dir = ""
+        self.current_profile_name = ""
+        self.cam_index = 0
         self.render_timer = QTimer(self)
         self.last_rendered_id = -1
-        
-        self.init_ui()
+        self.has_background = False
+        self.min_record_seconds = 60  # 최소 1분
 
-    def init_ui(self):
+        self._init_ui()
+
+    def _init_ui(self):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        # Left: Camera preview
         self.gl_widget = CameraGLWidget()
         self.gl_widget.setMinimumSize(320, 240)
         self.gl_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.gl_widget, stretch=3)
 
+        # Right: Sidebar
         sidebar = QFrame()
         sidebar.setStyleSheet("background-color: #0D0D0D; border-left: 1px solid rgba(255, 255, 255, 0.04);")
         sidebar.setFixedWidth(400)
-        
+
         sb_layout = QVBoxLayout(sidebar)
         sb_layout.setContentsMargins(30, 40, 30, 40)
         sb_layout.setSpacing(20)
 
-        lbl_title = QLabel("데이터 스튜디오 (GPU)")
-        lbl_title.setObjectName("Title")
-        lbl_title.setStyleSheet("font-size: 24px; border: none;")
+        # Title
+        lbl_title = QLabel("데이터 녹화")
+        lbl_title.setStyleSheet("font-size: 24px; font-weight: 700; color: white; border: none;")
         sb_layout.addWidget(lbl_title)
 
-        self.status_card = QFrame()
-        self.status_card.setStyleSheet("background-color: rgba(255, 255, 255, 0.03); border-radius: 14px; padding: 18px; border: 1px solid rgba(255, 255, 255, 0.04);")
-        sc_layout = QVBoxLayout(self.status_card)
-        
-        self.lbl_bg_status = QLabel("[ERROR] [WARNING] 배경 촬영 필요")
-        self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px;")
+        lbl_desc = QLabel("배경을 촬영하고 학습용 영상을 녹화하세요")
+        lbl_desc.setStyleSheet("font-size: 13px; color: #949ba4; border: none;")
+        sb_layout.addWidget(lbl_desc)
+
+        # Status card
+        status_card = QFrame()
+        status_card.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255, 255, 255, 0.03);
+                border-radius: 14px;
+                padding: 18px;
+                border: 1px solid rgba(255, 255, 255, 0.04);
+            }
+        """)
+        sc_layout = QVBoxLayout(status_card)
+
+        self.lbl_bg_status = QLabel("배경 촬영 필요")
+        self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border: none;")
         sc_layout.addWidget(self.lbl_bg_status)
-        
+
         self.lbl_time = QLabel("00:00")
-        self.lbl_time.setStyleSheet("color: white; font-size: 32px; font-family: monospace; font-weight: bold;")
+        self.lbl_time.setStyleSheet("color: white; font-size: 32px; font-family: monospace; font-weight: bold; border: none;")
         self.lbl_time.setAlignment(Qt.AlignRight)
         sc_layout.addWidget(self.lbl_time)
-        
-        sb_layout.addWidget(self.status_card)
 
-        self.btn_bg = QPushButton("[SNAP]  빈 배경 촬영하기 (단축키 B)")
-        self.btn_bg.setProperty("class", "card")
+        self.lbl_min_hint = QLabel(f"권장: 최소 {self.min_record_seconds}초 녹화")
+        self.lbl_min_hint.setStyleSheet("color: #949ba4; font-size: 11px; border: none;")
+        sc_layout.addWidget(self.lbl_min_hint)
+
+        sb_layout.addWidget(status_card)
+
+        # Background capture button
+        self.btn_bg = QPushButton("배경 촬영하기 (단축키 B)")
+        self.btn_bg.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2d31;
+                border: 1px solid #3f4147;
+                color: #dbdee1;
+                font-size: 14px;
+                font-weight: 500;
+                padding: 16px;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #383a40;
+                border-color: #5865f2;
+            }
+        """)
         self.btn_bg.setCursor(Qt.PointingHandCursor)
         self.btn_bg.clicked.connect(self.capture_background)
         sb_layout.addWidget(self.btn_bg)
 
-        self.btn_record = QPushButton("[REC]  녹화 시작")
-        self.btn_record.setProperty("class", "card")
-        self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
+        # Record button
+        self.btn_record = QPushButton("녹화 시작")
+        self.btn_record.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2d31;
+                border: 1px solid #3f4147;
+                color: #dbdee1;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 16px;
+                border-radius: 8px;
+            }
+            QPushButton:hover {
+                background-color: #383a40;
+            }
+        """)
         self.btn_record.setCheckable(True)
         self.btn_record.setEnabled(False)
         self.btn_record.setCursor(Qt.PointingHandCursor)
@@ -462,43 +747,46 @@ class Page3_DataCollection(QWidget):
 
         sb_layout.addStretch()
 
-        self.btn_train = QPushButton("다음: AI 학습 시작하기  ->")
-        self.btn_train.setProperty("class", "primary")
-        self.btn_train.setCursor(Qt.PointingHandCursor)
-        self.btn_train.clicked.connect(self.on_train_click)
-        sb_layout.addWidget(self.btn_train)
-
-        self.btn_home = QPushButton("취소하고 홈으로")
-        self.btn_home.setStyleSheet("background: transparent; color: #666; margin-top: 10px; border: none;")
-        self.btn_home.setCursor(Qt.PointingHandCursor)
-        self.btn_home.clicked.connect(self.on_home_click)
-        sb_layout.addWidget(self.btn_home)
-
         layout.addWidget(sidebar)
 
-    def setup_session(self, cam_index, profile_name, profile_dir):
+    def setup_session(self, cam_index: int, profile_name: str, profile_dir: str):
+        """Setup recording session"""
+        self.cam_index = cam_index
+        self.current_profile_name = profile_name
         self.current_profile_dir = profile_dir
-        self.last_rendered_id = -1 
-        
+        self.last_rendered_id = -1
+
+        # Check if background exists
         bg_path = os.path.join(profile_dir, "background.jpg")
         if os.path.exists(bg_path):
-            self.on_bg_captured(True)
+            self._on_bg_captured(True)
         else:
-            self.lbl_bg_status.setText("[WARNING] 배경 촬영 필요")
-            self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border:none;")
+            self.has_background = False
+            self.lbl_bg_status.setText("배경 촬영 필요")
+            self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border: none;")
             self.btn_record.setEnabled(False)
-            
-        self.recorder_thread = RecorderWorker(cam_index, self.current_profile_dir)
-        self.recorder_thread.time_updated.connect(self.update_time_label)
-        self.recorder_thread.bg_status_updated.connect(self.on_bg_captured)
-        self.recorder_thread.start()
-        
-        self.render_timer.timeout.connect(self.update_view)
-        self.render_timer.start(16)
 
-    def update_view(self):
-        if not self.recorder_thread: return
-        
+    def activate(self):
+        super().activate()
+        if self.current_profile_dir:
+            # Start recorder thread
+            self.recorder_thread = RecorderWorker(self.cam_index, self.current_profile_dir)
+            self.recorder_thread.time_updated.connect(self._update_time_label)
+            self.recorder_thread.bg_status_updated.connect(self._on_bg_captured)
+            self.recorder_thread.start()
+
+            # Start render timer
+            self.render_timer.timeout.connect(self._update_view)
+            self.render_timer.start(16)
+
+    def deactivate(self):
+        super().deactivate()
+        self._stop_recording()
+
+    def _update_view(self):
+        if not self.recorder_thread:
+            return
+
         frame = None
         curr_id = -1
 
@@ -506,7 +794,7 @@ class Page3_DataCollection(QWidget):
             if self.recorder_thread.m_frame is not None:
                 frame = self.recorder_thread.m_frame
                 curr_id = self.recorder_thread.m_frame_id
-        
+
         if frame is not None and curr_id > self.last_rendered_id:
             self.gl_widget.render(frame)
             self.last_rendered_id = curr_id
@@ -515,121 +803,141 @@ class Page3_DataCollection(QWidget):
         if self.recorder_thread:
             self.recorder_thread.trigger_bg_capture()
 
-    def on_bg_captured(self, success):
+    def _on_bg_captured(self, success):
         if success:
-            self.lbl_bg_status.setText("[OK] 배경 준비 완료")
-            self.lbl_bg_status.setStyleSheet("color: #00ADB5; font-weight: bold; font-size: 14px; border:none;")
+            self.has_background = True
+            self.lbl_bg_status.setText("배경 준비 완료")
+            self.lbl_bg_status.setStyleSheet("color: #00D4DB; font-weight: bold; font-size: 14px; border: none;")
             self.btn_record.setEnabled(True)
 
     def toggle_record(self):
-        if not self.recorder_thread: return
+        if not self.recorder_thread:
+            return
 
         if self.btn_record.isChecked():
             self.recorder_thread.start_recording()
-            self.btn_record.setText("[STOP]  녹화 중지")
-            self.btn_record.setStyleSheet("background-color: #FF5252; color: white; border-radius: 12px; font-weight: bold; font-size: 16px; border: none;")
+            self.btn_record.setText("녹화 중지")
+            self.btn_record.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF5252;
+                    color: white;
+                    border-radius: 12px;
+                    font-weight: bold;
+                    font-size: 16px;
+                    border: none;
+                    padding: 16px;
+                }
+            """)
         else:
             self.recorder_thread.stop_recording()
-            self.btn_record.setText("[REC]  녹화 시작")
-            self.btn_record.setProperty("class", "card")
-            self.btn_record.setStyleSheet("text-align: center; font-weight: bold;") 
-            self.btn_record.style().unpolish(self.btn_record)
-            self.btn_record.style().polish(self.btn_record)
+            self.btn_record.setText("녹화 시작")
+            self.btn_record.setStyleSheet("""
+                QPushButton {
+                    background-color: #2b2d31;
+                    border: 1px solid #3f4147;
+                    color: #dbdee1;
+                    font-size: 14px;
+                    font-weight: 600;
+                    padding: 16px;
+                    border-radius: 8px;
+                }
+                QPushButton:hover {
+                    background-color: #383a40;
+                }
+            """)
 
-    def update_time_label(self, total_seconds):
+    def _update_time_label(self, total_seconds):
         total = int(total_seconds)
-        self.lbl_time.setText(f"{total//60:02d}:{total%60:02d}")
-    
+        self.lbl_time.setText(f"{total // 60:02d}:{total % 60:02d}")
+
+        # Check completion
+        if total >= self.min_record_seconds and self.has_background:
+            if not self._is_completed:
+                self._is_completed = True
+                self.step_completed.emit()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_B:
             self.capture_background()
         else:
             super().keyPressEvent(event)
 
-    def on_train_click(self):
-        self._stop(); self.go_train.emit()
-    def on_home_click(self):
-        self._stop(); self.go_home.emit()
-    def _stop(self):
+    def _stop_recording(self):
         if self.render_timer.isActive():
             self.render_timer.stop()
-            
+
         if self.recorder_thread:
             self.recorder_thread.stop()
             self.recorder_thread = None
-        
+
         if self.gl_widget:
             self.gl_widget.cleanup()
 
-# ==============================================================================
-# [PAGE 4] AI Training (Redesigned: Track Selection & Time Info)
-# ==============================================================================
-class Page4_AiTraining(QWidget):
-    go_home = Signal()
 
-    def __init__(self, root_dir):
-        super().__init__()
+# ==============================================================================
+# [STEP 4] AI Analysis
+# ==============================================================================
+class Step4_AiAnalysis(StudioPageBase):
+    """AI analysis page (auto-processing)"""
+
+    def __init__(self, root_dir, parent=None):
+        super().__init__(parent)
         self.root_dir = root_dir
         self.worker = None
-        self.selected_track = "STUDENT" # Default
-        self.init_ui()
+        self._init_ui()
 
-    def init_ui(self):
+    def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setContentsMargins(60, 40, 60, 40)
         layout.setSpacing(20)
 
-        # Title
-        layout.addWidget(QLabel("AI 모델 생성 마법사", objectName="Title"), alignment=Qt.AlignCenter)
-        self.lbl_subtitle = QLabel("1단계: 영상 분석을 시작하세요.", objectName="Subtitle")
-        layout.addWidget(self.lbl_subtitle, alignment=Qt.AlignCenter)
+        # Header
+        header = QVBoxLayout()
+        title = QLabel("AI 분석")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; color: white;")
+        title.setAlignment(Qt.AlignCenter)
 
-        # Progress
+        subtitle = QLabel("녹화된 영상을 AI가 자동으로 분석합니다")
+        subtitle.setStyleSheet("font-size: 14px; color: #949ba4;")
+        subtitle.setAlignment(Qt.AlignCenter)
+
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
+        # Progress bar
         self.pbar = QProgressBar()
-        # Show Percentage inside Bar
-        self.pbar.setFormat("%p%") 
+        self.pbar.setFormat("%p%")
         self.pbar.setAlignment(Qt.AlignCenter)
+        self.pbar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background-color: #4e5058;
+                border-radius: 4px;
+                height: 20px;
+                text-align: center;
+                color: white;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #5865f2;
+                border-radius: 4px;
+            }
+        """)
         layout.addWidget(self.pbar)
-        
-        # Status & Time Info
+
+        # Status
         self.lbl_status = QLabel("준비됨")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet("color: #AAA; font-size: 14px;")
         layout.addWidget(self.lbl_status)
-        
+
         self.lbl_time_info = QLabel("총 소요: 00:00 | 현재 단계: 00:00")
         self.lbl_time_info.setAlignment(Qt.AlignCenter)
-        self.lbl_time_info.setStyleSheet("color: #00ADB5; font-size: 13px; font-weight: bold; margin-bottom: 10px;")
+        self.lbl_time_info.setStyleSheet("color: #00D4DB; font-size: 13px; font-weight: bold;")
         layout.addWidget(self.lbl_time_info)
 
-        # --- Content Area (Stacked Logic replaced by Visibility) ---
-        
-        # Area 1: Analysis List (Grid)
-        self.list_widget = QListWidget()
-        self.list_widget.setViewMode(QListWidget.IconMode)
-        self.list_widget.setIconSize(QSize(240, 135))
-        self.list_widget.setResizeMode(QListWidget.Adjust)
-        self.list_widget.setSpacing(10)
-        self.list_widget.setSelectionMode(QAbstractItemView.NoSelection) # Custom Checkbox Logic
-        self.list_widget.setStyleSheet("""
-            QListWidget {
-                background-color: rgba(255, 255, 255, 0.02);
-                border: 1px solid rgba(255, 255, 255, 0.04);
-                border-radius: 12px;
-            }
-            QListWidget::item {
-                background-color: rgba(255, 255, 255, 0.03);
-                border-radius: 8px;
-                padding: 8px;
-            }
-            QListWidget::item:hover {
-                background-color: rgba(255, 255, 255, 0.06);
-            }
-        """)
-        self.list_widget.setVisible(False)
-        layout.addWidget(self.list_widget, stretch=1)
-
-        # Area 2: Log View (Training Phase)
+        # Log view
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("""
@@ -643,216 +951,237 @@ class Page4_AiTraining(QWidget):
                 padding: 12px;
             }
         """)
-        self.log_view.setVisible(False)
         layout.addWidget(self.log_view, stretch=1)
 
-        # Buttons Area
-        btn_layout = QHBoxLayout()
-        
-        self.btn_step1 = QPushButton("1단계: 영상 분석 시작")
-        self.btn_step1.setProperty("class", "primary")
-        self.btn_step1.clicked.connect(self.start_analysis)
-        
-        # [New] Track Selection Radio Buttons
-        self.track_group_widget = QWidget()
-        track_layout = QHBoxLayout(self.track_group_widget)
-        track_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.rb_student = QRadioButton("전체 최적화 (Student) - 기본")
+        # Start button
+        self.btn_start = QPushButton("분석 시작")
+        self.btn_start.setStyleSheet("""
+            QPushButton {
+                background-color: #5865f2;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 15px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #4752c4;
+            }
+            QPushButton:disabled {
+                background-color: #4e5058;
+                color: #6d6f78;
+            }
+        """)
+        self.btn_start.clicked.connect(self.start_analysis)
+        layout.addWidget(self.btn_start)
+
+    def activate(self):
+        super().activate()
+        # Auto-start analysis
+        QTimer.singleShot(500, self.start_analysis)
+
+    def deactivate(self):
+        super().deactivate()
+        if self.worker and self.worker.isRunning():
+            self.worker.request_early_stop()
+
+    def start_analysis(self):
+        self.btn_start.setEnabled(False)
+        self.btn_start.setText("분석 중...")
+        self.log_view.clear()
+
+        self.worker = PipelineWorker(self.root_dir, mode="analyze")
+        self.worker.log_signal.connect(self.log_view.append)
+        self.worker.progress_signal.connect(self._on_progress)
+        self.worker.finished_signal.connect(self._on_finished)
+        self.worker.start()
+
+    def _on_progress(self, percent, status_text, time_info):
+        self.pbar.setValue(percent)
+        self.lbl_status.setText(status_text)
+        self.lbl_time_info.setText(time_info)
+
+    def _on_finished(self):
+        self.btn_start.setText("분석 완료")
+        self.lbl_status.setText("분석이 완료되었습니다.")
+        self._is_completed = True
+        self.step_completed.emit()
+
+
+# ==============================================================================
+# [STEP 5] Model Training
+# ==============================================================================
+class Step5_ModelTraining(StudioPageBase):
+    """Model training page"""
+    training_finished = Signal()
+
+    def __init__(self, root_dir, parent=None):
+        super().__init__(parent)
+        self.root_dir = root_dir
+        self.worker = None
+        self.selected_track = "STUDENT"
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(60, 40, 60, 40)
+        layout.setSpacing(20)
+
+        # Header
+        header = QVBoxLayout()
+        title = QLabel("모델 학습")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; color: white;")
+        title.setAlignment(Qt.AlignCenter)
+
+        subtitle = QLabel("분석된 데이터로 개인화 모델을 학습합니다")
+        subtitle.setStyleSheet("font-size: 14px; color: #949ba4;")
+        subtitle.setAlignment(Qt.AlignCenter)
+
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
+        # Progress bar
+        self.pbar = QProgressBar()
+        self.pbar.setFormat("%p%")
+        self.pbar.setAlignment(Qt.AlignCenter)
+        self.pbar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background-color: #4e5058;
+                border-radius: 4px;
+                height: 20px;
+                text-align: center;
+                color: white;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.pbar)
+
+        # Status
+        self.lbl_status = QLabel("학습 트랙을 선택하세요")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        self.lbl_status.setStyleSheet("color: #AAA; font-size: 14px;")
+        layout.addWidget(self.lbl_status)
+
+        self.lbl_time_info = QLabel("")
+        self.lbl_time_info.setAlignment(Qt.AlignCenter)
+        self.lbl_time_info.setStyleSheet("color: #00D4DB; font-size: 13px; font-weight: bold;")
+        layout.addWidget(self.lbl_time_info)
+
+        # Track selection
+        track_widget = QWidget()
+        track_layout = QHBoxLayout(track_widget)
+        track_layout.setAlignment(Qt.AlignCenter)
+        track_layout.setSpacing(30)
+
+        self.rb_student = QRadioButton("전체 최적화 (Student)")
         self.rb_student.setChecked(True)
-        self.rb_student.setStyleSheet("font-weight: bold; color: white;")
-        
-        self.rb_lora = QRadioButton("허리 정밀 보정 (LoRA) - 고사양")
-        self.rb_lora.setStyleSheet("font-weight: bold; color: #FF9800;")
-        
+        self.rb_student.setStyleSheet("font-weight: bold; color: white; font-size: 14px;")
+
+        self.rb_lora = QRadioButton("정밀 보정 (LoRA)")
+        self.rb_lora.setStyleSheet("font-weight: bold; color: #FF9800; font-size: 14px;")
+
         self.track_group = QButtonGroup(self)
         self.track_group.addButton(self.rb_student, 0)
         self.track_group.addButton(self.rb_lora, 1)
-        self.track_group.buttonClicked.connect(self.on_track_changed)
-        
+        self.track_group.buttonClicked.connect(self._on_track_changed)
+
         track_layout.addWidget(self.rb_student)
         track_layout.addWidget(self.rb_lora)
-        
-        self.track_group_widget.setVisible(False)
-        
-        self.btn_step2 = QPushButton("2단계: 선택한 데이터로 학습 시작")
-        self.btn_step2.setProperty("class", "primary")
-        self.btn_step2.setStyleSheet("background-color: #4CAF50;") # Green
-        self.btn_step2.clicked.connect(self.start_training)
-        self.btn_step2.setVisible(False)
-        
-        # 학습 중단 버튼
-        self.btn_stop = QPushButton("🛑 중단")
-        self.btn_stop.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; border-radius: 8px; padding: 15px; border: none;")
-        self.btn_stop.clicked.connect(self.stop_training)
+
+        layout.addWidget(track_widget)
+
+        # Log view
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet("""
+            QTextEdit {
+                background-color: #050505;
+                color: #00FF88;
+                font-family: Consolas, D2Coding, monospace;
+                font-size: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.04);
+                border-radius: 12px;
+                padding: 12px;
+            }
+        """)
+        layout.addWidget(self.log_view, stretch=1)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+
+        self.btn_start = QPushButton("학습 시작")
+        self.btn_start.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 15px 30px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #43A047;
+            }
+            QPushButton:disabled {
+                background-color: #4e5058;
+                color: #6d6f78;
+            }
+        """)
+        self.btn_start.clicked.connect(self.start_training)
+        btn_layout.addWidget(self.btn_start)
+
+        self.btn_stop = QPushButton("중단")
+        self.btn_stop.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 15px 30px;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #FB8C00;
+            }
+        """)
         self.btn_stop.setVisible(False)
-        
-        self.btn_home = QPushButton("홈으로")
-        self.btn_home.setStyleSheet("background: #444; color: white; padding: 15px; border-radius: 8px; border:none;")
-        self.btn_home.clicked.connect(self.go_home.emit)
-        
-        # Layout Assembly
-        control_layout = QVBoxLayout()
-        control_layout.addWidget(self.btn_step1)
-        control_layout.addWidget(self.track_group_widget)
-        control_layout.addWidget(self.btn_step2)
-        
-        btn_layout.addLayout(control_layout, stretch=3)
-        
-        nav_layout = QHBoxLayout()
-        nav_layout.setSpacing(10)
-        nav_layout.addWidget(self.btn_stop, stretch=1) 
-        nav_layout.addWidget(self.btn_home, stretch=1)
-        
-        btn_layout.addLayout(nav_layout, stretch=1)
-        
+        self.btn_stop.clicked.connect(self.stop_training)
+        btn_layout.addWidget(self.btn_stop)
+
         layout.addLayout(btn_layout)
 
-    def on_track_changed(self, btn):
+    def _on_track_changed(self, btn):
         if btn == self.rb_student:
             self.selected_track = "STUDENT"
         elif btn == self.rb_lora:
             self.selected_track = "LORA"
 
-    def start_analysis(self):
-        self.btn_step1.setEnabled(False)
-        self.btn_step1.setText("분석 중...")
-        self.list_widget.clear()
-        self.list_widget.setVisible(False)
-        self.log_view.setVisible(True)
-        self.log_view.clear()
-        
-        self.worker = PipelineWorker(self.root_dir, mode="analyze")
-        self.worker.log_signal.connect(self.log_view.append)
-        self.worker.progress_signal.connect(self.on_progress)
-        self.worker.finished_signal.connect(self.on_analysis_finished)
-        self.worker.start()
-
-    def on_analysis_finished(self):
-        self.btn_step1.setVisible(False)
-        self.track_group_widget.setVisible(True) # Show track selection
-        self.btn_step2.setVisible(True)
-        self.log_view.setVisible(False)
-        self.list_widget.setVisible(True)
-        
-        self.lbl_subtitle.setText("2단계: 학습에 포함할 이미지를 체크하고 학습을 시작하세요.")
-        self.load_previews()
-
-    def load_previews(self):
-        # Scan previews
-        data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
-        profiles = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
-        
-        for p in profiles:
-            preview_dir = os.path.join(data_dir, p, "previews")
-            if not os.path.exists(preview_dir): continue
-            
-            files = sorted(glob.glob(os.path.join(preview_dir, "*.jpg")))
-            for f in files:
-                vid_name = os.path.basename(f).replace(".jpg", ".mp4")
-                vid_path = os.path.join(data_dir, p, vid_name)
-                
-                info_text = ""
-                if os.path.exists(vid_path):
-                    try:
-                        cap = cv2.VideoCapture(vid_path)
-                        if cap.isOpened():
-                            frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            fps = cap.get(cv2.CAP_PROP_FPS)
-                            duration = frames / fps if fps > 0 else 0
-                            info_text = f"{frames} Frames ({duration:.1f}s)"
-                            cap.release()
-                    except:
-                        pass
-                
-                if not info_text:
-                    info_text = "Unknown Info"
-
-                item = QListWidgetItem(self.list_widget)
-                item.setSizeHint(QSize(260, 200)) 
-                
-                w = QWidget()
-                vbox = QVBoxLayout(w)
-                vbox.setContentsMargins(5,5,5,5)
-                vbox.setSpacing(5)
-                
-                img_lbl = QLabel()
-                pix = QPixmap(f).scaled(240, 135, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                img_lbl.setPixmap(pix)
-                img_lbl.setAlignment(Qt.AlignCenter)
-                vbox.addWidget(img_lbl)
-                
-                chk = QCheckBox(vid_name)
-                chk.setChecked(True) 
-                chk.setStyleSheet("color: white; font-weight: bold;")
-                vbox.addWidget(chk)
-                
-                lbl_info = QLabel(f"[INFO] {info_text}")
-                lbl_info.setStyleSheet("color: #AAA; font-size: 11px;")
-                lbl_info.setAlignment(Qt.AlignLeft)
-                vbox.addWidget(lbl_info)
-                
-                item.setData(Qt.UserRole, {
-                    "chk": chk, 
-                    "vid_path": vid_path,
-                    "preview_path": f
-                })
-                
-                self.list_widget.setItemWidget(item, w)
-
     def start_training(self):
-        # 1. Filter & Delete
-        remove_count = 0
-        valid_count = 0
-        
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            data = item.data(Qt.UserRole)
-            chk = data["chk"]
-            
-            if not chk.isChecked():
-                try:
-                    if os.path.exists(data["vid_path"]): os.remove(data["vid_path"])
-                    if os.path.exists(data["preview_path"]): os.remove(data["preview_path"])
-                    remove_count += 1
-                except: pass
-            else:
-                valid_count += 1
-        
-        if valid_count == 0:
-            QMessageBox.warning(self, "경고", "선택된 데이터가 없습니다!")
-            return
-
-        self.btn_step2.setEnabled(False)
-        self.btn_step2.setText("학습 진행 중... (창을 닫지 마세요)")
-        self.btn_step2.setVisible(False) 
-        self.track_group_widget.setVisible(False) # Hide radios
-        self.btn_stop.setVisible(True)   
-        self.btn_stop.setEnabled(True)
-        self.btn_stop.setText("🛑 학습 중단")
-        
-        self.list_widget.setVisible(False)
-        self.log_view.setVisible(True)
+        self.btn_start.setEnabled(False)
+        self.btn_start.setVisible(False)
+        self.btn_stop.setVisible(True)
+        self.rb_student.setEnabled(False)
+        self.rb_lora.setEnabled(False)
         self.log_view.clear()
-        self.log_view.append(f"[INFO] Deleted {remove_count} rejected videos.")
-        self.log_view.append(f"[INFO] Starting training (Track: {self.selected_track}) with {valid_count} videos...")
+        self.log_view.append(f"[INFO] Starting training (Track: {self.selected_track})...")
 
-        # Mode Selection
-        mode_flag = "train"
-        if self.selected_track == "LORA":
-            mode_flag = "train_lora" # New internal mode for worker
+        mode_flag = "train" if self.selected_track == "STUDENT" else "train_lora"
 
         self.worker = PipelineWorker(self.root_dir, mode=mode_flag)
         self.worker.log_signal.connect(self.log_view.append)
-        self.worker.progress_signal.connect(self.on_progress)
-        self.worker.finished_signal.connect(self.on_training_finished)
+        self.worker.progress_signal.connect(self._on_progress)
+        self.worker.finished_signal.connect(self._on_finished)
         self.worker.error_signal.connect(lambda e: QMessageBox.critical(self, "오류", e))
         self.worker.start()
-
-    def on_progress(self, percent, status_text, time_info):
-        self.pbar.setValue(percent)
-        self.lbl_status.setText(status_text)
-        self.lbl_time_info.setText(time_info)
 
     def stop_training(self):
         if self.worker:
@@ -860,10 +1189,26 @@ class Page4_AiTraining(QWidget):
             self.btn_stop.setEnabled(False)
             self.btn_stop.setText("중단 요청됨...")
 
-    def on_training_finished(self):
+    def _on_progress(self, percent, status_text, time_info):
+        self.pbar.setValue(percent)
+        self.lbl_status.setText(status_text)
+        self.lbl_time_info.setText(time_info)
+
+    def _on_finished(self):
         self.btn_stop.setVisible(False)
-        self.btn_step2.setVisible(True)
-        self.btn_step2.setText("학습 완료")
-        self.btn_step2.setEnabled(True)
+        self.btn_start.setVisible(True)
+        self.btn_start.setText("학습 완료")
         self.lbl_status.setText("모든 과정이 성공적으로 끝났습니다.")
-        self.btn_home.setVisible(True)
+        self._is_completed = True
+        self.step_completed.emit()
+        self.training_finished.emit()
+
+
+# ==============================================================================
+# Legacy compatibility exports
+# ==============================================================================
+# For backward compatibility with existing code
+Page1_ProfileSelect = Step1_ProfileSelect
+Page2_CameraConnect = Step2_CameraConnect
+Page3_DataCollection = Step3_DataRecording
+Page4_AiTraining = Step5_ModelTraining

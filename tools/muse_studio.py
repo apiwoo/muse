@@ -17,7 +17,7 @@ os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 # 기본값(MSMF)을 사용하면 Windows가 자동으로 MJPG 코덱을 사용하여 대역폭을 확보합니다.
 # os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget, QVBoxLayout
 from PySide6.QtGui import QFontDatabase, QFont
 try:
     import qdarktheme
@@ -27,33 +27,52 @@ except ImportError:
 # [Module Imports]
 # 'studio' 패키지를 찾기 위해 경로 추가 (현재 폴더 기준)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# src 경로 추가 (titlebar, frameless_base 사용)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from studio.styles import STYLESHEET
 from studio.pages import (
-    Page1_ProfileSelect, Page2_CameraConnect, 
+    Page1_ProfileSelect, Page2_CameraConnect,
     Page3_DataCollection, Page4_AiTraining
 )
+from ui.titlebar import TitleBar
+from ui.frameless_base import FramelessMixin
 
-class MuseStudio(QMainWindow):
+
+class MuseStudio(FramelessMixin, QMainWindow):
     def __init__(self):
         super().__init__()
+
+        # [Custom Titlebar] Frameless 윈도우 설정
+        self.setup_frameless()
+
         # [한글화] 윈도우 타이틀 변경
         self.setWindowTitle("MUSE 스튜디오 v3.1 (안전 백업 모드)")
         self.resize(1280, 800)
-        
-        # [Win32 Native Dark Title Bar]
-        self._apply_dark_title_bar()
-        
+
         # Apply Global Stylesheet
         self.setStyleSheet(STYLESHEET)
-        
+
         self.root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.personal_data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
         os.makedirs(self.personal_data_dir, exist_ok=True)
         os.makedirs(os.path.join(self.root_dir, "recorded_data", "backup"), exist_ok=True)
 
+        # [Custom Titlebar] 전체 컨테이너
+        central_container = QWidget()
+        central_layout = QVBoxLayout(central_container)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+
+        # 1. 커스텀 타이틀바
+        self.titlebar = TitleBar(self, title="MUSE 스튜디오")
+        central_layout.addWidget(self.titlebar)
+
+        # 2. 스택 위젯 (페이지들)
         self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        central_layout.addWidget(self.stack, stretch=1)
+
+        self.setCentralWidget(central_container)
 
         self.page1 = Page1_ProfileSelect(self.personal_data_dir)
         self.page2 = Page2_CameraConnect()
@@ -77,19 +96,20 @@ class MuseStudio(QMainWindow):
         self.page3.go_train.connect(lambda: self.stack.setCurrentIndex(3))
         self.page4.go_home.connect(lambda: self.stack.setCurrentIndex(0))
 
-    def _apply_dark_title_bar(self):
-        """
-        Windows 10/11의 네이티브 제목 표시줄을 다크 모드로 강제 전환합니다.
-        DWMWA_USE_IMMERSIVE_DARK_MODE (20) 속성을 사용합니다.
-        """
-        if sys.platform == "win32":
-            try:
-                hwnd = int(self.winId())
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4
-                )
-            except Exception as e:
-                print(f"⚠️ 다크 모드 타이틀바 적용 실패: {e}")
+    # [Legacy] 아래 메서드는 커스텀 타이틀바로 대체됨 (참고용으로 주석 처리)
+    # def _apply_dark_title_bar(self):
+    #     """
+    #     Windows 10/11의 네이티브 제목 표시줄을 다크 모드로 강제 전환합니다.
+    #     DWMWA_USE_IMMERSIVE_DARK_MODE (20) 속성을 사용합니다.
+    #     """
+    #     if sys.platform == "win32":
+    #         try:
+    #             hwnd = int(self.winId())
+    #             ctypes.windll.dwmapi.DwmSetWindowAttribute(
+    #                 hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4
+    #             )
+    #         except Exception as e:
+    #             print(f"⚠️ 다크 모드 타이틀바 적용 실패: {e}")
 
     def on_profile_confirmed(self, name, mode):
         target = os.path.join(self.personal_data_dir, name)
@@ -164,9 +184,11 @@ def main():
             if font_id >= 0:
                 print(f"[FONT] Loaded: {os.path.basename(font_path)}")
 
-    # Set application font with fallbacks
-    app_font = QFont("Pretendard", 10)
-    app_font.setFamilies(["Pretendard", "Malgun Gothic", "Segoe UI"])
+    # [Discord Style] 폰트 설정 - Inter 우선, Pretendard fallback
+    app_font = QFont("Inter", 10)
+    app_font.setFamilies(["Inter", "Pretendard", "Segoe UI", "Malgun Gothic"])
+    app_font.setWeight(QFont.Normal)  # 400
+    app_font.setHintingPreference(QFont.PreferNoHinting)
     app.setFont(app_font)
 
     win = MuseStudio()

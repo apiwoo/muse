@@ -1,79 +1,143 @@
 # Project MUSE - main_window.py
-# Created for Mode A (Visual Supremacy)
+# Broadcast Page (Converted from MainWindow for QStackedWidget integration)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
-
-from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QDockWidget, QLabel
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Qt, Signal
 
 from ui.viewport import Viewport
 from ui.beauty_panel import BeautyPanel
 
-class MainWindow(QMainWindow):
-    """
-    [Main Application Window]
-    - 중앙: Viewport (카메라 프리뷰)
-    - 우측: BeautyPanel (조절 패널)
-    - 역할: UI 레이아웃 구성 및 Worker Thread와의 연결 고리
-    """
-    # [New] 배경 리셋 요청 시그널 (Worker가 수신)
-    request_bg_reset = Signal()
 
-    def __init__(self):
-        super().__init__()
+class BroadcastPage(QWidget):
+    """
+    [Broadcast Page]
+    방송 화면 (뷰포트 + 뷰티 패널)
+    QStackedWidget 페이지로 사용 가능하도록 QWidget으로 변환됨
+    """
+    # 시그널 정의
+    request_bg_reset = Signal()  # 배경 리셋 요청 (Worker가 수신)
+    go_home = Signal()           # 메인 메뉴로 돌아가기 요청
 
-        # [한글화] 윈도우 타이틀
-        self.setWindowTitle("프로젝트 MUSE: AI 방송 시스템 (v2.1 GUI)")
-        self.resize(1280, 720)
-        self.setStyleSheet("background-color: #0A0A0A; color: #E0E0E0; font-family: Pretendard, Malgun Gothic, sans-serif;")
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.worker = None  # BeautyWorker 참조
+
+        # Discord Style 배경
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1e1f22;
+                color: #dbdee1;
+                font-family: 'Inter', 'Pretendard', 'Segoe UI', sans-serif;
+            }
+        """)
 
         self._init_ui()
 
     def _init_ui(self):
-        # 1. 중앙 위젯 (뷰포트)
-        self.viewport = Viewport()
-        self.setCentralWidget(self.viewport)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # 2. 우측 도킹 패널 (뷰티 컨트롤)
-        # [한글화] 패널 타이틀
-        self.dock_panel = QDockWidget("제어판 (Controls)", self)
-        self.dock_panel.setAllowedAreas(Qt.RightDockWidgetArea)
-        self.dock_panel.setFeatures(QDockWidget.NoDockWidgetFeatures) # 이동 불가, 닫기 불가
-        
-        self.beauty_panel = BeautyPanel()
-        self.dock_panel.setWidget(self.beauty_panel)
-        self.dock_panel.setStyleSheet("""
-            QDockWidget {
-                background: transparent;
-                font-family: Pretendard, sans-serif;
-            }
-            QDockWidget::title {
-                background: #0A0A0A;
-                padding: 10px 14px;
-                color: rgba(255, 255, 255, 0.4);
-                font-size: 10px;
+        # 메인 컨텐츠 영역
+        content_area = QWidget()
+        content_area.setStyleSheet("background-color: #1e1f22;")
+        content_layout = QHBoxLayout(content_area)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # 뷰포트 (중앙 위젯)
+        self.viewport = Viewport()
+        content_layout.addWidget(self.viewport, stretch=1)
+
+        # 우측 패널
+        panel_container = QWidget()
+        panel_container.setFixedWidth(320)
+        panel_container.setStyleSheet("background-color: #2b2d31;")
+        panel_layout = QVBoxLayout(panel_container)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+
+        # 패널 헤더 (홈 버튼 포함)
+        panel_header = QWidget()
+        panel_header.setStyleSheet("background-color: #2b2d31;")
+        header_layout = QHBoxLayout(panel_header)
+        header_layout.setContentsMargins(16, 12, 16, 12)
+        header_layout.setSpacing(8)
+
+        lbl_header = QLabel("제어판")
+        lbl_header.setStyleSheet("""
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+        """)
+        header_layout.addWidget(lbl_header)
+
+        header_layout.addStretch()
+
+        # 홈으로 버튼
+        self.btn_home = QPushButton("메인 메뉴")
+        self.btn_home.setCursor(Qt.PointingHandCursor)
+        self.btn_home.setStyleSheet("""
+            QPushButton {
+                background-color: #4e5058;
+                color: #dbdee1;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
                 font-weight: 600;
-                letter-spacing: 1px;
-                text-transform: uppercase;
+            }
+            QPushButton:hover {
+                background-color: #5c5f66;
+            }
+            QPushButton:pressed {
+                background-color: #3f4248;
             }
         """)
+        self.btn_home.clicked.connect(self._on_home_clicked)
+        header_layout.addWidget(self.btn_home)
 
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_panel)
+        panel_layout.addWidget(panel_header)
+
+        # 구분선
+        separator = QWidget()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet("background-color: rgba(255, 255, 255, 0.06);")
+        panel_layout.addWidget(separator)
+
+        # 뷰티 패널
+        self.beauty_panel = BeautyPanel()
+        panel_layout.addWidget(self.beauty_panel)
+
+        content_layout.addWidget(panel_container, stretch=0)
+        main_layout.addWidget(content_area, stretch=1)
 
         # 상태 표시줄
-        # [한글화] 안내 문구
         self.status_label = QLabel("준비됨. 배경이 바뀌었다면 'B' 키를 눌러 리셋하세요.")
-        self.status_label.setStyleSheet("padding: 10px 16px; color: rgba(255, 255, 255, 0.4); font-size: 11px; font-weight: 500;")
-        self.statusBar().addWidget(self.status_label)
+        self.status_label.setStyleSheet("""
+            padding: 8px 16px;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 11px;
+            font-weight: 400;
+            background-color: #1e1f22;
+        """)
+        main_layout.addWidget(self.status_label)
+
+    def _on_home_clicked(self):
+        """홈으로 버튼 클릭"""
+        self.go_home.emit()
 
     def connect_worker(self, worker):
         """
-        [Critical] Worker Thread와 UI 연결
-        Worker(로직) -> Signal -> UI(메인쓰레드)
-        UI(조작) -> Signal -> Worker(로직)
+        Worker Thread와 UI 연결
         """
-        # [V5.0] 엔진 시작 전에 배경 존재 여부 먼저 확인 (깜빡임 방지)
+        self.worker = worker
+
+        # 배경 존재 여부 확인
         bg_path = os.path.join(
             worker.root_dir, "recorded_data", "personal_data",
             worker.current_profile_name, "background.jpg"
@@ -82,40 +146,123 @@ class MainWindow(QMainWindow):
         self.beauty_panel.set_background_status(has_bg)
         print(f"[INIT] Background pre-check: {has_bg} ({bg_path})")
 
-        # 1. 영상 수신: Worker가 프레임을 보내면 Viewport에 그림
+        # 영상 수신: Worker가 프레임을 보내면 Viewport에 그림
         worker.frame_processed.connect(self.viewport.update_image)
 
-        # 2. 파라미터 송신: UI 슬라이더가 변하면 Worker에 전달
+        # 파라미터 송신: UI 슬라이더가 변하면 Worker에 전달
         self.beauty_panel.paramChanged.connect(worker.update_params)
 
-        # 3. [New] 배경 리셋 신호 연결
+        # 배경 리셋 신호 연결
         self.request_bg_reset.connect(worker.reset_background)
 
-        # 4. [V5.0] 배경 상태 시그널 연결
+        # 배경 상태 시그널 연결
         worker.bgStatusChanged.connect(self.beauty_panel.set_background_status)
 
-        # 5. [V5.0] 배경 캡처 버튼 -> Worker 배경 리셋
+        # 배경 캡처 버튼 -> Worker 배경 리셋
         self.beauty_panel.bgCaptureRequested.connect(worker.reset_background)
 
-        print("[LINK] [MainWindow] UI와 Worker 스레드 연결 완료")
+        print("[LINK] [BroadcastPage] UI와 Worker 스레드 연결 완료")
+
+    def disconnect_worker(self):
+        """Worker 연결 해제 (홈으로 돌아갈 때)"""
+        if self.worker:
+            try:
+                self.worker.frame_processed.disconnect(self.viewport.update_image)
+                self.beauty_panel.paramChanged.disconnect(self.worker.update_params)
+                self.request_bg_reset.disconnect(self.worker.reset_background)
+                self.worker.bgStatusChanged.disconnect(self.beauty_panel.set_background_status)
+                self.beauty_panel.bgCaptureRequested.disconnect(self.worker.reset_background)
+            except RuntimeError:
+                pass  # 이미 연결 해제된 경우
+            self.worker = None
+
+    def set_profile_info(self, profile_name):
+        """프로필 정보 표시"""
+        self.beauty_panel.set_profile_info(profile_name)
 
     def keyPressEvent(self, event):
-        """
-        [New] 키보드 입력 감지
-        - B 키: 배경 리셋
-        """
+        """키보드 입력 감지"""
         if event.key() == Qt.Key_B:
             print("[KEY] 'B' Pressed -> Request Background Reset")
             self.request_bg_reset.emit()
-            # [한글화] 상태 업데이트
             self.status_label.setText("배경 리셋 중...")
         else:
             super().keyPressEvent(event)
 
+
+# 레거시 호환용 MainWindow (독립 실행 시 사용)
+from ui.frameless_base import FramelessMixin
+from ui.titlebar import TitleBar
+from PySide6.QtWidgets import QMainWindow
+
+
+class MainWindow(FramelessMixin, QMainWindow):
+    """
+    [Legacy Main Window]
+    독립 실행 시 사용되는 QMainWindow 래퍼
+    내부적으로 BroadcastPage를 사용
+    """
+    request_bg_reset = Signal()
+    go_home = Signal()
+
+    def __init__(self):
+        super().__init__()
+
+        # Frameless 윈도우 설정
+        self.setup_frameless()
+
+        self.setWindowTitle("프로젝트 MUSE: AI 방송 시스템")
+        self.resize(1280, 720)
+        self.setMinimumSize(960, 540)
+
+        self.setStyleSheet("""
+            background-color: #313338;
+            color: #dbdee1;
+            font-family: 'Inter', 'Pretendard', 'Segoe UI', sans-serif;
+        """)
+
+        self._init_ui()
+
+    def _init_ui(self):
+        central_container = QWidget()
+        central_layout = QVBoxLayout(central_container)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+
+        # 커스텀 타이틀바
+        self.titlebar = TitleBar(self, title="PROJECT MUSE")
+        central_layout.addWidget(self.titlebar)
+
+        # BroadcastPage를 메인 컨텐츠로 사용
+        self.broadcast_page = BroadcastPage()
+        self.broadcast_page.go_home.connect(self.go_home.emit)
+        self.broadcast_page.request_bg_reset.connect(self.request_bg_reset.emit)
+        central_layout.addWidget(self.broadcast_page, stretch=1)
+
+        self.setCentralWidget(central_container)
+
+        # 레거시 호환용 속성
+        self.beauty_panel = self.broadcast_page.beauty_panel
+        self.viewport = self.broadcast_page.viewport
+        self.status_label = self.broadcast_page.status_label
+
+    def connect_worker(self, worker):
+        """Worker 연결 (레거시 호환)"""
+        self.broadcast_page.connect_worker(worker)
+
+    def set_profile_info(self, profile_name):
+        """프로필 정보 표시 (레거시 호환)"""
+        self.broadcast_page.set_profile_info(profile_name)
+
+    def keyPressEvent(self, event):
+        """키보드 입력 (레거시 호환)"""
+        if event.key() == Qt.Key_B:
+            self.request_bg_reset.emit()
+            self.broadcast_page.status_label.setText("배경 리셋 중...")
+        else:
+            super().keyPressEvent(event)
+
     def closeEvent(self, event):
-        """
-        [Critical] 창 닫기(X버튼) 클릭 시 호출.
-        이 함수가 없으면 백그라운드 스레드가 돌고 있을 때 앱이 완전히 꺼지지 않을 수 있습니다.
-        """
+        """창 닫기 이벤트"""
         print("[EXIT] [MainWindow] 창 닫기 감지. 프로그램 종료 절차를 시작합니다.")
-        event.accept() # 이벤트를 수락하여 Qt에게 창을 닫으라고 알림
+        event.accept()

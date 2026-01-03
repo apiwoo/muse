@@ -70,6 +70,10 @@ class ModernSlider(QWidget):
             }
         """)
 
+        # [휠 스크롤 방지] 슬라이더가 휠 이벤트를 가로채지 않도록 설정
+        self.slider.setFocusPolicy(Qt.ClickFocus)
+        self.slider.wheelEvent = lambda e: e.ignore()
+
         self.slider.valueChanged.connect(self._on_slider_change)
         layout.addWidget(self.slider)
 
