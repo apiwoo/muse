@@ -364,16 +364,13 @@ class BeautyEngine:
 
         # Get parameters
         skin_strength = params.get('skin_smooth', 0.0)
-        skin_tone_val = params.get('skin_tone', 0.0)
         color_temp = params.get('color_temperature', 0.0)
-        color_tint = params.get('color_tint', 0.0)
 
         # Skip if no processing needed
         has_skin = skin_strength > 0.01
-        has_tone = abs(skin_tone_val) > 0.01
-        has_color = abs(color_temp) > 0.01 or abs(color_tint) > 0.01
+        has_color = abs(color_temp) > 0.01
 
-        if not has_skin and not has_tone and not has_color:
+        if not has_skin and not has_color:
             return frame_gpu, None
 
         # [V39] AI Skin Parsing for hybrid masking
@@ -495,7 +492,7 @@ class BeautyEngine:
                      cp.int32(w), cp.int32(h),
                      cp.float32(0.0),
                      cp.float32(color_temp),
-                     cp.float32(color_tint))
+                     cp.float32(0.0))
                 )
                 frame_gpu = result_gpu
             else:
@@ -507,8 +504,8 @@ class BeautyEngine:
                 diff = abs(result_mean - orig_mean)
                 print(f"[V31-DP] str={skin_strength:.2f}, blend={blend_strength:.2f}, diff={diff:.2f}")
 
-        # ===== Skin Tone / Color Only (No Smoothing) =====
-        elif has_tone or has_color:
+        # ===== Color Only (No Smoothing) =====
+        elif has_color:
             result_gpu = cp.empty_like(frame_gpu)
             grid_dim = ((w + 15) // 16, (h + 15) // 16)
 
@@ -518,7 +515,7 @@ class BeautyEngine:
                  w, h,
                  cp.float32(0.0),  # No smoothing blend
                  cp.float32(color_temp),
-                 cp.float32(color_tint))
+                 cp.float32(0.0))
             )
             frame_gpu = result_gpu
 

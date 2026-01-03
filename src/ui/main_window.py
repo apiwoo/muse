@@ -26,7 +26,7 @@ class MainWindow(QMainWindow):
         # [한글화] 윈도우 타이틀
         self.setWindowTitle("프로젝트 MUSE: AI 방송 시스템 (v2.1 GUI)")
         self.resize(1280, 720)
-        self.setStyleSheet("background-color: #121212; color: #F0F0F0;")
+        self.setStyleSheet("background-color: #0A0A0A; color: #E0E0E0; font-family: Pretendard, Malgun Gothic, sans-serif;")
 
         self._init_ui()
 
@@ -43,13 +43,28 @@ class MainWindow(QMainWindow):
         
         self.beauty_panel = BeautyPanel()
         self.dock_panel.setWidget(self.beauty_panel)
-        
+        self.dock_panel.setStyleSheet("""
+            QDockWidget {
+                background: transparent;
+                font-family: Pretendard, sans-serif;
+            }
+            QDockWidget::title {
+                background: #0A0A0A;
+                padding: 10px 14px;
+                color: rgba(255, 255, 255, 0.4);
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 1px;
+                text-transform: uppercase;
+            }
+        """)
+
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_panel)
 
         # 상태 표시줄
         # [한글화] 안내 문구
         self.status_label = QLabel("준비됨. 배경이 바뀌었다면 'B' 키를 눌러 리셋하세요.")
-        self.status_label.setStyleSheet("padding: 5px; color: #888;")
+        self.status_label.setStyleSheet("padding: 10px 16px; color: rgba(255, 255, 255, 0.4); font-size: 11px; font-weight: 500;")
         self.statusBar().addWidget(self.status_label)
 
     def connect_worker(self, worker):

@@ -9,7 +9,7 @@ import time
 
 from PySide6.QtWidgets import QApplication, QDialog, QSplashScreen
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QKeySequence, QPixmap, QColor
+from PySide6.QtGui import QKeySequence, QPixmap, QColor, QFontDatabase, QFont
 import qdarktheme
 
 # Add Paths
@@ -83,6 +83,24 @@ def main():
 
     app = QApplication(sys.argv)
     qdarktheme.setup_theme("dark")
+
+    # [Font Loading] Pretendard 폰트 로드
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fonts_dir = os.path.join(root_dir, "assets", "fonts")
+    if os.path.exists(fonts_dir):
+        import glob
+        font_files = glob.glob(os.path.join(fonts_dir, "*.otf")) + glob.glob(os.path.join(fonts_dir, "*.ttf"))
+        for font_path in font_files:
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            if font_id >= 0:
+                print(f"[FONT] Loaded: {os.path.basename(font_path)}")
+            else:
+                print(f"[FONT] Failed to load: {os.path.basename(font_path)}")
+
+    # Set application font with fallbacks
+    app_font = QFont("Pretendard", 10)
+    app_font.setFamilies(["Pretendard", "Malgun Gothic", "Segoe UI"])
+    app.setFont(app_font)
 
     # [Step 1] Show Launcher First
     launcher = LauncherDialog()

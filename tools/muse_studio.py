@@ -18,6 +18,7 @@ os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 # os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
+from PySide6.QtGui import QFontDatabase, QFont
 try:
     import qdarktheme
 except ImportError:
@@ -152,6 +153,22 @@ class MuseStudio(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     if qdarktheme: qdarktheme.setup_theme("dark") # Use as base, overlay STYLESHEET
+
+    # [Font Loading] Pretendard 폰트 로드
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fonts_dir = os.path.join(root_dir, "assets", "fonts")
+    if os.path.exists(fonts_dir):
+        font_files = glob.glob(os.path.join(fonts_dir, "*.otf")) + glob.glob(os.path.join(fonts_dir, "*.ttf"))
+        for font_path in font_files:
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            if font_id >= 0:
+                print(f"[FONT] Loaded: {os.path.basename(font_path)}")
+
+    # Set application font with fallbacks
+    app_font = QFont("Pretendard", 10)
+    app_font.setFamilies(["Pretendard", "Malgun Gothic", "Segoe UI"])
+    app.setFont(app_font)
+
     win = MuseStudio()
     win.show()
     sys.exit(app.exec())

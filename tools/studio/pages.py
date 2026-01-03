@@ -151,7 +151,7 @@ class Page2_CameraConnect(QWidget):
         layout.addWidget(self.lbl_info)
 
         card = QFrame()
-        card.setStyleSheet("background-color: #252525; border-radius: 15px; border: 1px solid #333;")
+        card.setStyleSheet("background-color: rgba(255, 255, 255, 0.02); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.04);")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(40, 40, 40, 40)
         card_layout.setSpacing(20)
@@ -163,7 +163,7 @@ class Page2_CameraConnect(QWidget):
         
         btn_refresh = QPushButton("[RESET]")
         btn_refresh.setFixedSize(50, 50)
-        btn_refresh.setStyleSheet("background-color: #444; color: white; border-radius: 6px; font-size: 20px; border: none;")
+        btn_refresh.setStyleSheet("background-color: rgba(255, 255, 255, 0.06); color: white; border-radius: 10px; font-size: 18px; border: none;")
         btn_refresh.clicked.connect(self.refresh_cameras)
         hbox.addWidget(btn_refresh)
         card_layout.addLayout(hbox)
@@ -177,7 +177,7 @@ class Page2_CameraConnect(QWidget):
         layout.addWidget(card)
 
         btn_back = QPushButton("<- 뒤로 가기")
-        btn_back.setStyleSheet("background: transparent; color: #888; font-size: 14px; border: none;")
+        btn_back.setStyleSheet("background: transparent; color: rgba(255, 255, 255, 0.4); font-size: 14px; border: none;")
         btn_back.setCursor(Qt.PointingHandCursor)
         btn_back.clicked.connect(self.go_back.emit)
         layout.addWidget(btn_back)
@@ -418,7 +418,7 @@ class Page3_DataCollection(QWidget):
         layout.addWidget(self.gl_widget, stretch=3)
 
         sidebar = QFrame()
-        sidebar.setStyleSheet("background-color: #1E1E1E; border-left: 1px solid #333;")
+        sidebar.setStyleSheet("background-color: #0D0D0D; border-left: 1px solid rgba(255, 255, 255, 0.04);")
         sidebar.setFixedWidth(400)
         
         sb_layout = QVBoxLayout(sidebar)
@@ -431,7 +431,7 @@ class Page3_DataCollection(QWidget):
         sb_layout.addWidget(lbl_title)
 
         self.status_card = QFrame()
-        self.status_card.setStyleSheet("background-color: #2D2D2D; border-radius: 10px; padding: 15px;")
+        self.status_card.setStyleSheet("background-color: rgba(255, 255, 255, 0.03); border-radius: 14px; padding: 18px; border: 1px solid rgba(255, 255, 255, 0.04);")
         sc_layout = QVBoxLayout(self.status_card)
         
         self.lbl_bg_status = QLabel("[ERROR] [WARNING] 배경 촬영 필요")
@@ -612,9 +612,19 @@ class Page4_AiTraining(QWidget):
         self.list_widget.setSpacing(10)
         self.list_widget.setSelectionMode(QAbstractItemView.NoSelection) # Custom Checkbox Logic
         self.list_widget.setStyleSheet("""
-            QListWidget { background-color: #222; border: 1px solid #444; border-radius: 8px; }
-            QListWidget::item { background-color: #333; border-radius: 5px; padding: 5px; }
-            QListWidget::item:hover { background-color: #444; }
+            QListWidget {
+                background-color: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.04);
+                border-radius: 12px;
+            }
+            QListWidget::item {
+                background-color: rgba(255, 255, 255, 0.03);
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.06);
+            }
         """)
         self.list_widget.setVisible(False)
         layout.addWidget(self.list_widget, stretch=1)
@@ -624,9 +634,13 @@ class Page4_AiTraining(QWidget):
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("""
             QTextEdit {
-                background-color: #111; color: #00FF00; 
-                font-family: Consolas; font-size: 12px; 
-                border: 1px solid #333; border-radius: 8px; padding: 10px;
+                background-color: #050505;
+                color: #00FF88;
+                font-family: Consolas, D2Coding, monospace;
+                font-size: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.04);
+                border-radius: 12px;
+                padding: 12px;
             }
         """)
         self.log_view.setVisible(False)

@@ -23,7 +23,7 @@ class Viewport(QLabel):
         # 이미지가 위젯 크기를 강제로 늘리는 피드백 루프 방지
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         
-        self.setStyleSheet("background-color: #121212; border: 1px solid #333;")
+        self.setStyleSheet("background-color: #050505; border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 4px;")
         # [한글화] 대기 문구
         self.setText("카메라 신호를 기다리는 중...")
         self.setMinimumSize(640, 360)

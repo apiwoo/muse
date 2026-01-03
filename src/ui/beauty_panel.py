@@ -25,43 +25,45 @@ class BeautyPanel(QWidget):
 
         self.setStyleSheet("""
             QWidget {
-                background-color: #121212;
-                color: #EEEEEE;
-                font-family: 'Segoe UI', sans-serif;
+                background-color: #0A0A0A;
+                color: #E0E0E0;
+                font-family: Pretendard, Malgun Gothic, sans-serif;
             }
             QGroupBox {
-                border: none;
-                margin-top: 10px;
-                background: #1E1E1E;
-                border-radius: 8px;
-                padding-top: 25px; /* Title Space */
-                padding-bottom: 15px;
+                border: 1px solid rgba(255, 255, 255, 0.04);
+                margin-top: 12px;
+                background: rgba(255, 255, 255, 0.02);
+                border-radius: 16px;
+                padding-top: 28px;
+                padding-bottom: 18px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-                color: #00ADB5; /* Accent Color */
-                font-size: 12px;
-                font-weight: bold;
+                left: 16px;
+                padding: 0 8px;
+                color: #00D4DB;
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 1.5px;
                 text-transform: uppercase;
             }
             QCheckBox {
-                color: #AAA;
-                spacing: 8px;
+                color: rgba(255, 255, 255, 0.6);
+                spacing: 10px;
                 font-size: 13px;
-                margin-left: 10px;
+                font-weight: 500;
+                margin-left: 12px;
             }
             QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border-radius: 4px;
-                border: 1px solid #555;
-                background: #2D2D2D;
+                width: 20px;
+                height: 20px;
+                border-radius: 6px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                background: rgba(255, 255, 255, 0.05);
             }
             QCheckBox::indicator:checked {
-                background: #00ADB5;
-                border-color: #00ADB5;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #00D4DB, stop:1 #7B61FF);
+                border-color: transparent;
             }
             QScrollArea {
                 border: none;
@@ -69,14 +71,20 @@ class BeautyPanel(QWidget):
             }
             QScrollBar:vertical {
                 border: none;
-                background: #121212;
-                width: 8px;
+                background: transparent;
+                width: 6px;
                 margin: 0;
             }
             QScrollBar::handle:vertical {
-                background: #333;
-                min-height: 20px;
-                border-radius: 4px;
+                background: rgba(255, 255, 255, 0.08);
+                min-height: 30px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #00D4DB;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
 
@@ -94,12 +102,10 @@ class BeautyPanel(QWidget):
             'waist_slim': 0.0,
             'hip_widen': 0.0,
             'skin_smooth': 0.0,
-            'skin_tone': 0.0,
             'show_body_debug': False,
 
             # 색상 조정
             'color_temperature': 0.0,   # 색온도 (-1 Cool ~ 1 Warm)
-            'color_tint': 0.0,          # 틴트 (-1 Green ~ 1 Magenta)
             'teeth_whiten': 0.0         # 치아 미백 (0 ~ 1)
         }
 
@@ -115,16 +121,16 @@ class BeautyPanel(QWidget):
 
         # 1. Header Area
         header = QFrame()
-        header.setStyleSheet("background-color: #121212; padding: 20px;")
+        header.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #151515, stop:1 #0A0A0A); padding: 28px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.04);")
         h_layout = QVBoxLayout(header)
 
         self.title_label = QLabel("MUSE 뷰티 엔진")
-        self.title_label.setStyleSheet("font-size: 22px; font-weight: 800; letter-spacing: 1px; color: #FFF;")
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 3px; color: #FFFFFF; text-transform: uppercase;")
         self.title_label.setAlignment(Qt.AlignCenter)
         h_layout.addWidget(self.title_label)
 
         self.info_label = QLabel("V25.0 High-Precision Mode")
-        self.info_label.setStyleSheet("color: #00ADB5; font-size: 11px; font-weight: bold;")
+        self.info_label.setStyleSheet("color: #00D4DB; font-size: 11px; font-weight: 500; letter-spacing: 0.5px;")
         self.info_label.setAlignment(Qt.AlignCenter)
         h_layout.addWidget(self.info_label)
 
@@ -145,37 +151,41 @@ class BeautyPanel(QWidget):
         self.bg_required_frame = QFrame()
         self.bg_required_frame.setStyleSheet("""
             QFrame {
-                background-color: #2D2D2D;
-                border: 2px solid #FF5252;
-                border-radius: 8px;
-                padding: 15px;
+                background-color: rgba(255, 82, 82, 0.06);
+                border: 1px solid rgba(255, 82, 82, 0.25);
+                border-radius: 14px;
+                padding: 18px;
             }
         """)
         bg_layout = QVBoxLayout(self.bg_required_frame)
         bg_layout.setSpacing(10)
 
         bg_title = QLabel("⚠️ 배경 저장 필요")
-        bg_title.setStyleSheet("color: #FF5252; font-size: 14px; font-weight: bold; border: none;")
+        bg_title.setStyleSheet("color: #FF5252; font-size: 13px; font-weight: 600; letter-spacing: 0.3px; border: none;")
         bg_layout.addWidget(bg_title)
 
         bg_desc = QLabel("배경을 저장해야 보정이 활성화됩니다.\n카메라 화면에서 벗어난 채로 배경을 저장해주세요.")
-        bg_desc.setStyleSheet("color: #AAAAAA; font-size: 12px; border: none;")
+        bg_desc.setStyleSheet("color: rgba(255, 255, 255, 0.5); font-size: 12px; line-height: 1.5; border: none;")
         bg_desc.setWordWrap(True)
         bg_layout.addWidget(bg_desc)
 
         self.btn_capture_bg = QPushButton("📷 배경 저장하기 (단축키: B)")
         self.btn_capture_bg.setStyleSheet("""
             QPushButton {
-                background-color: #00ADB5;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00D4DB, stop:1 #7B61FF);
                 color: white;
                 border: none;
-                border-radius: 6px;
-                padding: 12px;
+                border-radius: 12px;
+                padding: 14px;
                 font-size: 13px;
-                font-weight: bold;
+                font-weight: 600;
+                letter-spacing: 0.5px;
             }
             QPushButton:hover {
-                background-color: #00CED6;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00E5EC, stop:1 #8B71FF);
+            }
+            QPushButton:pressed {
+                background: #00BEC7;
             }
         """)
         self.btn_capture_bg.setCursor(Qt.PointingHandCursor)
@@ -252,11 +262,6 @@ class BeautyPanel(QWidget):
         self.slider_skin.valueChanged.connect(lambda v: self._update_param('skin_smooth', v))
         s_inner.addWidget(self.slider_skin)
 
-        # Tone Slider (Bipolar: -1.0 ~ 1.0)
-        self.slider_tone = ModernSlider("톤 (백옥 ↔ 생기)", 0.5)
-        self.slider_tone.valueChanged.connect(self._update_tone)
-        s_inner.addWidget(self.slider_tone)
-
         # Teeth Whitening Slider
         self.slider_teeth = ModernSlider("치아 미백", 0.0)
         self.slider_teeth.valueChanged.connect(lambda v: self._update_param('teeth_whiten', v))
@@ -276,11 +281,6 @@ class BeautyPanel(QWidget):
         self.slider_temp = ModernSlider("색온도 (Cool ↔ Warm)", 0.5)
         self.slider_temp.valueChanged.connect(self._update_temperature)
         c_inner.addWidget(self.slider_temp)
-
-        # 틴트 (Tint)
-        self.slider_tint = ModernSlider("틴트 (Green ↔ Magenta)", 0.5)
-        self.slider_tint.valueChanged.connect(self._update_tint)
-        c_inner.addWidget(self.slider_tint)
 
         color_group.setLayout(c_inner)
         content_layout.addWidget(color_group)
@@ -315,20 +315,10 @@ class BeautyPanel(QWidget):
         self.current_params[key] = value
         self.paramChanged.emit(self.current_params)
 
-    def _update_tone(self, value):
-        """UI 0.0~1.0 -> Logic -1.0~1.0"""
-        tone_val = (value - 0.5) * 2.0
-        self._update_param('skin_tone', tone_val)
-
     def _update_temperature(self, value):
         """UI 0.0~1.0 -> Logic -1.0~1.0"""
         temp_val = (value - 0.5) * 2.0
         self._update_param('color_temperature', temp_val)
-
-    def _update_tint(self, value):
-        """UI 0.0~1.0 -> Logic -1.0~1.0"""
-        tint_val = (value - 0.5) * 2.0
-        self._update_param('color_tint', tint_val)
 
     # =========================================================================
     # External Control
@@ -344,8 +334,8 @@ class BeautyPanel(QWidget):
         sliders = [
             self.slider_eye, self.slider_chin, self.slider_nose,
             self.slider_head, self.slider_shoulder, self.slider_ribcage,
-            self.slider_waist, self.slider_hip, self.slider_skin, self.slider_tone,
-            self.slider_teeth, self.slider_temp, self.slider_tint
+            self.slider_waist, self.slider_hip, self.slider_skin,
+            self.slider_teeth, self.slider_temp
         ]
         for s in sliders:
             s.blockSignals(True)
@@ -377,21 +367,11 @@ class BeautyPanel(QWidget):
         if 'teeth_whiten' in params:
             self.slider_teeth.set_value(params['teeth_whiten'])
 
-        if 'skin_tone' in params:
-            # Logic -1.0~1.0 -> UI 0.0~1.0
-            ui_val = (params['skin_tone'] / 2.0) + 0.5
-            self.slider_tone.set_value(ui_val)
-
         # ---- Color Grading ----
         if 'color_temperature' in params:
             # Logic -1.0~1.0 -> UI 0.0~1.0
             ui_val = (params['color_temperature'] / 2.0) + 0.5
             self.slider_temp.set_value(ui_val)
-
-        if 'color_tint' in params:
-            # Logic -1.0~1.0 -> UI 0.0~1.0
-            ui_val = (params['color_tint'] / 2.0) + 0.5
-            self.slider_tint.set_value(ui_val)
 
         # ---- Checkboxes ----
         if 'show_body_debug' in params:

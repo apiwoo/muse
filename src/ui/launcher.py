@@ -35,26 +35,109 @@ class LauncherDialog(QDialog):
         self.setWindowTitle("MUSE 스튜디오 설정 (v5.3 - LoRA Integration)")
         self.resize(900, 650)
         self.setStyleSheet("""
-            QDialog { background-color: #1E1E1E; color: #EEE; font-family: 'Segoe UI'; }
-            QGroupBox { border: 1px solid #444; border-radius: 5px; margin-top: 20px; font-weight: bold; color: #00ADB5; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-            QListWidget { background-color: #252525; border: 1px solid #333; color: white; border-radius: 5px; font-size: 14px; }
-            QListWidget::item { padding: 10px; }
-            QListWidget::item:selected { background-color: #00ADB5; color: white; }
-            QLabel { color: #CCC; }
-            QLineEdit, QComboBox, QKeySequenceEdit { background-color: #333; border: 1px solid #555; padding: 5px; color: white; border-radius: 4px; }
-            QPushButton { background-color: #444; border: none; padding: 8px 15px; color: white; border-radius: 4px; }
-            QPushButton:hover { background-color: #555; }
-            QPushButton#Primary { background-color: #00ADB5; font-weight: bold; font-size: 14px; }
-            QPushButton#Primary:hover { background-color: #00C4CC; }
-            QPushButton#Danger { background-color: #D32F2F; }
-            QPushButton#Danger:hover { background-color: #E53935; }
-            QPushButton#Accent { background-color: #E65100; color: white; font-weight: bold; } 
-            QPushButton#Accent:hover { background-color: #FF6F00; }
-            QRadioButton { color: #BBB; spacing: 8px; }
-            QRadioButton::indicator { width: 16px; height: 16px; border-radius: 8px; border: 1px solid #666; background: #222; }
-            QRadioButton::indicator:checked { background: #00ADB5; border-color: #00ADB5; }
-            QRadioButton:disabled { color: #555; }
+            QDialog {
+                background-color: #0A0A0A;
+                color: #E0E0E0;
+                font-family: Pretendard, Malgun Gothic, sans-serif;
+            }
+            QGroupBox {
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: 12px;
+                margin-top: 24px;
+                font-weight: 600;
+                color: #00D4DB;
+                background: rgba(255, 255, 255, 0.02);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 14px;
+                padding: 0 8px;
+                font-size: 11px;
+                letter-spacing: 0.5px;
+            }
+            QListWidget {
+                background-color: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                color: white;
+                border-radius: 10px;
+                font-size: 14px;
+            }
+            QListWidget::item {
+                padding: 12px;
+                border-radius: 6px;
+            }
+            QListWidget::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00D4DB, stop:1 #7B61FF);
+                color: white;
+            }
+            QListWidget::item:hover:!selected {
+                background-color: rgba(255, 255, 255, 0.04);
+            }
+            QLabel {
+                color: rgba(255, 255, 255, 0.7);
+            }
+            QLineEdit, QComboBox, QKeySequenceEdit {
+                background-color: rgba(255, 255, 255, 0.04);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                padding: 10px;
+                color: white;
+                border-radius: 8px;
+                font-size: 13px;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #00D4DB;
+            }
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.06);
+                border: none;
+                padding: 10px 18px;
+                color: white;
+                border-radius: 8px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+            QPushButton#Primary {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00D4DB, stop:1 #7B61FF);
+                font-weight: 600;
+                font-size: 14px;
+            }
+            QPushButton#Primary:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00E5EC, stop:1 #8B71FF);
+            }
+            QPushButton#Danger {
+                background-color: rgba(211, 47, 47, 0.8);
+            }
+            QPushButton#Danger:hover {
+                background-color: #D32F2F;
+            }
+            QPushButton#Accent {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF6D00, stop:1 #FF9100);
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton#Accent:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF8F00, stop:1 #FFAB00);
+            }
+            QRadioButton {
+                color: rgba(255, 255, 255, 0.7);
+                spacing: 10px;
+            }
+            QRadioButton::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                background: rgba(255, 255, 255, 0.04);
+            }
+            QRadioButton::indicator:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #00D4DB, stop:1 #7B61FF);
+                border-color: transparent;
+            }
+            QRadioButton:disabled {
+                color: rgba(255, 255, 255, 0.3);
+            }
         """)
 
         self.pm = ProfileManager()
