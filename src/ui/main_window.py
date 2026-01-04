@@ -1,5 +1,6 @@
 # Project MUSE - main_window.py
 # Broadcast Page (Converted from MainWindow for QStackedWidget integration)
+# V26.0: QML UI Integration (Hybrid Approach)
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -7,7 +8,8 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushBu
 from PySide6.QtCore import Qt, Signal
 
 from ui.viewport import Viewport
-from ui.beauty_panel import BeautyPanel
+from ui.qml_loader import QmlLoader
+from bridge.beauty_bridge import BeautyBridge
 
 
 class BroadcastPage(QWidget):
@@ -109,9 +111,16 @@ class BroadcastPage(QWidget):
         separator.setStyleSheet("background-color: rgba(255, 255, 255, 0.06);")
         panel_layout.addWidget(separator)
 
-        # 뷰티 패널
-        self.beauty_panel = BeautyPanel()
-        panel_layout.addWidget(self.beauty_panel)
+        # 뷰티 패널 (QML 버전)
+        self.beauty_bridge = BeautyBridge()
+        self.beauty_panel_qml = QmlLoader.load(
+            "panels/BeautyPanelQml.qml",
+            bridges={"beautyBridge": self.beauty_bridge}
+        )
+        panel_layout.addWidget(self.beauty_panel_qml)
+
+        # 레거시 호환용 참조
+        self.beauty_panel = self.beauty_bridge
 
         content_layout.addWidget(panel_container, stretch=0)
         main_layout.addWidget(content_area, stretch=1)
@@ -143,42 +152,42 @@ class BroadcastPage(QWidget):
             worker.current_profile_name, "background.jpg"
         )
         has_bg = os.path.exists(bg_path)
-        self.beauty_panel.set_background_status(has_bg)
+        self.beauty_bridge.set_background_status(has_bg)
         print(f"[INIT] Background pre-check: {has_bg} ({bg_path})")
 
         # 영상 수신: Worker가 프레임을 보내면 Viewport에 그림
         worker.frame_processed.connect(self.viewport.update_image)
 
         # 파라미터 송신: UI 슬라이더가 변하면 Worker에 전달
-        self.beauty_panel.paramChanged.connect(worker.update_params)
+        self.beauty_bridge.paramChanged.connect(worker.update_params)
 
         # 배경 리셋 신호 연결
         self.request_bg_reset.connect(worker.reset_background)
 
         # 배경 상태 시그널 연결
-        worker.bgStatusChanged.connect(self.beauty_panel.set_background_status)
+        worker.bgStatusChanged.connect(self.beauty_bridge.set_background_status)
 
         # 배경 캡처 버튼 -> Worker 배경 리셋
-        self.beauty_panel.bgCaptureRequested.connect(worker.reset_background)
+        self.beauty_bridge.bgCaptureRequested.connect(worker.reset_background)
 
-        print("[LINK] [BroadcastPage] UI와 Worker 스레드 연결 완료")
+        print("[LINK] [BroadcastPage] UI와 Worker 스레드 연결 완료 (QML Mode)")
 
     def disconnect_worker(self):
         """Worker 연결 해제 (홈으로 돌아갈 때)"""
         if self.worker:
             try:
                 self.worker.frame_processed.disconnect(self.viewport.update_image)
-                self.beauty_panel.paramChanged.disconnect(self.worker.update_params)
+                self.beauty_bridge.paramChanged.disconnect(self.worker.update_params)
                 self.request_bg_reset.disconnect(self.worker.reset_background)
-                self.worker.bgStatusChanged.disconnect(self.beauty_panel.set_background_status)
-                self.beauty_panel.bgCaptureRequested.disconnect(self.worker.reset_background)
+                self.worker.bgStatusChanged.disconnect(self.beauty_bridge.set_background_status)
+                self.beauty_bridge.bgCaptureRequested.disconnect(self.worker.reset_background)
             except RuntimeError:
                 pass  # 이미 연결 해제된 경우
             self.worker = None
 
     def set_profile_info(self, profile_name):
         """프로필 정보 표시"""
-        self.beauty_panel.set_profile_info(profile_name)
+        self.beauty_bridge.set_profile_info(profile_name)
 
     def keyPressEvent(self, event):
         """키보드 입력 감지"""
@@ -192,7 +201,7 @@ class BroadcastPage(QWidget):
 
 # 레거시 호환용 MainWindow (독립 실행 시 사용)
 from ui.frameless_base import FramelessMixin
-from ui.titlebar import TitleBar
+from bridge.titlebar_bridge import TitleBarBridge
 from PySide6.QtWidgets import QMainWindow
 
 
@@ -229,8 +238,14 @@ class MainWindow(FramelessMixin, QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
 
-        # 커스텀 타이틀바
-        self.titlebar = TitleBar(self, title="PROJECT MUSE")
+        # 커스텀 타이틀바 (QML 버전)
+        self.titlebar_bridge = TitleBarBridge(self)
+        self.titlebar_bridge.title = "PROJECT MUSE"
+        self.titlebar = QmlLoader.load(
+            "panels/TitleBarQml.qml",
+            bridges={"titlebarBridge": self.titlebar_bridge}
+        )
+        self.titlebar.setFixedHeight(30)
         central_layout.addWidget(self.titlebar)
 
         # BroadcastPage를 메인 컨텐츠로 사용
@@ -242,7 +257,8 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.setCentralWidget(central_container)
 
         # 레거시 호환용 속성
-        self.beauty_panel = self.broadcast_page.beauty_panel
+        self.beauty_bridge = self.broadcast_page.beauty_bridge
+        self.beauty_panel = self.broadcast_page.beauty_panel  # BeautyBridge 참조
         self.viewport = self.broadcast_page.viewport
         self.status_label = self.broadcast_page.status_label
 
@@ -261,6 +277,12 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.broadcast_page.status_label.setText("배경 리셋 중...")
         else:
             super().keyPressEvent(event)
+
+    def changeEvent(self, event):
+        """윈도우 상태 변경 감지 (최대화 등)"""
+        super().changeEvent(event)
+        if hasattr(self, 'titlebar_bridge'):
+            self.titlebar_bridge.update_maximized_state()
 
     def closeEvent(self, event):
         """창 닫기 이벤트"""

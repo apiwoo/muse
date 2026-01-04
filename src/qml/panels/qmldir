@@ -1,0 +1,3 @@
+module Panels
+BeautyPanelQml 1.0 BeautyPanelQml.qml
+TitleBarQml 1.0 TitleBarQml.qml

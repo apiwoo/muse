@@ -1,0 +1,5 @@
+module Components
+ModernSlider 1.0 ModernSlider.qml
+ModernButton 1.0 ModernButton.qml
+ModernCheckBox 1.0 ModernCheckBox.qml
+GroupBox 1.0 GroupBox.qml
