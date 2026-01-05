@@ -5,13 +5,12 @@ import "../styles"
 Button {
     id: root
 
-    // Button type: "primary", "secondary", "danger", "gradient"
-    property string buttonType: "secondary"
-    property string iconText: ""  // Optional icon (emoji or text)
+    property string buttonType: "primary"
+    property string iconText: ""
     property bool loading: false
 
-    implicitWidth: Math.max(100, contentRow.implicitWidth + 24)
-    implicitHeight: 36
+    implicitWidth: Math.max(96, contentText.implicitWidth + 32)
+    implicitHeight: Theme.buttonHeightMedium
 
     contentItem: Row {
         id: contentRow
@@ -28,6 +27,7 @@ Button {
             border.width: 2
             border.color: "white"
             opacity: 0.8
+            anchors.verticalCenter: parent.verticalCenter
 
             RotationAnimation on rotation {
                 running: root.loading
@@ -52,83 +52,66 @@ Button {
             visible: root.iconText !== "" && !root.loading
             text: root.iconText
             font.pixelSize: 14
-            color: "white"
+            color: "#ffffff"
             verticalAlignment: Text.AlignVCenter
+            anchors.verticalCenter: parent.verticalCenter
         }
 
         // Button text
         Text {
+            id: contentText
             text: root.text
-            color: "white"
+            color: "#ffffff"
             font.pixelSize: Theme.fontSizeMedium
-            font.weight: Font.DemiBold
+            font.weight: Font.Medium
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
-            opacity: root.loading ? 0.7 : 1.0
+            opacity: root.loading ? 0.5 : 1.0
+            anchors.verticalCenter: parent.verticalCenter
         }
     }
 
     background: Rectangle {
-        id: bgRect
-        radius: Theme.radiusMedium
-        color: getBackgroundColor()
-        border.width: root.buttonType === "secondary" ? 1 : 0
-        border.color: Qt.rgba(1, 1, 1, 0.1)
-
-        // Gradient background (only for gradient type)
-        gradient: root.buttonType === "gradient" ? gradientBg : null
+        radius: Theme.radiusSmall
+        color: {
+            if (root.buttonType === "primary") {
+                return root.pressed ? Qt.darker(Theme.blurple, 1.1) :
+                       root.hovered ? Theme.blurpleHover : Theme.blurple
+            } else if (root.buttonType === "danger") {
+                return root.pressed ? Qt.darker(Theme.red, 1.1) :
+                       root.hovered ? Theme.redHover : Theme.red
+            } else if (root.buttonType === "success") {
+                return root.pressed ? Qt.darker(Theme.green, 1.1) :
+                       root.hovered ? Qt.darker(Theme.green, 0.9) : Theme.green
+            } else if (root.buttonType === "gradient") {
+                return "transparent"
+            } else {
+                return root.pressed ? Theme.bgModifierActive :
+                       root.hovered ? Theme.bgModifierHover : Theme.bgModifierSelected
+            }
+        }
 
         Behavior on color {
             ColorAnimation { duration: Theme.animFast }
         }
 
-        // Press scale effect
-        transform: Scale {
-            origin.x: bgRect.width / 2
-            origin.y: bgRect.height / 2
-            xScale: root.pressed ? 0.97 : 1.0
-            yScale: root.pressed ? 0.97 : 1.0
-
-            Behavior on xScale {
-                NumberAnimation { duration: 100; easing.type: Easing.OutQuad }
-            }
-            Behavior on yScale {
-                NumberAnimation { duration: 100; easing.type: Easing.OutQuad }
-            }
-        }
+        // Gradient background (only for gradient type)
+        gradient: root.buttonType === "gradient" ? gradientBg : null
 
         Gradient {
             id: gradientBg
             orientation: Gradient.Horizontal
             GradientStop {
                 position: 0.0
-                color: root.hovered ? Qt.lighter(Theme.accentCyan, 1.1) : Theme.accentCyan
+                color: root.hovered ? Qt.lighter(Theme.blurple, 1.1) : Theme.blurple
             }
             GradientStop {
                 position: 1.0
-                color: root.hovered ? Qt.lighter(Theme.accentPurple, 1.1) : Theme.accentPurple
+                color: root.hovered ? Qt.lighter("#7B61FF", 1.1) : "#7B61FF"
             }
         }
     }
 
-    function getBackgroundColor() {
-        if (root.buttonType === "gradient") {
-            return "transparent"  // Using gradient instead
-        }
-        if (root.buttonType === "primary") {
-            return root.pressed ? Qt.darker(Theme.accent, 1.1) :
-                   root.hovered ? Theme.accentHover : Theme.accent
-        }
-        if (root.buttonType === "danger") {
-            return root.pressed ? Qt.darker(Theme.danger, 1.1) :
-                   root.hovered ? Theme.dangerHover : Theme.danger
-        }
-        // Secondary (default)
-        return root.pressed ? Qt.darker(Theme.bgTertiary, 1.1) :
-               root.hovered ? Theme.bgHover : Theme.bgTertiary
-    }
-
-    // Cursor
     MouseArea {
         anchors.fill: parent
         cursorShape: Qt.PointingHandCursor

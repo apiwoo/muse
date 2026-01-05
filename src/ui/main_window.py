@@ -63,41 +63,43 @@ class BroadcastPage(QWidget):
 
         # 패널 헤더 (홈 버튼 포함)
         panel_header = QWidget()
+        panel_header.setFixedHeight(40)
         panel_header.setStyleSheet("background-color: #2b2d31;")
         header_layout = QHBoxLayout(panel_header)
-        header_layout.setContentsMargins(16, 12, 16, 12)
+        header_layout.setContentsMargins(12, 8, 12, 8)
         header_layout.setSpacing(8)
 
-        lbl_header = QLabel("제어판")
+        lbl_header = QLabel("BEAUTY")
         lbl_header.setStyleSheet("""
-            color: rgba(255, 255, 255, 0.5);
-            font-size: 11px;
-            font-weight: 600;
+            color: #949ba4;
+            font-size: 10px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.02em;
+            letter-spacing: 0.5px;
         """)
         header_layout.addWidget(lbl_header)
 
         header_layout.addStretch()
 
         # 홈으로 버튼
-        self.btn_home = QPushButton("메인 메뉴")
+        self.btn_home = QPushButton("HOME")
         self.btn_home.setCursor(Qt.PointingHandCursor)
         self.btn_home.setStyleSheet("""
             QPushButton {
-                background-color: #4e5058;
-                color: #dbdee1;
+                background-color: transparent;
+                color: #b5bac1;
                 border: none;
-                border-radius: 4px;
-                padding: 6px 12px;
-                font-size: 11px;
-                font-weight: 600;
+                border-radius: 3px;
+                padding: 6px 10px;
+                font-size: 12px;
+                font-weight: 500;
             }
             QPushButton:hover {
-                background-color: #5c5f66;
+                background-color: #36373d;
+                color: #dbdee1;
             }
             QPushButton:pressed {
-                background-color: #3f4248;
+                background-color: #404249;
             }
         """)
         self.btn_home.clicked.connect(self._on_home_clicked)

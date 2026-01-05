@@ -2,7 +2,7 @@ import QtQuick 2.15
 import QtQuick.Layouts 1.15
 import "../styles"
 
-Rectangle {
+Item {
     id: root
 
     property string title: ""
@@ -10,64 +10,42 @@ Rectangle {
     property bool collapsed: false
     default property alias content: contentColumn.data
 
-    implicitHeight: collapsed ? titleHeight : titleHeight + contentColumn.implicitHeight + Theme.spacingMedium * 2
+    implicitHeight: collapsed ? titleHeight : titleHeight + Theme.spacingSmall + contentColumn.implicitHeight
     implicitWidth: 280
 
-    readonly property int titleHeight: 28
-
-    color: Qt.rgba(1, 1, 1, 0.02)
-    border.color: Qt.rgba(1, 1, 1, 0.04)
-    border.width: 1
-    radius: Theme.radiusLarge
+    readonly property int titleHeight: root.title !== "" ? 18 : 0
 
     Behavior on implicitHeight {
         NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutQuad }
     }
 
-    // Content container
-    ColumnLayout {
-        id: contentColumn
-        anchors.fill: parent
-        anchors.margins: Theme.spacingMedium
-        anchors.topMargin: root.titleHeight
-        spacing: Theme.spacingMedium
-        visible: !root.collapsed
-        opacity: root.collapsed ? 0 : 1
-
-        Behavior on opacity {
-            NumberAnimation { duration: Theme.animFast }
-        }
-    }
-
-    // Title label (floating on top-left border)
-    Rectangle {
-        x: 14
-        y: -8
-        color: Theme.bgPrimary
-        width: titleRow.width + 12
+    // Section Title (Discord style: uppercase, small, muted)
+    Item {
+        id: titleContainer
+        anchors.top: parent.top
+        anchors.left: parent.left
+        width: titleRow.width
         height: titleRow.height
         visible: root.title !== ""
 
         Row {
             id: titleRow
-            anchors.centerIn: parent
             spacing: 6
 
             Text {
                 id: titleText
-                text: root.title
-                color: Theme.accentCyan
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.DemiBold
-                font.letterSpacing: 1
-                textFormat: Text.PlainText
+                text: root.title.toUpperCase()
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSizeXSmall
+                font.weight: Font.Bold
+                font.letterSpacing: 0.5
             }
 
             // Collapse indicator
             Text {
                 visible: root.collapsible
                 text: root.collapsed ? "+" : "-"
-                color: Theme.textSecondary
+                color: Theme.textFaint
                 font.pixelSize: Theme.fontSizeSmall
                 font.weight: Font.Bold
             }
@@ -81,24 +59,31 @@ Rectangle {
         }
     }
 
-    // Subtle glow effect on hover
+    // Divider line under title
     Rectangle {
-        anchors.fill: parent
-        radius: parent.radius
-        color: "transparent"
-        border.color: Theme.accentCyan
-        border.width: 1
-        opacity: hoverArea.containsMouse ? 0.15 : 0
+        id: divider
+        anchors.top: titleContainer.bottom
+        anchors.topMargin: Theme.spacingXSmall
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 1
+        color: Theme.borderSubtle
+        visible: root.title !== ""
+    }
+
+    // Content
+    ColumnLayout {
+        id: contentColumn
+        anchors.top: root.title !== "" ? divider.bottom : parent.top
+        anchors.topMargin: root.title !== "" ? Theme.spacingMedium : 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        spacing: Theme.spacingSmall
+        visible: !root.collapsed
+        opacity: root.collapsed ? 0 : 1
 
         Behavior on opacity {
             NumberAnimation { duration: Theme.animFast }
         }
-    }
-
-    MouseArea {
-        id: hoverArea
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.NoButton
     }
 }

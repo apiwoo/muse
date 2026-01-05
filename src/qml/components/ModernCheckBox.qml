@@ -1,115 +1,79 @@
 import QtQuick 2.15
-import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
 import "../styles"
 
-CheckBox {
+Item {
     id: root
+    implicitHeight: 36
+    implicitWidth: 200
 
-    property string description: ""  // Optional description text
+    property string text: "Option"
+    property string description: ""
+    property bool checked: false
 
-    implicitWidth: contentRow.implicitWidth
-    implicitHeight: Math.max(20, contentColumn.implicitHeight)
+    signal toggled(bool newValue)
 
-    indicator: Rectangle {
-        id: checkboxBg
-        implicitWidth: 18
-        implicitHeight: 18
-        x: root.leftPadding
-        y: parent.height / 2 - height / 2
-        radius: 4
-        color: root.checked ? Theme.accent : "transparent"
-        border.width: root.checked ? 0 : 2
-        border.color: root.hovered ? Theme.textPrimary : Theme.textSecondary
+    RowLayout {
+        anchors.fill: parent
+        spacing: Theme.spacingMedium
 
-        Behavior on color {
-            ColorAnimation { duration: Theme.animFast }
-        }
-
-        Behavior on border.color {
-            ColorAnimation { duration: Theme.animFast }
-        }
-
-        // Checkmark
-        Item {
-            anchors.centerIn: parent
-            width: 12
-            height: 12
-            opacity: root.checked ? 1 : 0
-            scale: root.checked ? 1 : 0.5
-
-            Behavior on opacity {
-                NumberAnimation { duration: Theme.animFast }
-            }
-
-            Behavior on scale {
-                NumberAnimation { duration: Theme.animFast; easing.type: Easing.OutBack }
-            }
-
-            // Checkmark path using Canvas
-            Canvas {
-                anchors.fill: parent
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.clearRect(0, 0, width, height)
-                    ctx.strokeStyle = "white"
-                    ctx.lineWidth = 2
-                    ctx.lineCap = "round"
-                    ctx.lineJoin = "round"
-                    ctx.beginPath()
-                    ctx.moveTo(2, 6)
-                    ctx.lineTo(5, 10)
-                    ctx.lineTo(10, 3)
-                    ctx.stroke()
-                }
-            }
-        }
-
-        // Hover glow
-        Rectangle {
-            anchors.fill: parent
-            anchors.margins: -3
-            radius: 7
-            color: Theme.accent
-            opacity: root.hovered && !root.checked ? 0.15 : 0
-
-            Behavior on opacity {
-                NumberAnimation { duration: Theme.animFast }
-            }
-        }
-    }
-
-    contentItem: Row {
-        id: contentRow
-        leftPadding: root.indicator.width + 8
-        spacing: 0
-
+        // Label and description
         Column {
-            id: contentColumn
+            Layout.fillWidth: true
             spacing: 2
-            anchors.verticalCenter: parent.verticalCenter
 
             Text {
                 text: root.text
-                color: Theme.textPrimary
+                color: Theme.textNormal
                 font.pixelSize: Theme.fontSizeMedium
-                font.weight: Font.Medium
+                font.weight: Font.Normal
             }
 
             Text {
                 visible: root.description !== ""
                 text: root.description
-                color: Theme.textSecondary
+                color: Theme.textMuted
                 font.pixelSize: Theme.fontSizeSmall
-                width: Math.min(implicitWidth, 200)
+                width: parent.width
                 wrapMode: Text.WordWrap
             }
         }
-    }
 
-    // Cursor
-    MouseArea {
-        anchors.fill: parent
-        cursorShape: Qt.PointingHandCursor
-        acceptedButtons: Qt.NoButton
+        // Toggle Switch (Discord style)
+        Rectangle {
+            id: toggle
+            width: Theme.toggleWidth
+            height: Theme.toggleHeight
+            radius: height / 2
+            color: root.checked ? Theme.green : Theme.textFaint
+
+            Behavior on color {
+                ColorAnimation { duration: Theme.animNormal }
+            }
+
+            // Handle
+            Rectangle {
+                id: handle
+                width: 18
+                height: 18
+                radius: 9
+                color: "#ffffff"
+                y: (parent.height - height) / 2
+                x: root.checked ? parent.width - width - 3 : 3
+
+                Behavior on x {
+                    NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutQuad }
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    root.checked = !root.checked
+                    root.toggled(root.checked)
+                }
+            }
+        }
     }
 }

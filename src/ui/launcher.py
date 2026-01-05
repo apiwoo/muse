@@ -51,123 +51,118 @@ class MainMenuPage(QWidget):
                 font-family: 'Inter', 'Pretendard', 'Segoe UI', sans-serif;
             }
             QGroupBox {
-                border: 1px solid rgba(255, 255, 255, 0.06);
+                border: 1px solid #3f4147;
                 border-radius: 8px;
                 margin-top: 20px;
                 font-weight: 600;
-                color: #5865f2;
+                color: #949ba4;
                 background: #2b2d31;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 12px;
                 padding: 0 6px;
-                font-size: 11px;
-                letter-spacing: 0.02em;
+                font-size: 10px;
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
             }
             QListWidget {
                 background-color: #1e1f22;
-                border: 1px solid rgba(255, 255, 255, 0.06);
+                border: 1px solid #3f4147;
                 color: #dbdee1;
-                border-radius: 8px;
-                font-size: 13px;
+                border-radius: 4px;
+                font-size: 14px;
+                outline: none;
             }
             QListWidget::item {
-                padding: 10px;
-                border-radius: 4px;
+                padding: 10px 12px;
+                border-radius: 3px;
+                margin: 2px 4px;
             }
             QListWidget::item:selected {
-                background-color: #5865f2;
-                color: white;
+                background-color: #404249;
+                color: #f2f3f5;
             }
             QListWidget::item:hover:!selected {
-                background-color: rgba(255, 255, 255, 0.06);
+                background-color: #36373d;
             }
             QLabel {
                 color: #949ba4;
             }
             QLineEdit, QComboBox, QKeySequenceEdit {
-                background-color: #383a40;
+                background-color: #1e1f22;
                 border: none;
                 padding: 10px;
                 color: #dbdee1;
-                border-radius: 4px;
-                font-size: 13px;
+                border-radius: 3px;
+                font-size: 14px;
             }
             QLineEdit:focus, QComboBox:focus {
-                outline: 2px solid #5865f2;
+                outline: none;
             }
             QPushButton {
                 background-color: #4e5058;
-                border: 1px solid #5c5f66;
+                border: none;
                 padding: 10px 16px;
                 color: #ffffff;
-                border-radius: 6px;
-                font-weight: 600;
+                border-radius: 3px;
+                font-weight: 500;
+                font-size: 14px;
             }
             QPushButton:hover {
-                background-color: #5c5f66;
-                border-color: #6d6f78;
+                background-color: #6d6f78;
             }
             QPushButton:pressed {
-                background-color: #3f4248;
+                background-color: #4e5058;
             }
             QPushButton#Danger {
                 background-color: #da373c;
-                border: 1px solid #e5484d;
+                border: none;
             }
             QPushButton#Danger:hover {
-                background-color: #c62f33;
-                border-color: #da373c;
+                background-color: #a12d2f;
             }
             QRadioButton {
-                color: #949ba4;
+                color: #dbdee1;
                 spacing: 8px;
+                font-size: 14px;
             }
             QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 8px;
-                border: 2px solid #4e5058;
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border: 2px solid #72767d;
                 background: transparent;
             }
             QRadioButton::indicator:checked {
                 background-color: #5865f2;
                 border-color: #5865f2;
             }
+            QRadioButton::indicator:hover {
+                border-color: #b5bac1;
+            }
             QRadioButton:disabled {
-                color: #6d6f78;
+                color: #4e5058;
             }
-            /* 하단 강조 버튼 스타일 */
-            QPushButton#BigPrimary {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00D4DB, stop:1 #7B61FF);
-                font-size: 18px;
-                font-weight: 700;
-                padding: 20px;
-                border-radius: 12px;
-                border: none;
-                color: white;
+            QRadioButton::indicator:disabled {
+                border-color: #4e5058;
             }
-            QPushButton#BigPrimary:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00E5EC, stop:1 #8B71FF);
+            /* Scrollbar */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                border-radius: 3px;
             }
-            QPushButton#BigPrimary:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00B5BB, stop:1 #6A50E0);
+            QScrollBar::handle:vertical {
+                background: #4e5058;
+                border-radius: 3px;
+                min-height: 30px;
             }
-            QPushButton#BigAccent {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF6D00, stop:1 #FF9100);
-                font-size: 18px;
-                font-weight: 700;
-                padding: 20px;
-                border-radius: 12px;
-                border: none;
-                color: white;
+            QScrollBar::handle:vertical:hover {
+                background: #6d6f78;
             }
-            QPushButton#BigAccent:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF8F00, stop:1 #FFAB00);
-            }
-            QPushButton#BigAccent:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E05F00, stop:1 #E08000);
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
         """)
 
@@ -212,7 +207,7 @@ class MainMenuPage(QWidget):
 
         # === 상단: 타이틀 영역 ===
         title_area = QWidget()
-        title_area.setStyleSheet("background-color: #313338;")
+        title_area.setStyleSheet("background-color: #2b2d31;")
         title_layout = QVBoxLayout(title_area)
         title_layout.setContentsMargins(30, 20, 30, 20)
         title_layout.setSpacing(4)
@@ -220,10 +215,10 @@ class MainMenuPage(QWidget):
         lbl_title = QLabel("PROJECT MUSE")
         lbl_title.setAlignment(Qt.AlignCenter)
         lbl_title.setStyleSheet("""
-            color: #5865f2;
-            font-size: 28px;
-            font-weight: 800;
-            letter-spacing: 0.05em;
+            color: #f2f3f5;
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
         """)
         title_layout.addWidget(lbl_title)
 
@@ -319,32 +314,36 @@ class MainMenuPage(QWidget):
         settings_content = QWidget()
         settings_content.setStyleSheet("background: #2b2d31;")
         info_layout = QVBoxLayout(settings_content)
-        info_layout.setContentsMargins(15, 15, 15, 15)
-        info_layout.setSpacing(12)
+        info_layout.setContentsMargins(12, 12, 12, 12)
+        info_layout.setSpacing(8)
 
-        # 카메라 설정
+        # 상단 그리드: 카메라 + 단축키 (2열 구조)
+        from PySide6.QtWidgets import QGridLayout
+        grid = QGridLayout()
+        grid.setSpacing(8)
+
         lbl_cam = QLabel("연결된 카메라")
         lbl_cam.setStyleSheet("color: #dbdee1; font-weight: 600; font-size: 12px;")
-        info_layout.addWidget(lbl_cam)
-        self.combo_cam = QComboBox()
-        self.combo_cam.setMinimumHeight(36)
-        for idx, name in self.available_cameras:
-            self.combo_cam.addItem(f"[{idx}] {name}", idx)
-        info_layout.addWidget(self.combo_cam)
-
-        info_layout.addWidget(self._create_separator())
-
-        # 단축키 설정
         lbl_hotkey = QLabel("지정 단축키")
         lbl_hotkey.setStyleSheet("color: #dbdee1; font-weight: 600; font-size: 12px;")
-        info_layout.addWidget(lbl_hotkey)
+
+        grid.addWidget(lbl_cam, 0, 0)
+        grid.addWidget(lbl_hotkey, 0, 1)
+
+        self.combo_cam = QComboBox()
+        self.combo_cam.setMinimumHeight(32)
+        for idx, name in self.available_cameras:
+            self.combo_cam.addItem(f"[{idx}] {name}", idx)
+
         self.edit_hotkey = QKeySequenceEdit()
-        self.edit_hotkey.setMinimumHeight(36)
-        info_layout.addWidget(self.edit_hotkey)
+        self.edit_hotkey.setMinimumHeight(32)
 
-        info_layout.addWidget(self._create_separator())
+        grid.addWidget(self.combo_cam, 1, 0)
+        grid.addWidget(self.edit_hotkey, 1, 1)
 
-        # 배경 상태
+        info_layout.addLayout(grid)
+
+        # 배경 상태 (한 줄)
         self.lbl_bg_status = QLabel("배경 상태: 확인 중...")
         self.lbl_bg_status.setStyleSheet("font-size: 12px; color: #949ba4;")
         self.lbl_bg_status.setWordWrap(True)
@@ -352,18 +351,23 @@ class MainMenuPage(QWidget):
 
         info_layout.addWidget(self._create_separator())
 
-        # 구동 모드 선택
+        # 구동 모드 선택 (가로 배치)
+        mode_container = QWidget()
+        mode_layout = QVBoxLayout(mode_container)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(6)
+
         lbl_mode = QLabel("구동 모드 선택")
         lbl_mode.setStyleSheet("color: #dbdee1; font-weight: 600; font-size: 12px;")
-        info_layout.addWidget(lbl_mode)
+        mode_layout.addWidget(lbl_mode)
 
         self.mode_group = QButtonGroup(self)
 
-        self.rb_standard = QRadioButton("기본 (Standard)")
+        self.rb_standard = QRadioButton("기본")
         self.rb_standard.setStyleSheet("font-size: 12px;")
-        self.rb_high = QRadioButton("고정밀 (LoRA)")
+        self.rb_high = QRadioButton("고정밀")
         self.rb_high.setStyleSheet("font-size: 12px;")
-        self.rb_personal = QRadioButton("퍼스널 (Personal)")
+        self.rb_personal = QRadioButton("퍼스널")
         self.rb_personal.setStyleSheet("font-size: 12px;")
 
         self.mode_group.addButton(self.rb_standard, 0)
@@ -373,15 +377,19 @@ class MainMenuPage(QWidget):
         self.rb_standard.setChecked(True)
         self.mode_group.buttonClicked.connect(self._on_mode_changed)
 
-        info_layout.addWidget(self.rb_standard)
-        info_layout.addWidget(self.rb_high)
-        info_layout.addWidget(self.rb_personal)
+        radio_row = QHBoxLayout()
+        radio_row.setSpacing(12)
+        radio_row.addWidget(self.rb_standard)
+        radio_row.addWidget(self.rb_high)
+        radio_row.addWidget(self.rb_personal)
+        radio_row.addStretch()
+        mode_layout.addLayout(radio_row)
 
-        info_layout.addWidget(self._create_separator())
+        info_layout.addWidget(mode_container)
 
         # 설정 저장 버튼
         btn_save = QPushButton("설정 저장")
-        btn_save.setMinimumHeight(38)
+        btn_save.setMinimumHeight(32)
         btn_save.clicked.connect(self._save_current_settings)
         info_layout.addWidget(btn_save)
 
@@ -403,7 +411,7 @@ class MainMenuPage(QWidget):
 
         # === 하단: 액션 버튼 영역 ===
         action_area = QWidget()
-        action_area.setStyleSheet("background-color: #232428;")
+        action_area.setStyleSheet("background-color: #2b2d31;")
         action_layout = QVBoxLayout(action_area)
         action_layout.setContentsMargins(30, 20, 30, 25)
         action_layout.setSpacing(15)
@@ -427,11 +435,11 @@ class MainMenuPage(QWidget):
         broadcast_card = QWidget()
         broadcast_card.setStyleSheet("""
             QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #00D4DB, stop:1 #7B61FF);
-                border-radius: 16px;
+                background-color: #5865f2;
+                border-radius: 8px;
             }
             QWidget:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #00E5EC, stop:1 #8B71FF);
+                background-color: #4752c4;
             }
         """)
         broadcast_card.setCursor(Qt.PointingHandCursor)
@@ -460,11 +468,11 @@ class MainMenuPage(QWidget):
         studio_card = QWidget()
         studio_card.setStyleSheet("""
             QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FF6D00, stop:1 #FF9100);
-                border-radius: 16px;
+                background-color: #4e5058;
+                border-radius: 8px;
             }
             QWidget:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FF8F00, stop:1 #FFAB00);
+                background-color: #6d6f78;
             }
         """)
         studio_card.setCursor(Qt.PointingHandCursor)
@@ -575,8 +583,8 @@ class MainMenuPage(QWidget):
             self.rb_standard.setChecked(True)
             self.selected_mode = "STANDARD"
 
-        self.rb_personal.setText(f"퍼스널 {'[OK]' if can_personal else '[학습필요]'}")
-        self.rb_high.setText(f"고정밀 LoRA {'[OK]' if can_lora else '[학습필요]'}")
+        self.rb_personal.setText(f"퍼스널{'✓' if can_personal else ''}")
+        self.rb_high.setText(f"고정밀{'✓' if can_lora else ''}")
 
     def _on_mode_changed(self, btn):
         if btn == self.rb_standard: self.selected_mode = "STANDARD"

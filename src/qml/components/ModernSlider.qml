@@ -5,60 +5,37 @@ import "../styles"
 
 Item {
     id: root
-    implicitHeight: 52
-    implicitWidth: 280
+    implicitHeight: 36
+    implicitWidth: 200
 
-    // Properties
     property string label: "Parameter"
     property real value: 0.0
     property real from: 0.0
     property real to: 1.0
     property int precision: 2
+    property bool showPercentage: false
     property bool showLabel: true
 
-    // Signals (renamed to avoid conflict with property's auto-signal)
     signal sliderMoved(real newValue)
 
-    ColumnLayout {
+    RowLayout {
         anchors.fill: parent
-        spacing: 8
+        spacing: Theme.spacingMedium
 
-        // Top Row: Label + Value
-        RowLayout {
+        // Label
+        Text {
+            text: root.label
+            color: Theme.textNormal
+            font.pixelSize: Theme.fontSizeMedium
+            font.weight: Font.Normal
             Layout.fillWidth: true
             visible: root.showLabel
-
-            Text {
-                text: root.label
-                color: Qt.rgba(1, 1, 1, 0.55)
-                font.pixelSize: 12
-                font.weight: Font.Medium
-                font.letterSpacing: 0.3
-            }
-
-            Item { Layout.fillWidth: true }
-
-            Rectangle {
-                Layout.preferredWidth: 50
-                Layout.preferredHeight: 24
-                color: Qt.rgba(0, 212, 219, 0.08)
-                radius: 6
-
-                Text {
-                    anchors.centerIn: parent
-                    text: root.value.toFixed(root.precision)
-                    color: Theme.accentCyan
-                    font.pixelSize: 11
-                    font.weight: Font.DemiBold
-                    font.family: "Consolas, D2Coding, monospace"
-                }
-            }
         }
 
         // Slider
         Slider {
             id: slider
-            Layout.fillWidth: true
+            Layout.preferredWidth: 130
             from: root.from
             to: root.to
             value: root.value
@@ -73,51 +50,42 @@ Item {
                 x: slider.leftPadding
                 y: slider.topPadding + slider.availableHeight / 2 - height / 2
                 width: slider.availableWidth
-                height: 5
-                radius: 3
-                color: Qt.rgba(1, 1, 1, 0.06)
+                height: Theme.sliderHeight
+                radius: height / 2
+                color: Theme.bgModifierActive
 
-                // Gradient fill for the active portion
                 Rectangle {
                     width: slider.visualPosition * parent.width
                     height: parent.height
-                    radius: 3
-
-                    gradient: Gradient {
-                        orientation: Gradient.Horizontal
-                        GradientStop { position: 0.0; color: Theme.accentCyan }
-                        GradientStop { position: 1.0; color: Theme.accentPurple }
-                    }
+                    radius: height / 2
+                    color: Theme.blurple
                 }
             }
 
             handle: Rectangle {
                 x: slider.leftPadding + slider.visualPosition * (slider.availableWidth - width)
                 y: slider.topPadding + slider.availableHeight / 2 - height / 2
-                width: 16
-                height: 16
-                radius: 8
-                color: slider.pressed ? "#00BEC7" : (handleArea.containsMouse ? Theme.accentCyan : "#FFFFFF")
+                width: slider.pressed ? 14 : 10
+                height: width
+                radius: width / 2
+                color: "#ffffff"
 
-                Behavior on color {
-                    ColorAnimation { duration: Theme.animFast }
-                }
-
-                Behavior on scale {
-                    NumberAnimation { duration: 100; easing.type: Easing.OutQuad }
-                }
-
-                scale: slider.pressed ? 1.1 : (handleArea.containsMouse ? 1.05 : 1.0)
-
-                // Hover detection
-                MouseArea {
-                    id: handleArea
-                    anchors.fill: parent
-                    anchors.margins: -4
-                    hoverEnabled: true
-                    acceptedButtons: Qt.NoButton
+                Behavior on width {
+                    NumberAnimation { duration: Theme.animFast }
                 }
             }
+        }
+
+        // Value display
+        Text {
+            text: root.showPercentage
+                ? Math.round(root.value * 100) + "%"
+                : root.value.toFixed(root.precision)
+            color: Theme.textMuted
+            font.pixelSize: Theme.fontSizeSmall
+            font.weight: Font.Medium
+            Layout.preferredWidth: 40
+            horizontalAlignment: Text.AlignRight
         }
     }
 
