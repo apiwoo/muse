@@ -5,7 +5,7 @@ import "../styles"
 
 Item {
     id: root
-    implicitHeight: 36
+    implicitHeight: 48
     implicitWidth: 200
 
     property string label: "Parameter"
@@ -18,24 +18,39 @@ Item {
 
     signal sliderMoved(real newValue)
 
-    RowLayout {
+    ColumnLayout {
         anchors.fill: parent
-        spacing: Theme.spacingMedium
+        spacing: Theme.spacingXSmall
 
-        // Label
-        Text {
-            text: root.label
-            color: Theme.textNormal
-            font.pixelSize: Theme.fontSizeMedium
-            font.weight: Font.Normal
+        // Top row: Label and Value
+        RowLayout {
             Layout.fillWidth: true
             visible: root.showLabel
+
+            Text {
+                text: root.label
+                color: Theme.textNormal
+                font.pixelSize: Theme.fontSizeMedium
+                font.weight: Font.Normal
+                Layout.fillWidth: true
+            }
+
+            Text {
+                text: root.showPercentage
+                    ? Math.round(root.value * 100) + "%"
+                    : root.value.toFixed(root.precision)
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSizeSmall
+                font.weight: Font.Medium
+                horizontalAlignment: Text.AlignRight
+            }
         }
 
-        // Slider
+        // Slider (full width)
         Slider {
             id: slider
-            Layout.preferredWidth: 130
+            Layout.fillWidth: true
+            Layout.preferredHeight: 20
             from: root.from
             to: root.to
             value: root.value
@@ -65,7 +80,7 @@ Item {
             handle: Rectangle {
                 x: slider.leftPadding + slider.visualPosition * (slider.availableWidth - width)
                 y: slider.topPadding + slider.availableHeight / 2 - height / 2
-                width: slider.pressed ? 14 : 10
+                width: slider.pressed ? 16 : 14
                 height: width
                 radius: width / 2
                 color: "#ffffff"
@@ -74,18 +89,6 @@ Item {
                     NumberAnimation { duration: Theme.animFast }
                 }
             }
-        }
-
-        // Value display
-        Text {
-            text: root.showPercentage
-                ? Math.round(root.value * 100) + "%"
-                : root.value.toFixed(root.precision)
-            color: Theme.textMuted
-            font.pixelSize: Theme.fontSizeSmall
-            font.weight: Font.Medium
-            Layout.preferredWidth: 40
-            horizontalAlignment: Text.AlignRight
         }
     }
 

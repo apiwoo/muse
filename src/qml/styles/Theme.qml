@@ -97,7 +97,7 @@ QtObject {
     readonly property int buttonHeightMedium: 38
     readonly property int buttonHeightLarge: 44
     readonly property int inputHeight: 40
-    readonly property int sliderHeight: 8
+    readonly property int sliderHeight: 4
     readonly property int toggleWidth: 40
     readonly property int toggleHeight: 24
 }

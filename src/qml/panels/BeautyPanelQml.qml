@@ -110,7 +110,7 @@ Rectangle {
                 }
 
                 ModernSlider {
-                    label: "\uCF67\uBCBC \uC870\uC808"
+                    label: "콧볼 축소"
                     value: beautyBridge.noseSlim
                     Layout.fillWidth: true
                     onSliderMoved: beautyBridge.noseSlim = newValue
@@ -200,7 +200,7 @@ Rectangle {
                 ModernCheckBox {
                     text: "AI \uAD00\uC808 / \uB9C8\uC2A4\uD06C \uBCF4\uAE30"
                     checked: beautyBridge.showBodyDebug
-                    onToggled: beautyBridge.showBodyDebug = newValue
+                    onToggled: function(value) { beautyBridge.showBodyDebug = value }
                 }
             }
 

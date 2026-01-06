@@ -10,7 +10,7 @@ Item {
     property bool collapsed: false
     default property alias content: contentColumn.data
 
-    implicitHeight: collapsed ? titleHeight : titleHeight + Theme.spacingSmall + contentColumn.implicitHeight
+    implicitHeight: collapsed ? titleHeight : titleHeight + Theme.spacingMedium + contentColumn.implicitHeight
     implicitWidth: 280
 
     readonly property int titleHeight: root.title !== "" ? 18 : 0
@@ -59,22 +59,10 @@ Item {
         }
     }
 
-    // Divider line under title
-    Rectangle {
-        id: divider
-        anchors.top: titleContainer.bottom
-        anchors.topMargin: Theme.spacingXSmall
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 1
-        color: Theme.borderSubtle
-        visible: root.title !== ""
-    }
-
     // Content
     ColumnLayout {
         id: contentColumn
-        anchors.top: root.title !== "" ? divider.bottom : parent.top
+        anchors.top: root.title !== "" ? titleContainer.bottom : parent.top
         anchors.topMargin: root.title !== "" ? Theme.spacingMedium : 0
         anchors.left: parent.left
         anchors.right: parent.right
