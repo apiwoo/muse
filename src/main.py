@@ -6,6 +6,9 @@ import sys
 import os
 import signal
 
+# OpenGL 설정 - PySide6 import 전에 설정해야 함
+os.environ["QT_OPENGL"] = "desktop"
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QStackedWidget, QWidget, QVBoxLayout, QHBoxLayout, QPushButton
 )
@@ -244,15 +247,15 @@ class StudioContainer(QWidget):
         self.step_stack.setCurrentIndex(step_index)
         self.timeline.set_current_step(step_index)
 
+        # Step 3 설정 (녹화 페이지) - activate() 전에 setup_session() 호출
+        if step_index == 2 and self.selected_profile:
+            profile_dir = os.path.join(self.personal_data_dir, self.selected_profile)
+            self.step3.setup_session(self.selected_camera, self.selected_profile, profile_dir)
+
         # 새 페이지 활성화
         new_page = self.step_stack.currentWidget()
         if hasattr(new_page, 'activate'):
             new_page.activate()
-
-        # Step 3 설정 (녹화 페이지)
-        if step_index == 2 and self.selected_profile:
-            profile_dir = os.path.join(self.personal_data_dir, self.selected_profile)
-            self.step3.setup_session(self.selected_camera, self.selected_profile, profile_dir)
 
         self._update_nav_buttons()
 
@@ -530,6 +533,9 @@ class UnifiedMuseApp(FramelessMixin, QMainWindow):
 
 def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    # OpenGL 컨텍스트 공유 설정 (QApplication 생성 전에 설정)
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
     app = QApplication(sys.argv)
     qdarktheme.setup_theme("dark")

@@ -67,7 +67,10 @@ def main():
     for p in nvidia_paths:
         if 'cudnn' in p.lower() or 'torch' in p.lower() or 'libs' in p.lower():
             env['CUDNN_PATH'] = p
-            env['LD_LIBRARY_PATH'] = p 
+            env['LD_LIBRARY_PATH'] = p
+
+    # OpenGL 설정 - Qt가 D3D11 대신 OpenGL을 사용하도록 강제
+    env['QT_OPENGL'] = 'desktop'
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     main_script = os.path.join(project_root, "src", "main.py")

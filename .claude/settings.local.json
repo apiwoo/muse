@@ -14,7 +14,14 @@
       "Bash(ping:*)",
       "Bash(del \"c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\src\\\\ui\\\\home_menu.py\")",
       "Bash(del \"c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\nul\")",
-      "Bash(timeout 15 python:*)"
+      "Bash(timeout 15 python:*)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\recorded_data\" -Recurse)",
+      "Bash(Select-Object FullName)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(del \"\\\\?\\\\c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\nul\")",
+      "Bash(cmd.exe /c \"del \\\\?\\\\c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\nul\")",
+      "Bash(powershell.exe -Command \"Remove-Item -LiteralPath ''\\\\?\\\\c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\nul'' -Force\")",
+      "Bash(powershell.exe -Command \"Remove-Item -LiteralPath ''c:\\\\Users\\\\KKH\\\\Desktop\\\\muse\\\\nul'' -Force\")"
     ]
   }
 }

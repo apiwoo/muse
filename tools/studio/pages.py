@@ -116,6 +116,7 @@ class Step1_ProfileSelect(StudioPageBase):
         self.refresh_profiles()
 
     def refresh_profiles(self):
+        print(f"[Profile] refresh_profiles called, personal_data_dir={self.personal_data_dir}")
         # Clear existing
         for i in reversed(range(self.scroll_layout.count())):
             widget = self.scroll_layout.itemAt(i).widget()
@@ -149,8 +150,16 @@ class Step1_ProfileSelect(StudioPageBase):
                 profile_path = os.path.join(self.personal_data_dir, p_name)
 
                 # Check status
-                has_data = len(glob.glob(os.path.join(profile_path, "train_video_*.mp4"))) > 0
-                has_bg = os.path.exists(os.path.join(profile_path, "background.jpg"))
+                video_pattern = os.path.join(profile_path, "train_video_*.mp4")
+                video_files = glob.glob(video_pattern)
+                has_data = len(video_files) > 0
+                bg_path = os.path.join(profile_path, "background.jpg")
+                has_bg = os.path.exists(bg_path)
+
+                print(f"[Profile] {p_name}: path={profile_path}")
+                print(f"[Profile] {p_name}: video_pattern={video_pattern}")
+                print(f"[Profile] {p_name}: video_files found={len(video_files)}")
+                print(f"[Profile] {p_name}: has_data={has_data}, has_bg={has_bg}")
 
                 status = "준비됨" if (has_data and has_bg) else "설정 필요"
 
@@ -210,8 +219,11 @@ class Step1_ProfileSelect(StudioPageBase):
                 }}
             """)
 
-            status_color = "#00D4DB" if status == "준비됨" else "#f0b232"
-            card.setText(f"{icon_text}\n\n{name}\n<span style='color: {status_color}; font-size: 11px;'>{status}</span>")
+            # HTML 태그 제거 - 순수 텍스트만 사용
+            if status:
+                card.setText(f"{icon_text}\n\n{name}\n{status}")
+            else:
+                card.setText(f"{icon_text}\n\n{name}")
 
         return card
 
@@ -261,6 +273,8 @@ class Step2_CameraConnect(StudioPageBase):
         self.gl_widget = None
         self.preview_timer = None
         self.test_cap = None
+        self._gl_ready = False  # GL 초기화 완료 여부
+        self._pending_cam_idx = None  # GL 초기화 대기 중인 카메라 인덱스
         self._init_ui()
 
     def _init_ui(self):
@@ -297,6 +311,7 @@ class Step2_CameraConnect(StudioPageBase):
         preview_layout.setContentsMargins(0, 0, 0, 0)
 
         self.gl_widget = CameraGLWidget()
+        self.gl_widget.gl_ready.connect(self._on_gl_ready)
         self.gl_widget.setMinimumHeight(360)
         preview_layout.addWidget(self.gl_widget)
 
@@ -433,13 +448,40 @@ class Step2_CameraConnect(StudioPageBase):
         self.btn_connect.setText("연결")
         QMessageBox.warning(self, "연결 오류", msg)
 
+    def _on_gl_ready(self):
+        """OpenGL 초기화 완료 알림"""
+        print("[Studio] GL Widget Ready - OpenGL context initialized")
+        self._gl_ready = True
+
+        # 대기 중인 카메라가 있으면 타이머 시작
+        if self._pending_cam_idx is not None:
+            print(f"[Studio] Starting preview timer for pending camera {self._pending_cam_idx}")
+            self._start_preview_timer()
+            self._pending_cam_idx = None
+
     def _start_preview(self, cam_idx):
         """Start camera preview"""
+        print(f"[Studio] _start_preview({cam_idx}) called")
+
+        # 위젯 가시성 확보
+        if self.gl_widget and not self.gl_widget.isVisible():
+            self.gl_widget.show()
+
         self.test_cap = cv2.VideoCapture(cam_idx)
         if self.test_cap.isOpened():
             self.test_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             self.test_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            print(f"[Studio] Camera {cam_idx} opened successfully")
 
+            # QLabel 기반이므로 바로 타이머 시작
+            self._start_preview_timer()
+        else:
+            print(f"[Studio] Failed to open camera {cam_idx}")
+
+    def _start_preview_timer(self):
+        """프리뷰 타이머 시작"""
+        if self.test_cap and self.test_cap.isOpened():
+            print("[Studio] Starting preview timer (33ms interval)")
             self.preview_timer = QTimer()
             self.preview_timer.timeout.connect(self._update_preview)
             self.preview_timer.start(33)  # ~30fps
@@ -538,6 +580,12 @@ class RecorderWorker(QThread):
 
     def run(self):
         self.accumulated_time = self._calc_existing_duration(self.profile_dir)
+
+        # 기존 녹화 시간이 있으면 UI에 즉시 표시
+        if self.accumulated_time > 0:
+            print(f"[CAM] [Worker] Existing recordings found: {self.accumulated_time:.1f} seconds")
+            self.time_updated.emit(self.accumulated_time)
+            self.last_reported_int_time = int(self.accumulated_time)
 
         print(f"[CAM] [Worker] Opening Camera {self.cam_index} Native...")
         self.cap = cv2.VideoCapture(self.cam_index)
@@ -643,6 +691,8 @@ class Step3_DataRecording(StudioPageBase):
         self.last_rendered_id = -1
         self.has_background = False
         self.min_record_seconds = 60  # 최소 1분
+        self._gl_ready = False  # GL 초기화 완료 여부
+        self._pending_start_render = False  # 렌더 타이머 시작 대기 중
 
         self._init_ui()
 
@@ -653,6 +703,7 @@ class Step3_DataRecording(StudioPageBase):
 
         # Left: Camera preview
         self.gl_widget = CameraGLWidget()
+        self.gl_widget.gl_ready.connect(self._on_gl_ready)
         self.gl_widget.setMinimumSize(320, 240)
         self.gl_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.gl_widget, stretch=3)
@@ -756,18 +807,39 @@ class Step3_DataRecording(StudioPageBase):
         self.current_profile_dir = profile_dir
         self.last_rendered_id = -1
 
+        print(f"[Studio] Step3 setup_session: profile_dir={profile_dir}")
+
         # Check if background exists
         bg_path = os.path.join(profile_dir, "background.jpg")
         if os.path.exists(bg_path):
+            print(f"[Studio] Step3 Existing background found: {bg_path}")
             self._on_bg_captured(True)
         else:
+            print(f"[Studio] Step3 No background found at: {bg_path}")
             self.has_background = False
             self.lbl_bg_status.setText("배경 촬영 필요")
             self.lbl_bg_status.setStyleSheet("color: #FF5252; font-weight: bold; font-size: 14px; border: none;")
             self.btn_record.setEnabled(False)
 
+    def _on_gl_ready(self):
+        """OpenGL 초기화 완료 알림"""
+        print("[Studio] Step3 GL Widget Ready - OpenGL context initialized")
+        self._gl_ready = True
+
+        # 대기 중인 렌더 타이머가 있으면 시작
+        if self._pending_start_render:
+            print("[Studio] Step3 Starting render timer after GL ready")
+            self._start_render_timer()
+            self._pending_start_render = False
+
     def activate(self):
         super().activate()
+        print(f"[Studio] Step3 activate() called, profile_dir={self.current_profile_dir}")
+
+        # 위젯 가시성 확보
+        if self.gl_widget and not self.gl_widget.isVisible():
+            self.gl_widget.show()
+
         if self.current_profile_dir:
             # Start recorder thread
             self.recorder_thread = RecorderWorker(self.cam_index, self.current_profile_dir)
@@ -775,7 +847,20 @@ class Step3_DataRecording(StudioPageBase):
             self.recorder_thread.bg_status_updated.connect(self._on_bg_captured)
             self.recorder_thread.start()
 
-            # Start render timer
+            # QLabel 기반이므로 바로 렌더 타이머 시작
+            self._start_render_timer()
+        else:
+            print("[Studio] Step3 WARNING: current_profile_dir is empty!")
+
+    def _start_render_timer(self):
+        """렌더 타이머 시작"""
+        if self.recorder_thread:
+            print("[Studio] Step3 Starting render timer (16ms interval)")
+            # 중복 연결 방지
+            try:
+                self.render_timer.timeout.disconnect()
+            except:
+                pass
             self.render_timer.timeout.connect(self._update_view)
             self.render_timer.start(16)
 
@@ -792,12 +877,15 @@ class Step3_DataRecording(StudioPageBase):
 
         with QMutexLocker(self.recorder_thread.m_lock):
             if self.recorder_thread.m_frame is not None:
-                frame = self.recorder_thread.m_frame
+                frame = self.recorder_thread.m_frame.copy()  # 복사본 사용
                 curr_id = self.recorder_thread.m_frame_id
 
         if frame is not None and curr_id > self.last_rendered_id:
             self.gl_widget.render(frame)
             self.last_rendered_id = curr_id
+            # 디버그: 첫 프레임만 로그
+            if curr_id == 1:
+                print(f"[Studio] Step3 First frame rendered, shape={frame.shape}")
 
     def capture_background(self):
         if self.recorder_thread:
