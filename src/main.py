@@ -30,14 +30,14 @@ from ui.main_window import BroadcastPage
 from ui.titlebar import TitleBar
 from ui.frameless_base import FramelessMixin
 
-# Studio Pages (New 5-Step Structure)
+# Studio Pages (5-Step Structure: Profile → Record → Analyze → Preview → Train)
 from studio.pages import (
-    Step1_ProfileSelect, Step2_CameraConnect,
-    Step3_DataRecording, Step4_AiAnalysis, Step5_ModelTraining
+    Step1_ProfileSelect, Step3_DataRecording,
+    Step4_PreviewSelect, Step5_AiAnalysis, Step6_ModelTraining
 )
 from studio.timeline_widget import StudioTimeline
 from studio.settings_dialogs import (
-    Step1SettingsDialog, Step2SettingsDialog, Step3SettingsDialog,
+    Step1SettingsDialog, Step3SettingsDialog,
     Step4SettingsDialog, Step5SettingsDialog
 )
 
@@ -77,20 +77,20 @@ class StudioContainer(QWidget):
         self.step1 = Step1_ProfileSelect(self.personal_data_dir)
         self.step_stack.addWidget(self.step1)
 
-        # Step 2: 카메라 연결
-        self.step2 = Step2_CameraConnect()
+        # Step 2: 데이터 녹화 (카메라 자동 연결)
+        self.step2 = Step3_DataRecording(os.path.join(self.root_dir, "recorded_data"))
         self.step_stack.addWidget(self.step2)
 
-        # Step 3: 데이터 녹화
-        self.step3 = Step3_DataRecording(os.path.join(self.root_dir, "recorded_data"))
+        # Step 3: AI 분석 (프리뷰 생성)
+        self.step3 = Step5_AiAnalysis(self.root_dir)
         self.step_stack.addWidget(self.step3)
 
-        # Step 4: AI 분석
-        self.step4 = Step4_AiAnalysis(self.root_dir)
+        # Step 4: 프리뷰 선택
+        self.step4 = Step4_PreviewSelect(self.root_dir)
         self.step_stack.addWidget(self.step4)
 
         # Step 5: 모델 학습
-        self.step5 = Step5_ModelTraining(self.root_dir)
+        self.step5 = Step6_ModelTraining(self.root_dir)
         self.step_stack.addWidget(self.step5)
 
         layout.addWidget(self.step_stack, stretch=1)
@@ -191,23 +191,18 @@ class StudioContainer(QWidget):
         self.timeline.step_clicked.connect(self._on_timeline_step_clicked)
         self.timeline.settings_clicked.connect(self._on_settings_clicked)
 
-        # 스텝 완료 시그널
+        # 스텝 완료 시그널 (5단계)
         self.step1.step_completed.connect(lambda: self._on_step_completed(0))
         self.step1.profile_selected.connect(self._on_profile_selected)
 
-        self.step2.step_completed.connect(lambda: self._on_step_completed(1))
-        self.step2.camera_ready.connect(self._on_camera_ready)
-
-        self.step3.step_completed.connect(lambda: self._on_step_completed(2))
-        self.step4.step_completed.connect(lambda: self._on_step_completed(3))
-        self.step5.step_completed.connect(lambda: self._on_step_completed(4))
+        self.step2.step_completed.connect(lambda: self._on_step_completed(1))  # 녹화
+        self.step3.step_completed.connect(lambda: self._on_step_completed(2))  # 분석
+        self.step4.step_completed.connect(lambda: self._on_step_completed(3))  # 프리뷰
+        self.step5.step_completed.connect(lambda: self._on_step_completed(4))  # 학습
         self.step5.training_finished.connect(self._on_training_finished)
 
     def _on_profile_selected(self, profile_name):
         self.selected_profile = profile_name
-
-    def _on_camera_ready(self, cam_index):
-        self.selected_camera = cam_index
 
     def _on_step_completed(self, step_index):
         self.timeline.mark_step_completed(step_index)
@@ -219,21 +214,20 @@ class StudioContainer(QWidget):
             self._go_to_step(step_index)
 
     def _on_settings_clicked(self, step_index):
-        # 각 단계별 설정 다이얼로그 표시
+        # 각 단계별 설정 다이얼로그 표시 (5단계)
         if step_index == 0 and self.selected_profile:
             profile_path = os.path.join(self.personal_data_dir, self.selected_profile)
             dlg = Step1SettingsDialog(self.selected_profile, profile_path, self)
             dlg.exec()
-        elif step_index == 1:
-            dlg = Step2SettingsDialog([], self.selected_camera, parent=self)
-            dlg.exec()
-        elif step_index == 2:
+        elif step_index == 1:  # 녹화
             dlg = Step3SettingsDialog(parent=self)
             dlg.exec()
-        elif step_index == 3:
+        elif step_index == 2:  # 분석
             dlg = Step4SettingsDialog(parent=self)
             dlg.exec()
-        elif step_index == 4:
+        elif step_index == 3:  # 프리뷰
+            pass  # 프리뷰 설정 없음
+        elif step_index == 4:  # 학습
             dlg = Step5SettingsDialog(parent=self)
             dlg.exec()
 
@@ -247,10 +241,10 @@ class StudioContainer(QWidget):
         self.step_stack.setCurrentIndex(step_index)
         self.timeline.set_current_step(step_index)
 
-        # Step 3 설정 (녹화 페이지) - activate() 전에 setup_session() 호출
-        if step_index == 2 and self.selected_profile:
+        # Step 2 (녹화 페이지) - activate() 전에 setup_session() 호출
+        if step_index == 1 and self.selected_profile:
             profile_dir = os.path.join(self.personal_data_dir, self.selected_profile)
-            self.step3.setup_session(self.selected_camera, self.selected_profile, profile_dir)
+            self.step2.setup_session(self.selected_camera, self.selected_profile, profile_dir)
 
         # 새 페이지 활성화
         new_page = self.step_stack.currentWidget()
@@ -264,10 +258,13 @@ class StudioContainer(QWidget):
             self._go_to_step(self.current_step - 1)
 
     def _go_next(self):
-        if self.current_step < 4:
+        if self.current_step < 4:  # 5 steps total (0-4)
             # 현재 스텝 완료 체크
             current_page = self.step_stack.currentWidget()
             if hasattr(current_page, 'is_completed') and current_page.is_completed():
+                # Step 4 (프리뷰 선택) 완료 시 선택 저장
+                if self.current_step == 3 and hasattr(self.step4, 'save_selection'):
+                    self.step4.save_selection()
                 self._go_to_step(self.current_step + 1)
 
     def _on_home_clicked(self):
@@ -295,7 +292,7 @@ class StudioContainer(QWidget):
         current_page = self.step_stack.currentWidget()
         is_completed = hasattr(current_page, 'is_completed') and current_page.is_completed()
 
-        if self.current_step == 4:  # 마지막 단계
+        if self.current_step == 4:  # 마지막 단계 (Step 5: 학습)
             self.btn_next.setText("학습 시작")
             self.btn_next.setEnabled(True)
         else:

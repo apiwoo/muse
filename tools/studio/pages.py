@@ -963,9 +963,296 @@ class Step3_DataRecording(StudioPageBase):
 
 
 # ==============================================================================
-# [STEP 4] AI Analysis
+# [STEP 4] Preview Selection (NEW)
 # ==============================================================================
-class Step4_AiAnalysis(StudioPageBase):
+class Step4_PreviewSelect(StudioPageBase):
+    """Preview selection page - shows analysis previews and allows user to exclude bad ones"""
+    previews_confirmed = Signal(list)  # List of selected video names
+
+    def __init__(self, root_dir, parent=None):
+        super().__init__(parent)
+        self.root_dir = root_dir
+        self.selected_videos = []
+        self.checkboxes = {}
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(40, 30, 40, 30)
+        layout.setSpacing(15)
+
+        # Header
+        header = QVBoxLayout()
+        title = QLabel("프리뷰 확인")
+        title.setStyleSheet("font-size: 24px; font-weight: 700; color: white;")
+        title.setAlignment(Qt.AlignCenter)
+
+        subtitle = QLabel("분석 결과를 확인하고 품질이 좋지 않은 영상은 체크 해제하세요")
+        subtitle.setStyleSheet("font-size: 14px; color: #949ba4;")
+        subtitle.setAlignment(Qt.AlignCenter)
+
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        layout.addLayout(header)
+
+        # Status label
+        self.lbl_status = QLabel("프리뷰 로딩 중...")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        self.lbl_status.setStyleSheet("color: #00D4DB; font-size: 13px; font-weight: bold;")
+        layout.addWidget(self.lbl_status)
+
+        # Scroll area for preview grid
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid rgba(255, 255, 255, 0.06);
+                border-radius: 12px;
+                background-color: #2b2d31;
+            }
+            QScrollBar:vertical {
+                background: #2b2d31;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4e5058;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
+
+        self.grid_container = QWidget()
+        self.grid_layout = QGridLayout(self.grid_container)
+        self.grid_layout.setSpacing(15)
+        self.grid_layout.setContentsMargins(15, 15, 15, 15)
+        scroll.setWidget(self.grid_container)
+        layout.addWidget(scroll, stretch=1)
+
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+
+        self.btn_select_all = QPushButton("모두 선택")
+        self.btn_select_all.setStyleSheet("""
+            QPushButton {
+                background-color: #4e5058;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #5c5f66; }
+        """)
+        self.btn_select_all.clicked.connect(self._select_all)
+        btn_layout.addWidget(self.btn_select_all)
+
+        self.btn_deselect_all = QPushButton("모두 해제")
+        self.btn_deselect_all.setStyleSheet("""
+            QPushButton {
+                background-color: #4e5058;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #5c5f66; }
+        """)
+        self.btn_deselect_all.clicked.connect(self._deselect_all)
+        btn_layout.addWidget(self.btn_deselect_all)
+
+        btn_layout.addStretch()
+
+        self.lbl_selected_count = QLabel("선택: 0/0")
+        self.lbl_selected_count.setStyleSheet("color: #949ba4; font-size: 13px;")
+        btn_layout.addWidget(self.lbl_selected_count)
+
+        layout.addLayout(btn_layout)
+
+        # Progress bar for preview generation (hidden by default)
+        self.pbar = QProgressBar()
+        self.pbar.setFormat("%p%")
+        self.pbar.setAlignment(Qt.AlignCenter)
+        self.pbar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background-color: #4e5058;
+                border-radius: 4px;
+                height: 20px;
+                text-align: center;
+                color: white;
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: #5865f2;
+                border-radius: 4px;
+            }
+        """)
+        self.pbar.hide()
+        layout.addWidget(self.pbar)
+
+    def activate(self):
+        super().activate()
+        # 분석 단계에서 이미 프리뷰가 생성되어 있으므로 바로 로드
+        QTimer.singleShot(100, self._load_previews)
+
+    def _load_previews(self):
+        """Load preview images from all profiles"""
+        # Clear existing
+        for i in reversed(range(self.grid_layout.count())):
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+        self.checkboxes.clear()
+
+        # Find all preview images
+        data_root = os.path.join(self.root_dir, "recorded_data", "personal_data")
+        if not os.path.exists(data_root):
+            self.lbl_status.setText("데이터 폴더가 없습니다")
+            return
+
+        profiles = [d for d in os.listdir(data_root)
+                    if os.path.isdir(os.path.join(data_root, d))]
+
+        all_previews = []
+        for profile in profiles:
+            preview_dir = os.path.join(data_root, profile, "previews")
+            if os.path.exists(preview_dir):
+                for img_file in sorted(os.listdir(preview_dir)):
+                    if img_file.endswith(".jpg"):
+                        all_previews.append({
+                            "profile": profile,
+                            "path": os.path.join(preview_dir, img_file),
+                            "video_name": img_file.replace(".jpg", "")
+                        })
+
+        if not all_previews:
+            self.lbl_status.setText("프리뷰 이미지가 없습니다. 먼저 녹화를 진행하세요.")
+            return
+
+        self.lbl_status.setText(f"총 {len(all_previews)}개의 영상 프리뷰")
+
+        # Add to grid (4 columns)
+        cols = 4
+        for idx, preview_info in enumerate(all_previews):
+            row = idx // cols
+            col = idx % cols
+
+            item_widget = self._create_preview_item(preview_info)
+            self.grid_layout.addWidget(item_widget, row, col)
+
+        self._update_selected_count()
+        self._is_completed = True
+        self.step_completed.emit()
+
+    def _create_preview_item(self, preview_info):
+        """Create a preview item widget with checkbox"""
+        container = QFrame()
+        container.setStyleSheet("""
+            QFrame {
+                background-color: #1e1f22;
+                border-radius: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.06);
+            }
+            QFrame:hover {
+                border: 1px solid rgba(0, 212, 219, 0.5);
+            }
+        """)
+
+        item_layout = QVBoxLayout(container)
+        item_layout.setContentsMargins(8, 8, 8, 8)
+        item_layout.setSpacing(8)
+
+        # Preview image
+        img_label = QLabel()
+        img_label.setFixedSize(200, 112)  # 16:9 aspect ratio
+        img_label.setAlignment(Qt.AlignCenter)
+        img_label.setStyleSheet("border-radius: 4px;")
+
+        # Load and scale image
+        pixmap = QPixmap(preview_info["path"])
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(200, 112, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            img_label.setPixmap(scaled)
+        else:
+            img_label.setText("이미지 로드 실패")
+            img_label.setStyleSheet("color: #949ba4; font-size: 11px;")
+
+        item_layout.addWidget(img_label)
+
+        # Checkbox with video name
+        checkbox = QCheckBox(preview_info["video_name"][:20] + "...")
+        checkbox.setChecked(True)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #dbdee1;
+                font-size: 11px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #4e5058;
+                background: #2b2d31;
+            }
+            QCheckBox::indicator:checked {
+                background: #5865f2;
+                border: 1px solid #5865f2;
+            }
+            QCheckBox::indicator:hover {
+                border: 1px solid #5865f2;
+            }
+        """)
+        checkbox.setToolTip(preview_info["video_name"])
+        checkbox.stateChanged.connect(self._update_selected_count)
+
+        video_key = f"{preview_info['profile']}|{preview_info['video_name']}"
+        self.checkboxes[video_key] = checkbox
+
+        item_layout.addWidget(checkbox)
+
+        return container
+
+    def _select_all(self):
+        for cb in self.checkboxes.values():
+            cb.setChecked(True)
+
+    def _deselect_all(self):
+        for cb in self.checkboxes.values():
+            cb.setChecked(False)
+
+    def _update_selected_count(self):
+        total = len(self.checkboxes)
+        selected = sum(1 for cb in self.checkboxes.values() if cb.isChecked())
+        self.lbl_selected_count.setText(f"선택: {selected}/{total}")
+
+    def get_selected_videos(self):
+        """Return list of selected video names (profile|video_name format)"""
+        return [key for key, cb in self.checkboxes.items() if cb.isChecked()]
+
+    def save_selection(self):
+        """Save selection to a JSON file for the analysis step"""
+        selected = self.get_selected_videos()
+        selection_file = os.path.join(self.root_dir, "recorded_data", "personal_data", "selected_videos.json")
+
+        import json
+        with open(selection_file, "w", encoding="utf-8") as f:
+            json.dump(selected, f, ensure_ascii=False, indent=2)
+
+        self.previews_confirmed.emit(selected)
+        return selected
+
+
+# ==============================================================================
+# [STEP 5] AI Analysis (Renamed from Step 4)
+# ==============================================================================
+class Step5_AiAnalysis(StudioPageBase):
     """AI analysis page (auto-processing)"""
 
     def __init__(self, root_dir, parent=None):
@@ -1098,9 +1385,9 @@ class Step4_AiAnalysis(StudioPageBase):
 
 
 # ==============================================================================
-# [STEP 5] Model Training
+# [STEP 6] Model Training (Renamed from Step 5)
 # ==============================================================================
-class Step5_ModelTraining(StudioPageBase):
+class Step6_ModelTraining(StudioPageBase):
     """Model training page"""
     training_finished = Signal()
 
@@ -1299,4 +1586,4 @@ class Step5_ModelTraining(StudioPageBase):
 Page1_ProfileSelect = Step1_ProfileSelect
 Page2_CameraConnect = Step2_CameraConnect
 Page3_DataCollection = Step3_DataRecording
-Page4_AiTraining = Step5_ModelTraining
+Page4_AiTraining = Step6_ModelTraining

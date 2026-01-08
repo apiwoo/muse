@@ -220,7 +220,7 @@ class StudioTimeline(QWidget):
     step_clicked = Signal(int)
     settings_clicked = Signal(int)
 
-    STEP_LABELS = ["프로필", "카메라", "녹화", "분석", "학습"]
+    STEP_LABELS = ["프로필", "녹화", "분석", "프리뷰", "학습"]
 
     def __init__(self, parent=None):
         super().__init__(parent)
