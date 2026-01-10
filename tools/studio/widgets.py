@@ -147,7 +147,7 @@ class NewProfileDialog(FramelessMixin, QDialog):
         # [Custom Titlebar] Frameless 다이얼로그 설정
         self.setup_frameless_dialog()
 
-        self.setWindowTitle("새 프로파일")
+        self.setWindowTitle("프로필 만들기")
         self.resize(400, 220)
         # [Discord Style] 색상 팔레트
         self.setStyleSheet("""
@@ -160,15 +160,16 @@ class NewProfileDialog(FramelessMixin, QDialog):
                 font-size: 13px;
             }
             QLineEdit {
-                padding: 10px;
-                border-radius: 4px;
-                border: none;
-                background: #383a40;
+                padding: 12px 14px;
+                border-radius: 6px;
+                border: 1px solid #4e5058;
+                background: #2b2d31;
                 color: #dbdee1;
                 font-size: 14px;
             }
             QLineEdit:focus {
-                outline: 2px solid #5865f2;
+                border: 1px solid #5865f2;
+                background: #2b2d31;
             }
             QPushButton {
                 padding: 10px;
@@ -184,7 +185,7 @@ class NewProfileDialog(FramelessMixin, QDialog):
         outer_layout.setSpacing(0)
 
         # 1. 커스텀 타이틀바
-        self.titlebar = DialogTitleBar(self, title="새 프로파일")
+        self.titlebar = DialogTitleBar(self, title="프로필 만들기")
         outer_layout.addWidget(self.titlebar)
 
         # 2. 컨텐츠 영역
@@ -194,9 +195,10 @@ class NewProfileDialog(FramelessMixin, QDialog):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        layout.addWidget(QLabel("새 프로파일 이름 입력 (예: side_cam)"))
+        layout.addWidget(QLabel("프로필 이름을 입력하세요"))
 
         self.input_name = QLineEdit()
+        self.input_name.setPlaceholderText("예: front, side_cam")
         layout.addWidget(self.input_name)
 
         btn_box = QHBoxLayout()
