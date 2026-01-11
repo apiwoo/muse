@@ -56,10 +56,25 @@ hidden_imports = [
     # Scientific computing
     'numpy',
     'cupy',
+    'cupyx',
+    'cupyx.scipy',
+    'cupyx.scipy.ndimage',
+    'fastrlock',
+    'scipy',
+    'scipy.ndimage',
 
     # ONNX
     'onnx',
     'onnxruntime',
+
+    # UI/Theme
+    'qdarktheme',
+
+    # Virtual camera
+    'pyvirtualcam',
+
+    # Progress bar
+    'tqdm',
 
     # Our own modules
     'setup',
@@ -70,12 +85,23 @@ hidden_imports = [
     'utils.cuda_helper',
     'graphics',
     'core',
+    'ai',
+    'studio',
+    'bridge',
 ]
 
 # Collect all submodules for packages that have many internal imports
 hidden_imports += collect_submodules('PySide6')
 hidden_imports += collect_submodules('torch')
 hidden_imports += collect_submodules('cv2')
+hidden_imports += collect_submodules('cupy')
+hidden_imports += collect_submodules('cupy_backends')
+hidden_imports += collect_submodules('cupyx')
+hidden_imports += collect_submodules('fastrlock')
+hidden_imports += collect_submodules('scipy')
+hidden_imports += collect_submodules('mediapipe')
+hidden_imports += collect_submodules('qdarktheme')
+hidden_imports += collect_submodules('tqdm')
 
 # Data files to include
 datas = [
@@ -89,10 +115,16 @@ datas = [
 # Collect PySide6 data files (plugins, translations, etc.)
 datas += collect_data_files('PySide6')
 
+# Collect qdarktheme data files (theme stylesheets)
+datas += collect_data_files('qdarktheme')
+
+# Collect mediapipe data files (models)
+datas += collect_data_files('mediapipe')
+
 # Binary files (none explicitly - DLLs are in libs folder which is copied separately)
 binaries = []
 
-# Packages/modules to exclude (reduce size)
+# Packages/modules to exclude (reduce size) - be conservative!
 excludes = [
     # GUI frameworks we don't use
     'tkinter',
@@ -110,7 +142,7 @@ excludes = [
     'PyQt5.QtWidgets',
     'PyQt5.sip',
 
-    # Jupyter/IPython
+    # Jupyter/IPython (definitely not needed)
     'IPython',
     'jupyter',
     'jupyter_client',
@@ -118,23 +150,14 @@ excludes = [
     'ipykernel',
     'notebook',
 
-    # Matplotlib (not needed at runtime)
-    'matplotlib',
-    'matplotlib.pyplot',
-
     # Testing frameworks
     'pytest',
-    'unittest',
 
     # Development tools
     'sphinx',
     'docutils',
     'pylint',
     'mypy',
-
-    # Unused data science packages
-    'pandas',
-    'scipy.spatial.cKDTree',
 ]
 
 # Analysis

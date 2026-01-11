@@ -21,8 +21,14 @@ def setup_cuda_environment():
     dll_dirs = set()
     
     # [Custom Fix] Add local 'libs'
-    current_file = os.path.abspath(__file__)
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+    if getattr(sys, 'frozen', False):
+        # PyInstaller frozen mode: libs is at executable's parent directory
+        project_root = os.path.dirname(sys.executable)
+    else:
+        # Development mode: calculate from file location
+        current_file = os.path.abspath(__file__)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+
     local_lib_path = os.path.join(project_root, "libs")
     
     if os.path.exists(local_lib_path):
