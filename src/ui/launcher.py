@@ -103,25 +103,53 @@ class MainMenuPage(QWidget):
             }
             QPushButton {
                 background-color: #4e5058;
-                border: none;
+                border: 2px solid #6d6f78;
                 padding: 10px 16px;
                 color: #ffffff;
-                border-radius: 3px;
-                font-weight: 500;
+                border-radius: 6px;
+                font-weight: 600;
                 font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #6d6f78;
+                border-color: #82858f;
             }
             QPushButton:pressed {
                 background-color: #4e5058;
+                border-color: #6d6f78;
+            }
+            QPushButton#Primary {
+                background-color: #23a55a;
+                border: 2px solid #2dc770;
+            }
+            QPushButton#Primary:hover {
+                background-color: #1e8e4c;
+                border-color: #23a55a;
+            }
+            QPushButton#Primary:pressed {
+                background-color: #1a7d42;
+            }
+            QPushButton#Save {
+                background-color: #5865f2;
+                border: 2px solid #7289da;
+            }
+            QPushButton#Save:hover {
+                background-color: #4752c4;
+                border-color: #5865f2;
+            }
+            QPushButton#Save:pressed {
+                background-color: #3c45a5;
             }
             QPushButton#Danger {
                 background-color: #da373c;
-                border: none;
+                border: 2px solid #ed4245;
             }
             QPushButton#Danger:hover {
                 background-color: #a12d2f;
+                border-color: #da373c;
+            }
+            QPushButton#Danger:pressed {
+                background-color: #8b2527;
             }
             QRadioButton {
                 color: #dbdee1;
@@ -197,7 +225,7 @@ class MainMenuPage(QWidget):
             except: pass
         if not cams:
             for i in range(5):
-                cams.append((i, f"Camera Device {i}"))
+                cams.append((i, f"카메라 장치 {i}"))
         return cams
 
     def _init_ui(self):
@@ -223,7 +251,7 @@ class MainMenuPage(QWidget):
         """)
         title_layout.addWidget(lbl_title)
 
-        lbl_subtitle = QLabel("AI 실시간 방송 시스템 v5.3")
+        lbl_subtitle = QLabel("AI 실시간 보정 시스템 v1.0")
         lbl_subtitle.setAlignment(Qt.AlignCenter)
         lbl_subtitle.setStyleSheet("color: #949ba4; font-size: 12px;")
         title_layout.addWidget(lbl_subtitle)
@@ -260,7 +288,9 @@ class MainMenuPage(QWidget):
         self.input_new_hotkey.setKeySequence(QKeySequence(""))
         hk_layout.addWidget(self.input_new_hotkey)
 
-        btn_create = QPushButton("생성")
+        btn_create = QPushButton("+ 프로필 생성")
+        btn_create.setObjectName("Primary")
+        btn_create.setMinimumHeight(38)
         btn_create.clicked.connect(self._create_profile)
 
         create_layout.addWidget(self.input_new_name)
@@ -390,7 +420,8 @@ class MainMenuPage(QWidget):
 
         # 설정 저장 버튼
         btn_save = QPushButton("설정 저장")
-        btn_save.setMinimumHeight(32)
+        btn_save.setObjectName("Save")
+        btn_save.setMinimumHeight(38)
         btn_save.clicked.connect(self._save_current_settings)
         info_layout.addWidget(btn_save)
 
@@ -402,7 +433,7 @@ class MainMenuPage(QWidget):
         # 프로필 삭제 버튼
         btn_delete = QPushButton("프로필 삭제")
         btn_delete.setObjectName("Danger")
-        btn_delete.setMinimumHeight(38)
+        btn_delete.setMinimumHeight(42)
         btn_delete.clicked.connect(self._delete_profile)
         right_panel.addWidget(btn_delete)
 
@@ -437,10 +468,12 @@ class MainMenuPage(QWidget):
         broadcast_card.setStyleSheet("""
             QWidget {
                 background-color: #5865f2;
+                border: 2px solid #7289da;
                 border-radius: 8px;
             }
             QWidget:hover {
                 background-color: #4752c4;
+                border-color: #5865f2;
             }
         """)
         broadcast_card.setCursor(Qt.PointingHandCursor)
@@ -470,10 +503,12 @@ class MainMenuPage(QWidget):
         studio_card.setStyleSheet("""
             QWidget {
                 background-color: #4e5058;
+                border: 2px solid #6d6f78;
                 border-radius: 8px;
             }
             QWidget:hover {
                 background-color: #6d6f78;
+                border-color: #82858f;
             }
         """)
         studio_card.setCursor(Qt.PointingHandCursor)
@@ -516,12 +551,12 @@ class MainMenuPage(QWidget):
             can_lora = self._check_lora(p)
 
             tags = []
-            if can_personal: tags.append("Personal")
-            if can_lora: tags.append("LoRA")
+            if can_personal: tags.append("퍼스널")
+            if can_lora: tags.append("고정밀")
 
-            tag_str = f"[{'|'.join(tags)}]" if tags else "[Standard]"
+            tag_str = f"[{'|'.join(tags)}]" if tags else "[기본]"
 
-            item_text = f"{tag_str}  {p.upper()}  (Key: {hotkey})"
+            item_text = f"{tag_str}  {p.upper()}  (단축키: {hotkey})"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, p)
 
