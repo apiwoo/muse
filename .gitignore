@@ -80,3 +80,16 @@ core_source_code_folder/
 images/
 masks/
 labels/
+========================
+
+[PyInstaller] Build Outputs
+
+배포 빌드 결과물 (용량이 매우 큼)
+
+========================
+
+build/
+dist/
+distribution/
+*.manifest
+*.spec.bak
