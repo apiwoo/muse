@@ -15,6 +15,7 @@ from PySide6.QtCore import QThread, Signal, Slot, QMutex, QMutexLocker
 
 # [MUSE Modules]
 from utils.config import ProfileManager
+from utils.cuda_helper import get_project_root
 from core.input_manager import InputManager
 from core.virtual_cam import VirtualCamera
 from ai.consensus_engine import ConsensusEngine
@@ -53,8 +54,8 @@ class BeautyWorker(QThread):
         self.WIDTH = 1920
         self.HEIGHT = 1080
         self.FPS = 30
-        
-        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        self.root_dir = get_project_root()
         
         self.pending_profile_index = -1
         self.pending_bg_capture = False

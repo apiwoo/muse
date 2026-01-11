@@ -121,6 +121,9 @@ datas += collect_data_files('qdarktheme')
 # Collect mediapipe data files (models)
 datas += collect_data_files('mediapipe')
 
+# Collect CuPy data files (include headers for JIT compilation)
+datas += collect_data_files('cupy')
+
 # Binary files (none explicitly - DLLs are in libs folder which is copied separately)
 binaries = []
 
@@ -233,7 +236,7 @@ exe = EXE(
     upx=False,
 
     # Console window (True for debugging, False for release)
-    console=True,
+    console=False,
 
     # Windows options
     disable_windowed_traceback=False,

@@ -46,6 +46,7 @@ from graphics.kernels.cuda_kernels import (
     FORWARD_MASK_VOID_FILL_KERNEL_CODE,
 )
 from graphics.processors.morph_logic import MorphLogic
+from utils.cuda_helper import get_project_root
 
 try:
     import cupy as cp
@@ -140,7 +141,7 @@ class BeautyEngine:
         self.mask_manager = MaskManager()
 
         # Paths
-        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.root_dir = get_project_root()
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
 
         # V29/V31: High-Fidelity processing buffers (원본 해상도, 다운스케일 제거)

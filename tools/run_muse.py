@@ -1,4 +1,5 @@
 # Project MUSE - run_muse.py
+# Main launcher with first-run TensorRT engine build support
 # (C) 2025 MUSE Corp. All rights reserved.
 
 import os
@@ -6,6 +7,11 @@ import sys
 import glob
 import subprocess
 import site
+
+# Add src directory to path for imports
+_current_file = os.path.abspath(__file__)
+_project_root = os.path.dirname(os.path.dirname(_current_file))
+sys.path.insert(0, os.path.join(_project_root, "src"))
 
 def find_nvidia_dll_paths():
     """
@@ -74,7 +80,47 @@ def main():
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     main_script = os.path.join(project_root, "src", "main.py")
-    
+
+    # === First Run Check: TensorRT Engine Build ===
+    try:
+        from setup.first_run_builder import FirstRunBuilder
+
+        builder = FirstRunBuilder(project_root)
+
+        if not builder.check_engines_exist():
+            print("-" * 60)
+            print("[FIRST RUN] TensorRT engine build required.")
+            print("[FIRST RUN] Launching setup wizard...")
+            print("-" * 60)
+
+            # Import PySide6 for UI
+            from PySide6.QtWidgets import QApplication
+            from ui.setup_wizard import SetupWizardDialog
+
+            # Create Qt application
+            app = QApplication(sys.argv)
+
+            # Show setup wizard
+            dialog = SetupWizardDialog(builder)
+            dialog.exec()
+
+            if not dialog.build_success:
+                print("[ERROR] Engine build failed. Exiting.")
+                sys.exit(1)
+
+            # Clean up Qt application
+            app.quit()
+            del app
+
+            print("[FIRST RUN] Engine build complete. Starting main application...")
+    except ImportError as e:
+        # If setup module not available, skip first-run check
+        print(f"[WARNING] First-run check skipped: {e}")
+    except Exception as e:
+        print(f"[WARNING] First-run check error: {e}")
+        # Continue anyway - main app might still work
+
+    # === Launch Main Application ===
     print("-" * 60)
     print(f"[START] Launching MUSE: {main_script}")
     print("-" * 60)

@@ -21,6 +21,7 @@ except ImportError:
     HAS_PYGRABBER = False
 
 from utils.config import ProfileManager
+from utils.cuda_helper import get_project_root
 
 
 class MainMenuPage(QWidget):
@@ -171,7 +172,7 @@ class MainMenuPage(QWidget):
         self.selected_mode = "STANDARD"
         self.available_cameras = self._scan_cameras()
 
-        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.root_dir = get_project_root()
         self.model_dir = os.path.join(self.root_dir, "assets", "models", "personal")
 
         self._init_ui()

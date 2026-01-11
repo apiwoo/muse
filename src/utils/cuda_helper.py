@@ -6,6 +6,27 @@ import sys
 import platform
 import glob
 
+
+def get_project_root():
+    """
+    Get the project root directory.
+
+    Handles both PyInstaller frozen mode and development mode.
+    In frozen mode, returns the directory containing MUSE.exe.
+    In development mode, returns the muse/ project directory.
+
+    Returns:
+        str: Path to the project root directory
+    """
+    if getattr(sys, 'frozen', False):
+        # PyInstaller frozen mode: root is where MUSE.exe is located
+        return os.path.dirname(sys.executable)
+    else:
+        # Development mode: this file is in src/utils/, so go up 3 levels
+        current_file = os.path.abspath(__file__)
+        return os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+
+
 def setup_cuda_environment():
     """
     [Core] Resolve Windows DLL Loading Issues.
@@ -21,14 +42,7 @@ def setup_cuda_environment():
     dll_dirs = set()
     
     # [Custom Fix] Add local 'libs'
-    if getattr(sys, 'frozen', False):
-        # PyInstaller frozen mode: libs is at executable's parent directory
-        project_root = os.path.dirname(sys.executable)
-    else:
-        # Development mode: calculate from file location
-        current_file = os.path.abspath(__file__)
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-
+    project_root = get_project_root()
     local_lib_path = os.path.join(project_root, "libs")
     
     if os.path.exists(local_lib_path):

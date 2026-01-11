@@ -13,10 +13,10 @@ import gc
 # Windows DLL Path Fix
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 try:
-    from utils.cuda_helper import setup_cuda_environment
+    from utils.cuda_helper import setup_cuda_environment, get_project_root
     setup_cuda_environment()
 except ImportError:
-    pass
+    get_project_root = None
 
 class VitPoseTrt:
     # [Modified] Default Path set to 'vitpose_huge.engine'
@@ -29,7 +29,10 @@ class VitPoseTrt:
         """
         if engine_path is None:
             # Auto-detect path relative to this file
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            if get_project_root:
+                root_dir = get_project_root()
+            else:
+                root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
             engine_path = os.path.join(root_dir, "assets/models/tracking/vitpose_huge.engine")
 
         if not os.path.exists(engine_path):

@@ -8,10 +8,12 @@ import json
 import glob
 import shutil
 
+from utils.cuda_helper import get_project_root
+
 
 class ProfileManager:
     def __init__(self):
-        self.root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.root_dir = get_project_root()
         self.data_dir = os.path.join(self.root_dir, "recorded_data", "personal_data")
         self.profiles = {}
 

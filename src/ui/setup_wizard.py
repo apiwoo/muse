@@ -3,11 +3,30 @@
 # Shows TensorRT engine build progress on first run
 # (C) 2025 MUSE Corp. All rights reserved.
 
+import os
+import sys
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QWidget
 )
 from PySide6.QtCore import Qt, Signal, QThread, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
+
+# Import get_project_root for consistent path resolution
+try:
+    from utils.cuda_helper import get_project_root
+except ImportError:
+    # Fallback for standalone testing
+    def get_project_root():
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        else:
+            return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def get_icon_path():
+    """Get the path to the application icon."""
+    return os.path.join(get_project_root(), "assets", "icon.ico")
 
 
 class BuildWorker(QThread):
@@ -85,6 +104,11 @@ class SetupWizardDialog(QDialog):
         self.setWindowTitle("PROJECT MUSE - Initial Setup")
         self.setFixedSize(550, 350)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        # Set window icon
+        icon_path = get_icon_path()
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # Main layout
         layout = QVBoxLayout(self)
@@ -305,8 +329,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
 
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    builder = FirstRunBuilder(project_root)
+    builder = FirstRunBuilder(get_project_root())
 
     dialog = SetupWizardDialog(builder)
     dialog.show()
